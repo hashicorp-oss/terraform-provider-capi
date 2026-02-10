@@ -1,3 +1,3 @@
-provider "scaffolding" {
+provider "capi" {
   # example configuration here
 }

@@ -1,0 +1,1 @@
+terraform import capi_example.test "id-123"
