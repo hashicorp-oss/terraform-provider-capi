@@ -36,23 +36,23 @@ type ClusterResource struct {
 
 // ClusterResourceModel describes the resource data model.
 type ClusterResourceModel struct {
-	Name                  types.String `tfsdk:"name"`
-	KubeconfigPath        types.String `tfsdk:"kubeconfig_path"`
-	ManagementKubeconfig  types.String `tfsdk:"management_kubeconfig"`
-	SkipInit              types.Bool   `tfsdk:"skip_init"`
-	WaitForReady          types.Bool   `tfsdk:"wait_for_ready"`
-	InfrastructureProvider types.String `tfsdk:"infrastructure_provider"`
-	BootstrapProvider     types.String `tfsdk:"bootstrap_provider"`
-	ControlPlaneProvider  types.String `tfsdk:"control_plane_provider"`
-	CoreProvider          types.String `tfsdk:"core_provider"`
-	TargetNamespace       types.String `tfsdk:"target_namespace"`
-	KubernetesVersion     types.String `tfsdk:"kubernetes_version"`
-	ControlPlaneMachineCount types.Int64 `tfsdk:"control_plane_machine_count"`
-	WorkerMachineCount    types.Int64  `tfsdk:"worker_machine_count"`
-	Flavor                types.String `tfsdk:"flavor"`
-	Id                    types.String `tfsdk:"id"`
-	Endpoint              types.String `tfsdk:"endpoint"`
-	ClusterCACertificate  types.String `tfsdk:"cluster_ca_certificate"`
+	Name                     types.String `tfsdk:"name"`
+	KubeconfigPath           types.String `tfsdk:"kubeconfig_path"`
+	ManagementKubeconfig     types.String `tfsdk:"management_kubeconfig"`
+	SkipInit                 types.Bool   `tfsdk:"skip_init"`
+	WaitForReady             types.Bool   `tfsdk:"wait_for_ready"`
+	InfrastructureProvider   types.String `tfsdk:"infrastructure_provider"`
+	BootstrapProvider        types.String `tfsdk:"bootstrap_provider"`
+	ControlPlaneProvider     types.String `tfsdk:"control_plane_provider"`
+	CoreProvider             types.String `tfsdk:"core_provider"`
+	TargetNamespace          types.String `tfsdk:"target_namespace"`
+	KubernetesVersion        types.String `tfsdk:"kubernetes_version"`
+	ControlPlaneMachineCount types.Int64  `tfsdk:"control_plane_machine_count"`
+	WorkerMachineCount       types.Int64  `tfsdk:"worker_machine_count"`
+	Flavor                   types.String `tfsdk:"flavor"`
+	Id                       types.String `tfsdk:"id"`
+	Endpoint                 types.String `tfsdk:"endpoint"`
+	ClusterCACertificate     types.String `tfsdk:"cluster_ca_certificate"`
 }
 
 func (r *ClusterResource) Metadata(ctx context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
@@ -185,7 +185,7 @@ func (r *ClusterResource) Create(ctx context.Context, req resource.CreateRequest
 	// Initialize management cluster if not skipped
 	if !data.SkipInit.ValueBool() {
 		tflog.Info(ctx, "Initializing management cluster")
-		
+
 		initOpts := clusterctlclient.InitOptions{
 			Kubeconfig: clusterctlclient.Kubeconfig{
 				Path: data.ManagementKubeconfig.ValueString(),
@@ -196,15 +196,15 @@ func (r *ClusterResource) Create(ctx context.Context, req resource.CreateRequest
 		if !data.CoreProvider.IsNull() && data.CoreProvider.ValueString() != "" {
 			initOpts.CoreProvider = data.CoreProvider.ValueString()
 		}
-		
+
 		if !data.BootstrapProvider.IsNull() && data.BootstrapProvider.ValueString() != "" {
 			initOpts.BootstrapProviders = []string{data.BootstrapProvider.ValueString()}
 		}
-		
+
 		if !data.ControlPlaneProvider.IsNull() && data.ControlPlaneProvider.ValueString() != "" {
 			initOpts.ControlPlaneProviders = []string{data.ControlPlaneProvider.ValueString()}
 		}
-		
+
 		if !data.InfrastructureProvider.IsNull() && data.InfrastructureProvider.ValueString() != "" {
 			initOpts.InfrastructureProviders = []string{data.InfrastructureProvider.ValueString()}
 		}
@@ -218,7 +218,7 @@ func (r *ClusterResource) Create(ctx context.Context, req resource.CreateRequest
 
 	// Generate cluster template
 	tflog.Info(ctx, "Generating cluster template")
-	
+
 	templateOpts := clusterctlclient.GetClusterTemplateOptions{
 		Kubeconfig: clusterctlclient.Kubeconfig{
 			Path: data.ManagementKubeconfig.ValueString(),
@@ -264,7 +264,7 @@ func (r *ClusterResource) Create(ctx context.Context, req resource.CreateRequest
 	// At this point, we would apply the template to create the cluster
 	// For now, we'll set the ID and basic computed values
 	data.Id = types.StringValue(data.Name.ValueString())
-	
+
 	// Set kubeconfig path if not provided
 	if data.KubeconfigPath.IsNull() {
 		if home, err := os.UserHomeDir(); err == nil {
