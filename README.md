@@ -1,11 +1,21 @@
 # Terraform Provider for Cluster API (CAPI)
 
-This repository contains a [Terraform](https://www.terraform.io) provider for managing Cluster API resources.
+This repository contains a [Terraform](https://www.terraform.io) provider for managing Cluster API resources using clusterctl.
+
+## Features
+
+- **Cluster Management**: Create and manage Cluster API clusters declaratively with Terraform
+- **clusterctl Integration**: Uses the official clusterctl client library for cluster operations
+- **Flexible Configuration**: Support for multiple infrastructure providers (Docker, AWS, Azure, etc.)
+- **Management Cluster Init**: Optionally initialize management clusters or skip if already configured
+- **Template Generation**: Automatic generation of cluster manifests using clusterctl
 
 ## Requirements
 
 - [Terraform](https://developer.hashicorp.com/terraform/downloads) >= 1.0
 - [Go](https://golang.org/doc/install) >= 1.24
+- A Kubernetes cluster for use as a management cluster (e.g., kind, minikube, or existing cluster)
+- [clusterctl](https://cluster-api.sigs.k8s.io/user/quick-start.html) compatible environment
 
 ## Building The Provider
 
@@ -33,7 +43,40 @@ Then commit the changes to `go.mod` and `go.sum`.
 
 ## Using the provider
 
-Documentation for using the provider can be found in the [docs](./docs) directory.
+The provider exposes a `capi_cluster` resource for managing Cluster API clusters.
+
+### Example Usage
+
+```hcl
+terraform {
+  required_providers {
+    capi = {
+      source = "tinkerbell-community/capi"
+    }
+  }
+}
+
+provider "capi" {}
+
+resource "capi_cluster" "my_cluster" {
+  name                        = "my-cluster"
+  infrastructure_provider     = "docker"
+  bootstrap_provider          = "kubeadm"
+  control_plane_provider      = "kubeadm"
+  kubernetes_version          = "v1.28.0"
+  control_plane_machine_count = 1
+  worker_machine_count        = 2
+  skip_init                   = false
+  wait_for_ready              = true
+  target_namespace            = "default"
+}
+```
+
+### Available Resources
+
+- **capi_cluster**: Manages a Cluster API cluster using clusterctl
+
+For detailed documentation on all available attributes and their usage, see the [docs](./docs) directory.
 
 ## Developing the Provider
 
