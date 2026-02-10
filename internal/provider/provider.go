@@ -1,4 +1,4 @@
-// Copyright IBM Corp. 2021, 2025
+// Copyright IBM Corp. 2021, 2026
 // SPDX-License-Identifier: MPL-2.0
 
 package provider
@@ -73,6 +73,7 @@ func (p *CapiProvider) Configure(ctx context.Context, req provider.ConfigureRequ
 func (p *CapiProvider) Resources(ctx context.Context) []func() resource.Resource {
 	return []func() resource.Resource{
 		NewExampleResource,
+		NewClusterResource,
 	}
 }
 
