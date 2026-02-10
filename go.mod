@@ -1,4 +1,4 @@
-module github.com/hashicorp/terraform-provider-scaffolding-framework
+module github.com/tinkerbell-community/terraform-provider-capi
 
 go 1.25.5
 
