@@ -386,8 +386,14 @@ func (r *ClusterResource) Delete(ctx context.Context, req resource.DeleteRequest
 
 // populateClusterInfo retrieves and populates kubeconfig and cluster description.
 func (r *ClusterResource) populateClusterInfo(ctx context.Context, client clusterctlclient.Client, data *ClusterResourceModel) {
+	// Get management kubeconfig path, use empty string if not set
+	managementKubeconfig := ""
+	if !data.ManagementKubeconfig.IsNull() {
+		managementKubeconfig = data.ManagementKubeconfig.ValueString()
+	}
+
 	// Get kubeconfig for the workload cluster
-	kubeconfigContent, err := r.getClusterKubeconfig(ctx, client, data.Name.ValueString(), data.TargetNamespace.ValueString(), data.ManagementKubeconfig.ValueString())
+	kubeconfigContent, err := r.getClusterKubeconfig(ctx, client, data.Name.ValueString(), data.TargetNamespace.ValueString(), managementKubeconfig)
 	if err != nil {
 		tflog.Warn(ctx, "Unable to retrieve cluster kubeconfig", map[string]interface{}{
 			"error": err.Error(),
@@ -399,7 +405,7 @@ func (r *ClusterResource) populateClusterInfo(ctx context.Context, client cluste
 	}
 
 	// Get cluster description
-	clusterDesc, err := r.getClusterDescription(ctx, client, data.Name.ValueString(), data.TargetNamespace.ValueString(), data.ManagementKubeconfig.ValueString())
+	clusterDesc, err := r.getClusterDescription(ctx, client, data.Name.ValueString(), data.TargetNamespace.ValueString(), managementKubeconfig)
 	if err != nil {
 		tflog.Warn(ctx, "Unable to retrieve cluster description", map[string]interface{}{
 			"error": err.Error(),
@@ -456,10 +462,23 @@ func (r *ClusterResource) getClusterDescription(ctx context.Context, client clus
 	// In a real implementation, you might want to format this better
 	// The tree.GetRoot() returns a client.Object, so we'll use basic metadata
 	root := tree.GetRoot()
+	if root == nil {
+		return "", fmt.Errorf("cluster tree root is nil")
+	}
+
+	// Safely get the kind, with fallback if not set
+	kind := "Unknown"
+	if objKind := root.GetObjectKind(); objKind != nil {
+		gvk := objKind.GroupVersionKind()
+		if gvk.Kind != "" {
+			kind = gvk.Kind
+		}
+	}
+
 	description := fmt.Sprintf("NAME: %s\nNAMESPACE: %s\nKIND: %s",
 		root.GetName(),
 		root.GetNamespace(),
-		root.GetObjectKind().GroupVersionKind().Kind)
+		kind)
 
 	return description, nil
 }
