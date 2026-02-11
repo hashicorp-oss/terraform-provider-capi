@@ -23,6 +23,9 @@ func TestAccClusterResource(t *testing.T) {
 					resource.TestCheckResourceAttr("capi_cluster.test", "skip_init", "true"),
 					resource.TestCheckResourceAttrSet("capi_cluster.test", "id"),
 					resource.TestCheckResourceAttrSet("capi_cluster.test", "target_namespace"),
+					// Check that computed attributes exist (even if empty)
+					resource.TestCheckResourceAttrSet("capi_cluster.test", "kubeconfig"),
+					resource.TestCheckResourceAttrSet("capi_cluster.test", "cluster_description"),
 				),
 			},
 			// ImportState testing
@@ -31,7 +34,7 @@ func TestAccClusterResource(t *testing.T) {
 				ImportState:       true,
 				ImportStateVerify: true,
 				// These fields are not returned by import
-				ImportStateVerifyIgnore: []string{"management_kubeconfig", "skip_init", "wait_for_ready"},
+				ImportStateVerifyIgnore: []string{"management_kubeconfig", "skip_init", "wait_for_ready", "kubeconfig", "cluster_description"},
 			},
 		},
 	})

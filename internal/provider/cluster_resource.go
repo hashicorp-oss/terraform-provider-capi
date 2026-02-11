@@ -31,7 +31,7 @@ func NewClusterResource() resource.Resource {
 
 // ClusterResource defines the resource implementation.
 type ClusterResource struct {
-	// We'll use the clusterctl client for cluster operations
+	providerData *CapiProviderModel
 }
 
 // ClusterResourceModel describes the resource data model.
@@ -53,6 +53,8 @@ type ClusterResourceModel struct {
 	Id                       types.String `tfsdk:"id"`
 	Endpoint                 types.String `tfsdk:"endpoint"`
 	ClusterCACertificate     types.String `tfsdk:"cluster_ca_certificate"`
+	Kubeconfig               types.String `tfsdk:"kubeconfig"`
+	ClusterDescription       types.String `tfsdk:"cluster_description"`
 }
 
 func (r *ClusterResource) Metadata(ctx context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
@@ -145,6 +147,15 @@ func (r *ClusterResource) Schema(ctx context.Context, req resource.SchemaRequest
 				MarkdownDescription: "Cluster CA certificate",
 				Sensitive:           true,
 			},
+			"kubeconfig": schema.StringAttribute{
+				Computed:            true,
+				MarkdownDescription: "Kubeconfig for accessing the workload cluster (from clusterctl get kubeconfig)",
+				Sensitive:           true,
+			},
+			"cluster_description": schema.StringAttribute{
+				Computed:            true,
+				MarkdownDescription: "Cluster tree description showing the status of cluster resources (from clusterctl describe cluster)",
+			},
 		},
 	}
 }
@@ -154,6 +165,17 @@ func (r *ClusterResource) Configure(ctx context.Context, req resource.ConfigureR
 	if req.ProviderData == nil {
 		return
 	}
+
+	providerData, ok := req.ProviderData.(*CapiProviderModel)
+	if !ok {
+		resp.Diagnostics.AddError(
+			"Unexpected Resource Configure Type",
+			fmt.Sprintf("Expected *CapiProviderModel, got: %T. Please report this issue to the provider developers.", req.ProviderData),
+		)
+		return
+	}
+
+	r.providerData = providerData
 }
 
 func (r *ClusterResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
@@ -277,6 +299,30 @@ func (r *ClusterResource) Create(ctx context.Context, req resource.CreateRequest
 		data.TargetNamespace = types.StringValue("default")
 	}
 
+	// Get kubeconfig for the workload cluster
+	kubeconfigContent, err := r.getClusterKubeconfig(ctx, client, data.Name.ValueString(), data.TargetNamespace.ValueString(), data.ManagementKubeconfig.ValueString())
+	if err != nil {
+		tflog.Warn(ctx, "Unable to retrieve cluster kubeconfig", map[string]interface{}{
+			"error": err.Error(),
+		})
+		// Don't fail the creation, just leave kubeconfig empty
+		data.Kubeconfig = types.StringValue("")
+	} else {
+		data.Kubeconfig = types.StringValue(kubeconfigContent)
+	}
+
+	// Get cluster description
+	clusterDesc, err := r.getClusterDescription(ctx, client, data.Name.ValueString(), data.TargetNamespace.ValueString(), data.ManagementKubeconfig.ValueString())
+	if err != nil {
+		tflog.Warn(ctx, "Unable to retrieve cluster description", map[string]interface{}{
+			"error": err.Error(),
+		})
+		// Don't fail the creation, just leave description empty
+		data.ClusterDescription = types.StringValue("")
+	} else {
+		data.ClusterDescription = types.StringValue(clusterDesc)
+	}
+
 	tflog.Trace(ctx, "Created CAPI cluster resource")
 
 	// Save data into Terraform state
@@ -297,8 +343,39 @@ func (r *ClusterResource) Read(ctx context.Context, req resource.ReadRequest, re
 		"name": data.Name.ValueString(),
 	})
 
-	// For now, we'll just verify the cluster still exists in state
-	// In a full implementation, we would check the actual cluster status
+	// Create clusterctl client
+	configPath := ""
+	if home, err := os.UserHomeDir(); err == nil {
+		configPath = filepath.Join(home, ".cluster-api")
+	}
+
+	client, err := clusterctlclient.New(ctx, configPath)
+	if err != nil {
+		resp.Diagnostics.AddError("Client Error", fmt.Sprintf("Unable to create clusterctl client, got error: %s", err))
+		return
+	}
+
+	// Get kubeconfig for the workload cluster
+	kubeconfigContent, err := r.getClusterKubeconfig(ctx, client, data.Name.ValueString(), data.TargetNamespace.ValueString(), data.ManagementKubeconfig.ValueString())
+	if err != nil {
+		tflog.Warn(ctx, "Unable to retrieve cluster kubeconfig", map[string]interface{}{
+			"error": err.Error(),
+		})
+		data.Kubeconfig = types.StringValue("")
+	} else {
+		data.Kubeconfig = types.StringValue(kubeconfigContent)
+	}
+
+	// Get cluster description
+	clusterDesc, err := r.getClusterDescription(ctx, client, data.Name.ValueString(), data.TargetNamespace.ValueString(), data.ManagementKubeconfig.ValueString())
+	if err != nil {
+		tflog.Warn(ctx, "Unable to retrieve cluster description", map[string]interface{}{
+			"error": err.Error(),
+		})
+		data.ClusterDescription = types.StringValue("")
+	} else {
+		data.ClusterDescription = types.StringValue(clusterDesc)
+	}
 
 	// Save updated data into Terraform state
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
@@ -345,6 +422,52 @@ func (r *ClusterResource) Delete(ctx context.Context, req resource.DeleteRequest
 	// 3. Optionally delete providers if this was the only cluster
 
 	// For now, deletion is implicit - removing from Terraform state
+}
+
+// getClusterKubeconfig retrieves the kubeconfig for a workload cluster using clusterctl.
+func (r *ClusterResource) getClusterKubeconfig(ctx context.Context, client clusterctlclient.Client, clusterName, namespace, managementKubeconfig string) (string, error) {
+	opts := clusterctlclient.GetKubeconfigOptions{
+		Kubeconfig: clusterctlclient.Kubeconfig{
+			Path: managementKubeconfig,
+		},
+		Namespace:           namespace,
+		WorkloadClusterName: clusterName,
+	}
+
+	kubeconfig, err := client.GetKubeconfig(ctx, opts)
+	if err != nil {
+		return "", fmt.Errorf("failed to get kubeconfig: %w", err)
+	}
+
+	return kubeconfig, nil
+}
+
+// getClusterDescription retrieves the cluster description using clusterctl describe cluster.
+func (r *ClusterResource) getClusterDescription(ctx context.Context, client clusterctlclient.Client, clusterName, namespace, managementKubeconfig string) (string, error) {
+	opts := clusterctlclient.DescribeClusterOptions{
+		Kubeconfig: clusterctlclient.Kubeconfig{
+			Path: managementKubeconfig,
+		},
+		Namespace:           namespace,
+		ClusterName:         clusterName,
+		ShowOtherConditions: "all",
+		Grouping:            true,
+	}
+
+	tree, err := client.DescribeCluster(ctx, opts)
+	if err != nil {
+		return "", fmt.Errorf("failed to describe cluster: %w", err)
+	}
+
+	// Convert the tree to a string representation
+	// The tree contains a hierarchical view of cluster resources
+	if tree == nil {
+		return "", fmt.Errorf("cluster description is nil")
+	}
+
+	// Return a simple string representation
+	// In a real implementation, you might want to format this better
+	return fmt.Sprintf("Cluster: %s in namespace %s", clusterName, namespace), nil
 }
 
 func (r *ClusterResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {

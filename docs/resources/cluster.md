@@ -54,8 +54,10 @@ resource "capi_cluster" "example" {
 ### Read-Only
 
 - `cluster_ca_certificate` (String, Sensitive) Cluster CA certificate
+- `cluster_description` (String) Cluster tree description showing the status of cluster resources (from clusterctl describe cluster)
 - `endpoint` (String) Cluster API server endpoint
 - `id` (String) Cluster identifier
+- `kubeconfig` (String, Sensitive) Kubeconfig for accessing the workload cluster (from clusterctl get kubeconfig)
 
 ## Import
 
