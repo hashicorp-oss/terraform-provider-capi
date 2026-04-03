@@ -29,7 +29,7 @@ func main() {
 	flag.Parse()
 
 	opts := providerserver.ServeOpts{
-		Address: "registry.terraform.io/tinkerbell-community/capi",
+		Address: "registry.terraform.io/hashicorp-oss/capi",
 		Debug:   debug,
 	}
 

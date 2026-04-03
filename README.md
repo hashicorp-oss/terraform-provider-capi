@@ -141,7 +141,7 @@ The provider exposes a `capi_cluster` resource for managing Cluster API clusters
 terraform {
   required_providers {
     capi = {
-      source = "tinkerbell-community/capi"
+      source = "hashicorp-oss/capi"
     }
   }
 }
