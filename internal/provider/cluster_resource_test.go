@@ -19,11 +19,11 @@ func TestAccClusterResource(t *testing.T) {
 				Config: testAccClusterResourceConfig("test-cluster"),
 				Check: resource.ComposeAggregateTestCheckFunc(
 					resource.TestCheckResourceAttr("capi_cluster.test", "name", "test-cluster"),
-					resource.TestCheckResourceAttr("capi_cluster.test", "infrastructure_provider", "docker"),
-					resource.TestCheckResourceAttr("capi_cluster.test", "skip_init", "true"),
-					resource.TestCheckResourceAttr("capi_cluster.test", "self_managed", "false"),
+					resource.TestCheckResourceAttr("capi_cluster.test", "infrastructure.provider", "docker"),
+					resource.TestCheckResourceAttr("capi_cluster.test", "management.skip_init", "true"),
+					resource.TestCheckResourceAttr("capi_cluster.test", "management.self_managed", "false"),
 					resource.TestCheckResourceAttrSet("capi_cluster.test", "id"),
-					resource.TestCheckResourceAttrSet("capi_cluster.test", "target_namespace"),
+					resource.TestCheckResourceAttrSet("capi_cluster.test", "management.namespace"),
 				),
 			},
 			// ImportState testing
@@ -31,11 +31,9 @@ func TestAccClusterResource(t *testing.T) {
 				ResourceName:      "capi_cluster.test",
 				ImportState:       true,
 				ImportStateVerify: true,
-				// These fields are not returned by import
 				ImportStateVerifyIgnore: []string{
-					"management_kubeconfig", "skip_init", "wait_for_ready",
-					"self_managed", "kubeconfig", "cluster_description",
-					"bootstrap_cluster_name",
+					"management", "wait", "output",
+					"status",
 				},
 			},
 		},
@@ -45,11 +43,19 @@ func TestAccClusterResource(t *testing.T) {
 func testAccClusterResourceConfig(name string) string {
 	return `
 resource "capi_cluster" "test" {
-  name                    = "` + name + `"
-  infrastructure_provider = "docker"
-  skip_init               = true
-  wait_for_ready          = false
-  self_managed            = false
+  name = "` + name + `"
+
+  infrastructure {
+    provider = "docker"
+  }
+
+  management {
+    skip_init = true
+  }
+
+  wait {
+    enabled = false
+  }
 }
 `
 }

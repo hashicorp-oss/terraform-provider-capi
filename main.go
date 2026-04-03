@@ -21,6 +21,7 @@ var (
 	// https://goreleaser.com/cookbooks/using-main.version/
 )
 
+//go:generate go tool tfplugindocs generate -provider-name capi
 func main() {
 	var debug bool
 

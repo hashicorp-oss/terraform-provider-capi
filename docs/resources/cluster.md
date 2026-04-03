@@ -3,71 +3,12 @@
 page_title: "capi_cluster Resource - capi"
 subcategory: ""
 description: |-
-  Manages a Cluster API cluster using clusterctl
+  Manages a Cluster API cluster using the CAPI management workflow (bootstrap -> init -> apply -> wait -> move).
 ---
 
 # capi_cluster (Resource)
 
-Manages a Cluster API cluster using clusterctl
-
-## Lifecycle Model
-
-This resource follows the EKS Anywhere cluster lifecycle pattern:
-
-1. Bootstrap management cluster is created when management_kubeconfig is not supplied.
-2. CAPI providers are installed on the management cluster using clusterctl init.
-3. Cluster template is generated and applied.
-4. Readiness waits are executed when wait_for_ready is true.
-5. Workload kubeconfig is retrieved.
-6. For self-managed clusters, CAPI management is pivoted from bootstrap to workload.
-7. Bootstrap cluster is cleaned up after a successful self-managed pivot.
-
-The create flow is implemented in internal/capi/manager.go and coordinated by the capi_cluster resource.
-
-## Cluster Creation Workflow
-
-Create behavior is intentionally task-oriented and matches EKS Anywhere workflow stages:
-
-- Preflight: validates lifecycle options and provider combinations.
-- Bootstrap: creates a temporary kind cluster unless management_kubeconfig is provided.
-- CAPI init: installs core, bootstrap, control plane, and infrastructure providers.
-- Generate and apply: renders cluster manifests and applies them to the management cluster.
-- Wait and inspect: waits for readiness and captures cluster description and kubeconfig.
-- Pivot (optional): when self_managed = true, performs clusterctl move to workload management.
-
-## Update Semantics
-
-Updates are handled as reconcile operations:
-
-- Mutable fields (for example kubernetes_version, machine counts, and flavor) trigger template regeneration and apply.
-- Identity and lifecycle-anchor fields use replace semantics:
-  - name
-  - infrastructure_provider
-  - management_kubeconfig
-  - bootstrap_provider
-  - control_plane_provider
-  - core_provider
-  - target_namespace
-  - self_managed
-
-This mirrors EKS Anywhere's separation between cluster identity/lifecycle mode and in-place spec reconciliation.
-
-## Tinkerbell Lifecycle Behavior
-
-When infrastructure_provider = "tinkerbell", this resource enforces EKS Anywhere-aligned constraints:
-
-- self_managed must be true, so management pivots from bootstrap to workload.
-- bootstrap_provider must be kubeadm when specified.
-- control_plane_provider must be kubeadm when specified.
-
-These constraints align with Tinkerbell's two-stage stack lifecycle in EKS Anywhere:
-
-1. Bootstrap-stage management and provisioning bootstrap.
-2. Workload-stage management after pivot, followed by bootstrap cleanup.
-
-## Move Retry Resilience
-
-Self-managed pivot operations include retry logic for transient network failures during CAPI move, with exponential backoff. This follows the same reliability principle used in EKS Anywhere's move flow to tolerate temporary API/connectivity failures.
+Manages a Cluster API cluster using the CAPI management workflow (bootstrap -> init -> apply -> wait -> move).
 
 ## Example Usage
 
@@ -77,11 +18,12 @@ resource "capi_cluster" "example" {
   infrastructure_provider     = "docker"
   bootstrap_provider          = "kubeadm"
   control_plane_provider      = "kubeadm"
-  kubernetes_version          = "v1.28.0"
+  kubernetes_version          = "v1.31.0"
   control_plane_machine_count = 1
   worker_machine_count        = 2
   skip_init                   = false
   wait_for_ready              = true
+  self_managed                = false
   target_namespace            = "default"
   kubeconfig_path             = "/tmp/my-cluster-kubeconfig"
 }
@@ -92,31 +34,164 @@ resource "capi_cluster" "example" {
 
 ### Required
 
-- `infrastructure_provider` (String) Infrastructure provider to use (e.g., 'docker', 'aws', 'azure')
-- `name` (String) The name of the cluster
+- `infrastructure` (Attributes) Infrastructure provider configuration. (see [below for nested schema](#nestedatt--infrastructure))
+- `name` (String) The name of the cluster. Must be a valid DNS-1123 subdomain.
 
 ### Optional
 
-- `bootstrap_provider` (String) Bootstrap provider to use (e.g., 'kubeadm')
-- `control_plane_machine_count` (Number) Number of control plane machines
-- `control_plane_provider` (String) Control plane provider to use (e.g., 'kubeadm')
-- `core_provider` (String) Core provider version (e.g., 'cluster-api:v1.5.0')
-- `flavor` (String) Cluster template flavor to use
-- `kubeconfig_path` (String) Path where the kubeconfig for the workload cluster will be written
-- `kubernetes_version` (String) Kubernetes version for the cluster
-- `management_kubeconfig` (String) Path to the kubeconfig for the management cluster. If not provided, uses default kubeconfig
-- `skip_init` (Boolean) Skip running clusterctl init on the management cluster
-- `target_namespace` (String) Target namespace for the cluster
-- `wait_for_ready` (Boolean) Wait for cluster to be ready before returning
-- `worker_machine_count` (Number) Number of worker machines
+- `bootstrap` (Attributes) Bootstrap provider configuration (e.g., kubeadm, talos). (see [below for nested schema](#nestedatt--bootstrap))
+- `control_plane` (Attributes) Control plane configuration. (see [below for nested schema](#nestedatt--control_plane))
+- `core` (Attributes) Core CAPI provider configuration. (see [below for nested schema](#nestedatt--core))
+- `flavor` (String) Cluster template flavor to use. Maps to clusterctl template flavors.
+- `inventory` (Attributes) Hardware inventory for bare-metal provisioning. (see [below for nested schema](#nestedatt--inventory))
+- `kubernetes_version` (String) Kubernetes version for the workload cluster (e.g., `v1.31.0`).
+- `management` (Attributes) Management cluster configuration. Controls how the CAPI lifecycle is managed. (see [below for nested schema](#nestedatt--management))
+- `output` (Attributes) Output configuration. (see [below for nested schema](#nestedatt--output))
+- `wait` (Attributes) Readiness wait configuration. (see [below for nested schema](#nestedatt--wait))
+- `workers` (Attributes) Worker node configuration. (see [below for nested schema](#nestedatt--workers))
 
 ### Read-Only
 
-- `cluster_ca_certificate` (String, Sensitive) Cluster CA certificate
-- `cluster_description` (String) Cluster tree description showing the status of cluster resources (from clusterctl describe cluster)
-- `endpoint` (String) Cluster API server endpoint
-- `id` (String) Cluster identifier
-- `kubeconfig` (String, Sensitive) Kubeconfig for accessing the workload cluster (from clusterctl get kubeconfig)
+- `id` (String) Cluster identifier.
+- `status` (Attributes) Computed cluster status. (see [below for nested schema](#nestedatt--status))
+
+<a id="nestedatt--infrastructure"></a>
+### Nested Schema for `infrastructure`
+
+Required:
+
+- `provider` (String) Infrastructure provider name and optional version (e.g., `docker`, `tinkerbell:v0.5.4`).
+
+
+<a id="nestedatt--bootstrap"></a>
+### Nested Schema for `bootstrap`
+
+Required:
+
+- `provider` (String) Bootstrap provider name and optional version (e.g., `kubeadm:v1.12.2`, `talos:v0.6.7`).
+
+
+<a id="nestedatt--control_plane"></a>
+### Nested Schema for `control_plane`
+
+Optional:
+
+- `machine_count` (Number) Number of control plane machines.
+- `provider` (String) Control plane provider name and optional version (e.g., `kubeadm:v1.12.2`, `talos:v0.6.7`).
+
+
+<a id="nestedatt--core"></a>
+### Nested Schema for `core`
+
+Required:
+
+- `provider` (String) Core provider name and version (e.g., `cluster-api:v1.12.2`).
+
+
+<a id="nestedatt--inventory"></a>
+### Nested Schema for `inventory`
+
+Optional:
+
+- `machine` (Attributes List) Inline machine definitions. (see [below for nested schema](#nestedatt--inventory--machine))
+- `source` (String) Path to a hardware inventory file (CSV or YAML).
+
+<a id="nestedatt--inventory--machine"></a>
+### Nested Schema for `inventory.machine`
+
+Required:
+
+- `hostname` (String) Machine hostname. Must be unique.
+- `network` (Attributes) Network configuration. (see [below for nested schema](#nestedatt--inventory--machine--network))
+
+Optional:
+
+- `bmc` (Attributes) BMC configuration. (see [below for nested schema](#nestedatt--inventory--machine--bmc))
+- `disk` (Attributes) Boot disk configuration. (see [below for nested schema](#nestedatt--inventory--machine--disk))
+- `labels` (Map of String) Labels. Use `type=cp` for control plane, `type=worker` for workers.
+
+<a id="nestedatt--inventory--machine--network"></a>
+### Nested Schema for `inventory.machine.network`
+
+Required:
+
+- `gateway` (String) Default gateway.
+- `ip_address` (String) Primary IP address.
+- `mac_address` (String) Primary NIC MAC address.
+- `netmask` (String) Network mask.
+
+Optional:
+
+- `nameservers` (List of String) DNS nameservers.
+- `vlan_id` (String) VLAN ID.
+
+
+<a id="nestedatt--inventory--machine--bmc"></a>
+### Nested Schema for `inventory.machine.bmc`
+
+Required:
+
+- `address` (String) BMC endpoint.
+- `password` (String, Sensitive) BMC password.
+- `username` (String) BMC username.
+
+
+<a id="nestedatt--inventory--machine--disk"></a>
+### Nested Schema for `inventory.machine.disk`
+
+Required:
+
+- `device` (String) Disk device path.
+
+
+
+
+<a id="nestedatt--management"></a>
+### Nested Schema for `management`
+
+Optional:
+
+- `kubeconfig` (String) Path to the kubeconfig for an existing management cluster. If not provided, a bootstrap cluster (kind) is created automatically.
+- `namespace` (String) Namespace on the management cluster where CAPI resources are created.
+- `self_managed` (Boolean) Pivot CAPI management from bootstrap to workload cluster (clusterctl move). Required `true` for Tinkerbell provider.
+- `skip_init` (Boolean) Skip running clusterctl init on the management cluster. Use when CAPI providers are already installed.
+
+
+<a id="nestedatt--output"></a>
+### Nested Schema for `output`
+
+Optional:
+
+- `kubeconfig_path` (String) File path for the workload cluster kubeconfig.
+
+
+<a id="nestedatt--wait"></a>
+### Nested Schema for `wait`
+
+Optional:
+
+- `enabled` (Boolean) Wait for readiness.
+- `timeout` (String) Max wait time (Go duration, e.g., `30m`). Default: `30m`.
+
+
+<a id="nestedatt--workers"></a>
+### Nested Schema for `workers`
+
+Optional:
+
+- `machine_count` (Number) Number of worker machines.
+
+
+<a id="nestedatt--status"></a>
+### Nested Schema for `status`
+
+Read-Only:
+
+- `bootstrap_cluster` (String) Bootstrap cluster name.
+- `ca_certificate` (String, Sensitive) CA certificate (PEM).
+- `description` (String) Cluster description.
+- `endpoint` (String) API server endpoint.
+- `kubeconfig` (String, Sensitive) Kubeconfig content.
 
 ## Import
 
