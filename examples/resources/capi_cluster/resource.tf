@@ -3,11 +3,12 @@ resource "capi_cluster" "example" {
   infrastructure_provider     = "docker"
   bootstrap_provider          = "kubeadm"
   control_plane_provider      = "kubeadm"
-  kubernetes_version          = "v1.28.0"
+  kubernetes_version          = "v1.31.0"
   control_plane_machine_count = 1
   worker_machine_count        = 2
   skip_init                   = false
   wait_for_ready              = true
+  self_managed                = false
   target_namespace            = "default"
   kubeconfig_path             = "/tmp/my-cluster-kubeconfig"
 }

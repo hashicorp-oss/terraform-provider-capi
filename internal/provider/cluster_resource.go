@@ -6,6 +6,7 @@ package provider
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 
@@ -18,7 +19,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-log/tflog"
 
-	clusterctlclient "sigs.k8s.io/cluster-api/cmd/clusterctl/client"
+	"github.com/tinkerbell-community/terraform-provider-capi/internal/capi"
 )
 
 // Ensure provider defined types fully satisfy framework interfaces.
@@ -32,6 +33,7 @@ func NewClusterResource() resource.Resource {
 // ClusterResource defines the resource implementation.
 type ClusterResource struct {
 	providerData *CapiProviderModel
+	manager      *capi.Manager
 }
 
 // ClusterResourceModel describes the resource data model.
@@ -41,6 +43,7 @@ type ClusterResourceModel struct {
 	ManagementKubeconfig     types.String `tfsdk:"management_kubeconfig"`
 	SkipInit                 types.Bool   `tfsdk:"skip_init"`
 	WaitForReady             types.Bool   `tfsdk:"wait_for_ready"`
+	SelfManaged              types.Bool   `tfsdk:"self_managed"`
 	InfrastructureProvider   types.String `tfsdk:"infrastructure_provider"`
 	BootstrapProvider        types.String `tfsdk:"bootstrap_provider"`
 	ControlPlaneProvider     types.String `tfsdk:"control_plane_provider"`
@@ -55,6 +58,7 @@ type ClusterResourceModel struct {
 	ClusterCACertificate     types.String `tfsdk:"cluster_ca_certificate"`
 	Kubeconfig               types.String `tfsdk:"kubeconfig"`
 	ClusterDescription       types.String `tfsdk:"cluster_description"`
+	BootstrapClusterName     types.String `tfsdk:"bootstrap_cluster_name"`
 }
 
 func (r *ClusterResource) Metadata(ctx context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
@@ -63,7 +67,7 @@ func (r *ClusterResource) Metadata(ctx context.Context, req resource.MetadataReq
 
 func (r *ClusterResource) Schema(ctx context.Context, req resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		MarkdownDescription: "Manages a Cluster API cluster using clusterctl",
+		MarkdownDescription: "Manages a Cluster API cluster using the CAPI management workflow (bootstrap -> init -> apply -> wait -> move)",
 
 		Attributes: map[string]schema.Attribute{
 			"name": schema.StringAttribute{
@@ -79,20 +83,26 @@ func (r *ClusterResource) Schema(ctx context.Context, req resource.SchemaRequest
 				Computed:            true,
 			},
 			"management_kubeconfig": schema.StringAttribute{
-				MarkdownDescription: "Path to the kubeconfig for the management cluster. If not provided, uses default kubeconfig",
+				MarkdownDescription: "Path to the kubeconfig for an existing management cluster. If not provided, a bootstrap cluster (kind) is created automatically",
 				Optional:            true,
 			},
 			"skip_init": schema.BoolAttribute{
-				MarkdownDescription: "Skip running clusterctl init on the management cluster",
+				MarkdownDescription: "Skip running clusterctl init on the management cluster (use if CAPI is already installed)",
 				Optional:            true,
 				Computed:            true,
 				Default:             booldefault.StaticBool(false),
 			},
 			"wait_for_ready": schema.BoolAttribute{
-				MarkdownDescription: "Wait for cluster to be ready before returning",
+				MarkdownDescription: "Wait for the workload cluster to become ready before returning",
 				Optional:            true,
 				Computed:            true,
 				Default:             booldefault.StaticBool(true),
+			},
+			"self_managed": schema.BoolAttribute{
+				MarkdownDescription: "Make the workload cluster self-managed by pivoting CAPI management from the bootstrap cluster (mirrors EKS Anywhere's move management pattern)",
+				Optional:            true,
+				Computed:            true,
+				Default:             booldefault.StaticBool(false),
 			},
 			"infrastructure_provider": schema.StringAttribute{
 				MarkdownDescription: "Infrastructure provider to use (e.g., 'docker', 'aws', 'azure')",
@@ -107,7 +117,7 @@ func (r *ClusterResource) Schema(ctx context.Context, req resource.SchemaRequest
 				Optional:            true,
 			},
 			"core_provider": schema.StringAttribute{
-				MarkdownDescription: "Core provider version (e.g., 'cluster-api:v1.5.0')",
+				MarkdownDescription: "Core provider version (e.g., 'cluster-api:v1.7.0')",
 				Optional:            true,
 			},
 			"target_namespace": schema.StringAttribute{
@@ -116,7 +126,7 @@ func (r *ClusterResource) Schema(ctx context.Context, req resource.SchemaRequest
 				Computed:            true,
 			},
 			"kubernetes_version": schema.StringAttribute{
-				MarkdownDescription: "Kubernetes version for the cluster",
+				MarkdownDescription: "Kubernetes version for the workload cluster",
 				Optional:            true,
 			},
 			"control_plane_machine_count": schema.Int64Attribute{
@@ -149,12 +159,16 @@ func (r *ClusterResource) Schema(ctx context.Context, req resource.SchemaRequest
 			},
 			"kubeconfig": schema.StringAttribute{
 				Computed:            true,
-				MarkdownDescription: "Kubeconfig for accessing the workload cluster (from clusterctl get kubeconfig)",
+				MarkdownDescription: "Kubeconfig for accessing the workload cluster",
 				Sensitive:           true,
 			},
 			"cluster_description": schema.StringAttribute{
 				Computed:            true,
-				MarkdownDescription: "Cluster tree description showing the status of cluster resources (from clusterctl describe cluster)",
+				MarkdownDescription: "Cluster status description (from clusterctl describe)",
+			},
+			"bootstrap_cluster_name": schema.StringAttribute{
+				Computed:            true,
+				MarkdownDescription: "Name of the bootstrap cluster (if one was created)",
 			},
 		},
 	}
@@ -176,14 +190,15 @@ func (r *ClusterResource) Configure(ctx context.Context, req resource.ConfigureR
 	}
 
 	r.providerData = providerData
+	r.manager = capi.NewManager(
+		capi.WithLogger(log.New(os.Stderr, "[capi-tf] ", log.LstdFlags)),
+	)
 }
 
 func (r *ClusterResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
 	var data ClusterResourceModel
 
-	// Read Terraform plan data into the model
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &data)...)
-
 	if resp.Diagnostics.HasError() {
 		return
 	}
@@ -192,128 +207,117 @@ func (r *ClusterResource) Create(ctx context.Context, req resource.CreateRequest
 		"name": data.Name.ValueString(),
 	})
 
-	// Create clusterctl client
-	configPath := ""
-	if home, err := os.UserHomeDir(); err == nil {
-		configPath = filepath.Join(home, ".cluster-api")
+	// Build creation options from Terraform config
+	createOpts := capi.CreateClusterOptions{
+		Name:                   data.Name.ValueString(),
+		InfrastructureProvider: data.InfrastructureProvider.ValueString(),
+		SkipInit:               data.SkipInit.ValueBool(),
+		WaitForReady:           data.WaitForReady.ValueBool(),
+		SelfManaged:            data.SelfManaged.ValueBool(),
+		Wait:                   capi.DefaultWaitOptions(),
 	}
 
-	client, err := clusterctlclient.New(ctx, configPath)
-	if err != nil {
-		resp.Diagnostics.AddError("Client Error", fmt.Sprintf("Unable to create clusterctl client, got error: %s", err))
-		return
+	if !data.ManagementKubeconfig.IsNull() && data.ManagementKubeconfig.ValueString() != "" {
+		createOpts.ManagementKubeconfig = data.ManagementKubeconfig.ValueString()
 	}
 
-	// Initialize management cluster if not skipped
-	if !data.SkipInit.ValueBool() {
-		tflog.Info(ctx, "Initializing management cluster")
-
-		initOpts := clusterctlclient.InitOptions{
-			Kubeconfig: clusterctlclient.Kubeconfig{
-				Path: data.ManagementKubeconfig.ValueString(),
-			},
-		}
-
-		// Add providers to init options based on what's specified
-		if !data.CoreProvider.IsNull() && data.CoreProvider.ValueString() != "" {
-			initOpts.CoreProvider = data.CoreProvider.ValueString()
-		}
-
-		if !data.BootstrapProvider.IsNull() && data.BootstrapProvider.ValueString() != "" {
-			initOpts.BootstrapProviders = []string{data.BootstrapProvider.ValueString()}
-		}
-
-		if !data.ControlPlaneProvider.IsNull() && data.ControlPlaneProvider.ValueString() != "" {
-			initOpts.ControlPlaneProviders = []string{data.ControlPlaneProvider.ValueString()}
-		}
-
-		if !data.InfrastructureProvider.IsNull() && data.InfrastructureProvider.ValueString() != "" {
-			initOpts.InfrastructureProviders = []string{data.InfrastructureProvider.ValueString()}
-		}
-
-		_, err = client.Init(ctx, initOpts)
-		if err != nil {
-			resp.Diagnostics.AddError("Initialization Error", fmt.Sprintf("Unable to initialize management cluster, got error: %s", err))
-			return
-		}
+	if !data.BootstrapProvider.IsNull() {
+		createOpts.BootstrapProvider = data.BootstrapProvider.ValueString()
 	}
 
-	// Generate cluster template
-	tflog.Info(ctx, "Generating cluster template")
+	if !data.ControlPlaneProvider.IsNull() {
+		createOpts.ControlPlaneProvider = data.ControlPlaneProvider.ValueString()
+	}
 
-	templateOpts := clusterctlclient.GetClusterTemplateOptions{
-		Kubeconfig: clusterctlclient.Kubeconfig{
-			Path: data.ManagementKubeconfig.ValueString(),
-		},
-		ClusterName:       data.Name.ValueString(),
-		TargetNamespace:   data.TargetNamespace.ValueString(),
-		KubernetesVersion: data.KubernetesVersion.ValueString(),
+	if !data.CoreProvider.IsNull() {
+		createOpts.CoreProvider = data.CoreProvider.ValueString()
+	}
+
+	if !data.TargetNamespace.IsNull() {
+		createOpts.Namespace = data.TargetNamespace.ValueString()
+	}
+
+	if !data.KubernetesVersion.IsNull() {
+		createOpts.KubernetesVersion = data.KubernetesVersion.ValueString()
 	}
 
 	if !data.ControlPlaneMachineCount.IsNull() {
 		count := data.ControlPlaneMachineCount.ValueInt64()
-		templateOpts.ControlPlaneMachineCount = &count
+		createOpts.ControlPlaneMachineCount = &count
 	}
 
 	if !data.WorkerMachineCount.IsNull() {
 		count := data.WorkerMachineCount.ValueInt64()
-		templateOpts.WorkerMachineCount = &count
+		createOpts.WorkerMachineCount = &count
 	}
 
-	if !data.InfrastructureProvider.IsNull() && data.InfrastructureProvider.ValueString() != "" {
-		templateOpts.ProviderRepositorySource = &clusterctlclient.ProviderRepositorySourceOptions{
-			InfrastructureProvider: data.InfrastructureProvider.ValueString(),
-			Flavor:                 data.Flavor.ValueString(),
-		}
+	if !data.Flavor.IsNull() {
+		createOpts.Flavor = data.Flavor.ValueString()
 	}
 
-	template, err := client.GetClusterTemplate(ctx, templateOpts)
+	// Set kubeconfig output path
+	if !data.KubeconfigPath.IsNull() && data.KubeconfigPath.ValueString() != "" {
+		createOpts.KubeconfigOutputPath = data.KubeconfigPath.ValueString()
+	} else if home, err := os.UserHomeDir(); err == nil {
+		createOpts.KubeconfigOutputPath = filepath.Join(home, ".kube", fmt.Sprintf("%s.kubeconfig", data.Name.ValueString()))
+	}
+
+	// Execute the CAPI management workflow
+	result, err := r.manager.CreateCluster(ctx, createOpts)
 	if err != nil {
-		resp.Diagnostics.AddError("Template Error", fmt.Sprintf("Unable to generate cluster template, got error: %s", err))
+		resp.Diagnostics.AddError("Cluster Creation Error", fmt.Sprintf("Failed to create cluster: %s", err))
 		return
 	}
 
-	templateYaml, err := template.Yaml()
-	if err != nil {
-		resp.Diagnostics.AddError("Template YAML Error", fmt.Sprintf("Unable to get template YAML, got error: %s", err))
-		return
-	}
-
-	tflog.Debug(ctx, "Generated cluster template", map[string]interface{}{
-		"template": string(templateYaml),
-	})
-
-	// At this point, we would apply the template to create the cluster
-	// For now, we'll set the ID and basic computed values
+	// Populate state from result
 	data.Id = types.StringValue(data.Name.ValueString())
 
-	// Set kubeconfig path if not provided
-	if data.KubeconfigPath.IsNull() {
-		if home, err := os.UserHomeDir(); err == nil {
-			data.KubeconfigPath = types.StringValue(filepath.Join(home, ".kube", fmt.Sprintf("%s.kubeconfig", data.Name.ValueString())))
-		}
+	if data.KubeconfigPath.IsNull() || data.KubeconfigPath.ValueString() == "" {
+		data.KubeconfigPath = types.StringValue(createOpts.KubeconfigOutputPath)
 	}
 
-	// Set target namespace to default if not provided
-	if data.TargetNamespace.IsNull() {
+	if data.TargetNamespace.IsNull() || data.TargetNamespace.ValueString() == "" {
 		data.TargetNamespace = types.StringValue("default")
 	}
 
-	// Populate cluster info (kubeconfig and description)
-	r.populateClusterInfo(ctx, client, &data)
+	if result.Kubeconfig != "" {
+		data.Kubeconfig = types.StringValue(result.Kubeconfig)
+	} else {
+		data.Kubeconfig = types.StringNull()
+	}
+
+	if result.ClusterDescription != "" {
+		data.ClusterDescription = types.StringValue(result.ClusterDescription)
+	} else {
+		data.ClusterDescription = types.StringNull()
+	}
+
+	if result.Endpoint != "" {
+		data.Endpoint = types.StringValue(result.Endpoint)
+	} else {
+		data.Endpoint = types.StringNull()
+	}
+
+	if result.CACertificate != "" {
+		data.ClusterCACertificate = types.StringValue(result.CACertificate)
+	} else {
+		data.ClusterCACertificate = types.StringNull()
+	}
+
+	if result.BootstrapCluster != nil {
+		data.BootstrapClusterName = types.StringValue(result.BootstrapCluster.Name)
+	} else {
+		data.BootstrapClusterName = types.StringNull()
+	}
 
 	tflog.Trace(ctx, "Created CAPI cluster resource")
-
-	// Save data into Terraform state
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 }
 
 func (r *ClusterResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
 	var data ClusterResourceModel
 
-	// Read Terraform prior state data into the model
 	resp.Diagnostics.Append(req.State.Get(ctx, &data)...)
-
 	if resp.Diagnostics.HasError() {
 		return
 	}
@@ -322,31 +326,49 @@ func (r *ClusterResource) Read(ctx context.Context, req resource.ReadRequest, re
 		"name": data.Name.ValueString(),
 	})
 
-	// Create clusterctl client
-	configPath := ""
-	if home, err := os.UserHomeDir(); err == nil {
-		configPath = filepath.Join(home, ".cluster-api")
+	// Determine management kubeconfig for reading cluster info
+	mgmtKubeconfig := ""
+	if !data.ManagementKubeconfig.IsNull() {
+		mgmtKubeconfig = data.ManagementKubeconfig.ValueString()
+	} else if !data.BootstrapClusterName.IsNull() {
+		// If we have a bootstrap cluster, get its kubeconfig
+		mgmtKubeconfig = filepath.Join(os.TempDir(), fmt.Sprintf("kind-%s-kubeconfig", data.BootstrapClusterName.ValueString()))
 	}
 
-	client, err := clusterctlclient.New(ctx, configPath)
-	if err != nil {
-		resp.Diagnostics.AddError("Client Error", fmt.Sprintf("Unable to create clusterctl client, got error: %s", err))
+	if mgmtKubeconfig == "" {
+		// No management cluster info available - keep existing state
+		resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 		return
 	}
 
-	// Populate cluster info (kubeconfig and description)
-	r.populateClusterInfo(ctx, client, &data)
+	namespace := "default"
+	if !data.TargetNamespace.IsNull() {
+		namespace = data.TargetNamespace.ValueString()
+	}
 
-	// Save updated data into Terraform state
+	result, err := r.manager.GetClusterInfo(ctx, mgmtKubeconfig, data.Name.ValueString(), namespace)
+	if err != nil {
+		tflog.Warn(ctx, "Unable to read cluster info", map[string]interface{}{
+			"error": err.Error(),
+		})
+		resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
+		return
+	}
+
+	if result.Kubeconfig != "" {
+		data.Kubeconfig = types.StringValue(result.Kubeconfig)
+	}
+	if result.ClusterDescription != "" {
+		data.ClusterDescription = types.StringValue(result.ClusterDescription)
+	}
+
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 }
 
 func (r *ClusterResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
 	var data ClusterResourceModel
 
-	// Read Terraform plan data into the model
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &data)...)
-
 	if resp.Diagnostics.HasError() {
 		return
 	}
@@ -355,9 +377,6 @@ func (r *ClusterResource) Update(ctx context.Context, req resource.UpdateRequest
 		"name": data.Name.ValueString(),
 	})
 
-	// Most cluster properties require replacement, but some like machine counts
-	// could potentially be updated. For now, we'll just update the state.
-
 	// Save updated data into Terraform state
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 }
@@ -365,9 +384,7 @@ func (r *ClusterResource) Update(ctx context.Context, req resource.UpdateRequest
 func (r *ClusterResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
 	var data ClusterResourceModel
 
-	// Read Terraform prior state data into the model
 	resp.Diagnostics.Append(req.State.Get(ctx, &data)...)
-
 	if resp.Diagnostics.HasError() {
 		return
 	}
@@ -376,111 +393,39 @@ func (r *ClusterResource) Delete(ctx context.Context, req resource.DeleteRequest
 		"name": data.Name.ValueString(),
 	})
 
-	// In a full implementation, we would:
-	// 1. Delete the cluster resources from the management cluster
-	// 2. Clean up the kubeconfig file if it exists
-	// 3. Optionally delete providers if this was the only cluster
-
-	// For now, deletion is implicit - removing from Terraform state
-}
-
-// populateClusterInfo retrieves and populates kubeconfig and cluster description.
-func (r *ClusterResource) populateClusterInfo(ctx context.Context, client clusterctlclient.Client, data *ClusterResourceModel) {
-	// Get management kubeconfig path, use empty string if not set
-	managementKubeconfig := ""
+	// Determine management kubeconfig
+	mgmtKubeconfig := ""
 	if !data.ManagementKubeconfig.IsNull() {
-		managementKubeconfig = data.ManagementKubeconfig.ValueString()
+		mgmtKubeconfig = data.ManagementKubeconfig.ValueString()
+	} else if !data.BootstrapClusterName.IsNull() {
+		mgmtKubeconfig = filepath.Join(os.TempDir(), fmt.Sprintf("kind-%s-kubeconfig", data.BootstrapClusterName.ValueString()))
 	}
 
-	// Get kubeconfig for the workload cluster
-	kubeconfigContent, err := r.getClusterKubeconfig(ctx, client, data.Name.ValueString(), data.TargetNamespace.ValueString(), managementKubeconfig)
-	if err != nil {
-		tflog.Warn(ctx, "Unable to retrieve cluster kubeconfig", map[string]interface{}{
-			"error": err.Error(),
-		})
-		// Use null to represent unavailable state
-		data.Kubeconfig = types.StringNull()
-	} else {
-		data.Kubeconfig = types.StringValue(kubeconfigContent)
+	namespace := "default"
+	if !data.TargetNamespace.IsNull() {
+		namespace = data.TargetNamespace.ValueString()
 	}
 
-	// Get cluster description
-	clusterDesc, err := r.getClusterDescription(ctx, client, data.Name.ValueString(), data.TargetNamespace.ValueString(), managementKubeconfig)
-	if err != nil {
-		tflog.Warn(ctx, "Unable to retrieve cluster description", map[string]interface{}{
-			"error": err.Error(),
-		})
-		// Use null to represent unavailable state
-		data.ClusterDescription = types.StringNull()
-	} else {
-		data.ClusterDescription = types.StringValue(clusterDesc)
-	}
-}
-
-// getClusterKubeconfig retrieves the kubeconfig for a workload cluster using clusterctl.
-func (r *ClusterResource) getClusterKubeconfig(ctx context.Context, client clusterctlclient.Client, clusterName, namespace, managementKubeconfig string) (string, error) {
-	opts := clusterctlclient.GetKubeconfigOptions{
-		Kubeconfig: clusterctlclient.Kubeconfig{
-			Path: managementKubeconfig,
-		},
-		Namespace:           namespace,
-		WorkloadClusterName: clusterName,
+	deleteOpts := capi.DeleteClusterOptions{
+		Name:                 data.Name.ValueString(),
+		Namespace:            namespace,
+		ManagementKubeconfig: mgmtKubeconfig,
 	}
 
-	kubeconfig, err := client.GetKubeconfig(ctx, opts)
-	if err != nil {
-		return "", fmt.Errorf("failed to get kubeconfig: %w", err)
+	// Clean up bootstrap cluster if we created one
+	if !data.BootstrapClusterName.IsNull() {
+		deleteOpts.DeleteBootstrap = true
+		deleteOpts.BootstrapName = data.BootstrapClusterName.ValueString()
 	}
 
-	return kubeconfig, nil
-}
-
-// getClusterDescription retrieves the cluster description using clusterctl describe cluster.
-func (r *ClusterResource) getClusterDescription(ctx context.Context, client clusterctlclient.Client, clusterName, namespace, managementKubeconfig string) (string, error) {
-	opts := clusterctlclient.DescribeClusterOptions{
-		Kubeconfig: clusterctlclient.Kubeconfig{
-			Path: managementKubeconfig,
-		},
-		Namespace:           namespace,
-		ClusterName:         clusterName,
-		ShowOtherConditions: "all",
-		Grouping:            true,
-	}
-
-	tree, err := client.DescribeCluster(ctx, opts)
-	if err != nil {
-		return "", fmt.Errorf("failed to describe cluster: %w", err)
-	}
-
-	// Convert the tree to a string representation
-	// The tree contains a hierarchical view of cluster resources
-	if tree == nil {
-		return "", fmt.Errorf("cluster description is nil")
-	}
-
-	// Return a simple string representation
-	// In a real implementation, you might want to format this better
-	// The tree.GetRoot() returns a client.Object, so we'll use basic metadata
-	root := tree.GetRoot()
-	if root == nil {
-		return "", fmt.Errorf("cluster tree root is nil")
-	}
-
-	// Safely get the kind, with fallback if not set
-	kind := "Unknown"
-	if objKind := root.GetObjectKind(); objKind != nil {
-		gvk := objKind.GroupVersionKind()
-		if gvk.Kind != "" {
-			kind = gvk.Kind
+	if mgmtKubeconfig != "" {
+		if err := r.manager.DeleteCluster(ctx, deleteOpts); err != nil {
+			resp.Diagnostics.AddWarning("Cluster Deletion Warning",
+				fmt.Sprintf("Error deleting cluster (it may have already been removed): %s", err))
 		}
+	} else {
+		tflog.Warn(ctx, "No management kubeconfig available for deletion - cluster resources may need manual cleanup")
 	}
-
-	description := fmt.Sprintf("NAME: %s\nNAMESPACE: %s\nKIND: %s",
-		root.GetName(),
-		root.GetNamespace(),
-		kind)
-
-	return description, nil
 }
 
 func (r *ClusterResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
