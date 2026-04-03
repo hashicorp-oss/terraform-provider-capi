@@ -503,3 +503,46 @@ func TestManager_CreateCluster_SelfManaged(t *testing.T) {
 		t.Error("expected nil bootstrap cluster after successful pivot")
 	}
 }
+
+func TestManager_CreateCluster_SelfManaged_RetriesMoveTransientErrors(t *testing.T) {
+	bootstrapper := &MockBootstrapper{}
+	installer := &MockInstaller{}
+	retriever := &MockKubeconfigRetriever{}
+
+	moveCalls := 0
+	mover := &MockMover{
+		MoveFunc: func(ctx context.Context, from, to *Cluster, opts MoveOptions) error {
+			moveCalls++
+			if moveCalls < 3 {
+				return fmt.Errorf("connection reset by peer")
+			}
+			return nil
+		},
+	}
+
+	mgr := NewManager(
+		WithBootstrapper(bootstrapper),
+		WithInstaller(installer),
+		WithTemplateGenerator(&MockTemplateGenerator{}),
+		WithApplier(&MockApplier{}),
+		WithMover(mover),
+		WithWaiter(&MockWaiter{}),
+		WithInfoRetriever(retriever),
+		WithDescriber(&MockClusterDescriber{}),
+	)
+
+	ctx := context.Background()
+	_, err := mgr.CreateCluster(ctx, CreateClusterOptions{
+		Name:                   "self-managed-retry",
+		InfrastructureProvider: "docker",
+		SelfManaged:            true,
+		WaitForReady:           true,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if moveCalls != 3 {
+		t.Fatalf("expected move to be retried 3 times, got %d", moveCalls)
+	}
+}

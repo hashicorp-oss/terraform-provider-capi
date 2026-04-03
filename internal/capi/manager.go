@@ -24,6 +24,8 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
+	"time"
 )
 
 // Manager orchestrates the full CAPI cluster lifecycle.
@@ -285,8 +287,9 @@ func (m *Manager) CreateCluster(ctx context.Context, opts CreateClusterOptions) 
 			return nil, fmt.Errorf("installing CAPI on workload cluster for pivot: %w", err)
 		}
 
-		// Move CAPI management from bootstrap to workload
-		if err := m.mover.Move(ctx, mgmtCluster, workloadCluster, MoveOptions{
+		// Move CAPI management from bootstrap to workload.
+		// EKS Anywhere applies retry policy here to absorb transient network faults.
+		if err := m.moveWithRetry(ctx, mgmtCluster, workloadCluster, MoveOptions{
 			Namespace: namespace,
 		}); err != nil {
 			m.cleanupOnError(ctx, bootstrapCluster)
@@ -409,4 +412,60 @@ func (m *Manager) cleanupOnError(ctx context.Context, bootstrapCluster *Cluster)
 	if err := m.bootstrapper.Delete(ctx, bootstrapCluster); err != nil {
 		m.logger.Printf("Warning: failed to cleanup bootstrap cluster %s: %v", bootstrapCluster.Name, err)
 	}
+}
+
+func (m *Manager) moveWithRetry(ctx context.Context, from, to *Cluster, opts MoveOptions) error {
+	const maxAttempts = 4
+	baseWait := 5 * time.Second
+
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		err := m.mover.Move(ctx, from, to, opts)
+		if err == nil {
+			return nil
+		}
+
+		lastErr = err
+		if !isRetryableMoveError(err) || attempt == maxAttempts {
+			break
+		}
+
+		wait := baseWait * time.Duration(1<<(attempt-1))
+		m.logger.Printf("Retrying CAPI move after transient error (attempt %d/%d, wait=%s): %v", attempt, maxAttempts, wait, err)
+
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+
+	return lastErr
+}
+
+func isRetryableMoveError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	msg := strings.ToLower(err.Error())
+	patterns := []string{
+		"connection reset",
+		"connection refused",
+		"timeout",
+		"i/o timeout",
+		"eof",
+		"temporary",
+		"tls handshake timeout",
+	}
+
+	for _, pattern := range patterns {
+		if strings.Contains(msg, pattern) {
+			return true
+		}
+	}
+
+	return false
 }

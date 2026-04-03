@@ -10,6 +10,65 @@ description: |-
 
 Manages a Cluster API cluster using clusterctl
 
+## Lifecycle Model
+
+This resource follows the EKS Anywhere cluster lifecycle pattern:
+
+1. Bootstrap management cluster is created when management_kubeconfig is not supplied.
+2. CAPI providers are installed on the management cluster using clusterctl init.
+3. Cluster template is generated and applied.
+4. Readiness waits are executed when wait_for_ready is true.
+5. Workload kubeconfig is retrieved.
+6. For self-managed clusters, CAPI management is pivoted from bootstrap to workload.
+7. Bootstrap cluster is cleaned up after a successful self-managed pivot.
+
+The create flow is implemented in internal/capi/manager.go and coordinated by the capi_cluster resource.
+
+## Cluster Creation Workflow
+
+Create behavior is intentionally task-oriented and matches EKS Anywhere workflow stages:
+
+- Preflight: validates lifecycle options and provider combinations.
+- Bootstrap: creates a temporary kind cluster unless management_kubeconfig is provided.
+- CAPI init: installs core, bootstrap, control plane, and infrastructure providers.
+- Generate and apply: renders cluster manifests and applies them to the management cluster.
+- Wait and inspect: waits for readiness and captures cluster description and kubeconfig.
+- Pivot (optional): when self_managed = true, performs clusterctl move to workload management.
+
+## Update Semantics
+
+Updates are handled as reconcile operations:
+
+- Mutable fields (for example kubernetes_version, machine counts, and flavor) trigger template regeneration and apply.
+- Identity and lifecycle-anchor fields use replace semantics:
+  - name
+  - infrastructure_provider
+  - management_kubeconfig
+  - bootstrap_provider
+  - control_plane_provider
+  - core_provider
+  - target_namespace
+  - self_managed
+
+This mirrors EKS Anywhere's separation between cluster identity/lifecycle mode and in-place spec reconciliation.
+
+## Tinkerbell Lifecycle Behavior
+
+When infrastructure_provider = "tinkerbell", this resource enforces EKS Anywhere-aligned constraints:
+
+- self_managed must be true, so management pivots from bootstrap to workload.
+- bootstrap_provider must be kubeadm when specified.
+- control_plane_provider must be kubeadm when specified.
+
+These constraints align with Tinkerbell's two-stage stack lifecycle in EKS Anywhere:
+
+1. Bootstrap-stage management and provisioning bootstrap.
+2. Workload-stage management after pivot, followed by bootstrap cleanup.
+
+## Move Retry Resilience
+
+Self-managed pivot operations include retry logic for transient network failures during CAPI move, with exponential backoff. This follows the same reliability principle used in EKS Anywhere's move flow to tolerate temporary API/connectivity failures.
+
 ## Example Usage
 
 ```terraform

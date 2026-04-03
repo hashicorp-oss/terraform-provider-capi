@@ -9,11 +9,14 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 
+	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/boolplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
@@ -85,6 +88,9 @@ func (r *ClusterResource) Schema(ctx context.Context, req resource.SchemaRequest
 			"management_kubeconfig": schema.StringAttribute{
 				MarkdownDescription: "Path to the kubeconfig for an existing management cluster. If not provided, a bootstrap cluster (kind) is created automatically",
 				Optional:            true,
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.RequiresReplace(),
+				},
 			},
 			"skip_init": schema.BoolAttribute{
 				MarkdownDescription: "Skip running clusterctl init on the management cluster (use if CAPI is already installed)",
@@ -103,27 +109,45 @@ func (r *ClusterResource) Schema(ctx context.Context, req resource.SchemaRequest
 				Optional:            true,
 				Computed:            true,
 				Default:             booldefault.StaticBool(false),
+				PlanModifiers: []planmodifier.Bool{
+					boolplanmodifier.RequiresReplace(),
+				},
 			},
 			"infrastructure_provider": schema.StringAttribute{
 				MarkdownDescription: "Infrastructure provider to use (e.g., 'docker', 'aws', 'azure')",
 				Required:            true,
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.RequiresReplace(),
+				},
 			},
 			"bootstrap_provider": schema.StringAttribute{
 				MarkdownDescription: "Bootstrap provider to use (e.g., 'kubeadm')",
 				Optional:            true,
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.RequiresReplace(),
+				},
 			},
 			"control_plane_provider": schema.StringAttribute{
 				MarkdownDescription: "Control plane provider to use (e.g., 'kubeadm')",
 				Optional:            true,
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.RequiresReplace(),
+				},
 			},
 			"core_provider": schema.StringAttribute{
 				MarkdownDescription: "Core provider version (e.g., 'cluster-api:v1.7.0')",
 				Optional:            true,
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.RequiresReplace(),
+				},
 			},
 			"target_namespace": schema.StringAttribute{
 				MarkdownDescription: "Target namespace for the cluster",
 				Optional:            true,
 				Computed:            true,
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.RequiresReplace(),
+				},
 			},
 			"kubernetes_version": schema.StringAttribute{
 				MarkdownDescription: "Kubernetes version for the workload cluster",
@@ -199,6 +223,11 @@ func (r *ClusterResource) Create(ctx context.Context, req resource.CreateRequest
 	var data ClusterResourceModel
 
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &data)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	r.validateLifecycleConfig(&data, &resp.Diagnostics)
 	if resp.Diagnostics.HasError() {
 		return
 	}
@@ -366,19 +395,116 @@ func (r *ClusterResource) Read(ctx context.Context, req resource.ReadRequest, re
 }
 
 func (r *ClusterResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
-	var data ClusterResourceModel
+	var plan ClusterResourceModel
+	var state ClusterResourceModel
 
-	resp.Diagnostics.Append(req.Plan.Get(ctx, &data)...)
+	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
+	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	r.validateLifecycleConfig(&plan, &resp.Diagnostics)
 	if resp.Diagnostics.HasError() {
 		return
 	}
 
 	tflog.Info(ctx, "Updating CAPI cluster", map[string]interface{}{
-		"name": data.Name.ValueString(),
+		"name": plan.Name.ValueString(),
 	})
 
-	// Save updated data into Terraform state
-	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
+	managementKubeconfig := resolveManagementKubeconfig(plan, state)
+	if managementKubeconfig == "" {
+		resp.Diagnostics.AddError(
+			"Cluster Update Error",
+			"Unable to determine management kubeconfig for update reconciliation. Set management_kubeconfig explicitly or create the cluster as self_managed so a workload kubeconfig can be reused.",
+		)
+		return
+	}
+
+	namespace := "default"
+	if !plan.TargetNamespace.IsNull() && plan.TargetNamespace.ValueString() != "" {
+		namespace = plan.TargetNamespace.ValueString()
+	}
+
+	reconcileOpts := capi.CreateClusterOptions{
+		Name:                   plan.Name.ValueString(),
+		Namespace:              namespace,
+		InfrastructureProvider: plan.InfrastructureProvider.ValueString(),
+		SkipInit:               true,
+		WaitForReady:           plan.WaitForReady.ValueBool(),
+		SelfManaged:            false,
+		ManagementKubeconfig:   managementKubeconfig,
+		Wait:                   capi.DefaultWaitOptions(),
+	}
+
+	if !plan.BootstrapProvider.IsNull() {
+		reconcileOpts.BootstrapProvider = plan.BootstrapProvider.ValueString()
+	}
+	if !plan.ControlPlaneProvider.IsNull() {
+		reconcileOpts.ControlPlaneProvider = plan.ControlPlaneProvider.ValueString()
+	}
+	if !plan.CoreProvider.IsNull() {
+		reconcileOpts.CoreProvider = plan.CoreProvider.ValueString()
+	}
+	if !plan.KubernetesVersion.IsNull() {
+		reconcileOpts.KubernetesVersion = plan.KubernetesVersion.ValueString()
+	}
+	if !plan.ControlPlaneMachineCount.IsNull() {
+		count := plan.ControlPlaneMachineCount.ValueInt64()
+		reconcileOpts.ControlPlaneMachineCount = &count
+	}
+	if !plan.WorkerMachineCount.IsNull() {
+		count := plan.WorkerMachineCount.ValueInt64()
+		reconcileOpts.WorkerMachineCount = &count
+	}
+	if !plan.Flavor.IsNull() {
+		reconcileOpts.Flavor = plan.Flavor.ValueString()
+	}
+
+	result, err := r.manager.CreateCluster(ctx, reconcileOpts)
+	if err != nil {
+		resp.Diagnostics.AddError("Cluster Update Error", fmt.Sprintf("Failed to reconcile cluster: %s", err))
+		return
+	}
+
+	plan.Id = types.StringValue(plan.Name.ValueString())
+
+	if !plan.KubeconfigPath.IsNull() && plan.KubeconfigPath.ValueString() == "" {
+		plan.KubeconfigPath = types.StringNull()
+	}
+
+	if result.Kubeconfig != "" {
+		plan.Kubeconfig = types.StringValue(result.Kubeconfig)
+	} else {
+		plan.Kubeconfig = state.Kubeconfig
+	}
+
+	if result.ClusterDescription != "" {
+		plan.ClusterDescription = types.StringValue(result.ClusterDescription)
+	} else {
+		plan.ClusterDescription = state.ClusterDescription
+	}
+
+	if result.Endpoint != "" {
+		plan.Endpoint = types.StringValue(result.Endpoint)
+	} else {
+		plan.Endpoint = state.Endpoint
+	}
+
+	if result.CACertificate != "" {
+		plan.ClusterCACertificate = types.StringValue(result.CACertificate)
+	} else {
+		plan.ClusterCACertificate = state.ClusterCACertificate
+	}
+
+	if state.BootstrapClusterName.IsNull() {
+		plan.BootstrapClusterName = types.StringNull()
+	} else {
+		plan.BootstrapClusterName = state.BootstrapClusterName
+	}
+
+	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
 func (r *ClusterResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
@@ -430,4 +556,68 @@ func (r *ClusterResource) Delete(ctx context.Context, req resource.DeleteRequest
 
 func (r *ClusterResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
 	resource.ImportStatePassthroughID(ctx, path.Root("id"), req, resp)
+}
+
+func (r *ClusterResource) validateLifecycleConfig(data *ClusterResourceModel, diags *diag.Diagnostics) {
+	provider := strings.ToLower(data.InfrastructureProvider.ValueString())
+
+	supportedProviders := map[string]struct{}{
+		"aws":        {},
+		"azure":      {},
+		"docker":     {},
+		"openstack":  {},
+		"tinkerbell": {},
+		"vsphere":    {},
+	}
+
+	if _, ok := supportedProviders[provider]; !ok {
+		diags.AddError(
+			"Unsupported infrastructure_provider",
+			fmt.Sprintf("infrastructure_provider %q is not currently validated by this provider. Supported values are: aws, azure, docker, openstack, tinkerbell, vsphere", provider),
+		)
+	}
+
+	if provider == "tinkerbell" {
+		if data.SelfManaged.IsNull() || !data.SelfManaged.ValueBool() {
+			diags.AddError(
+				"Invalid Tinkerbell lifecycle configuration",
+				"tinkerbell clusters must be self_managed to mirror EKS Anywhere's bootstrap-to-workload management pivot pattern.",
+			)
+		}
+
+		if !data.BootstrapProvider.IsNull() && data.BootstrapProvider.ValueString() != "" && data.BootstrapProvider.ValueString() != "kubeadm" {
+			diags.AddError(
+				"Invalid bootstrap_provider for tinkerbell",
+				"tinkerbell currently supports bootstrap_provider = \"kubeadm\".",
+			)
+		}
+
+		if !data.ControlPlaneProvider.IsNull() && data.ControlPlaneProvider.ValueString() != "" && data.ControlPlaneProvider.ValueString() != "kubeadm" {
+			diags.AddError(
+				"Invalid control_plane_provider for tinkerbell",
+				"tinkerbell currently supports control_plane_provider = \"kubeadm\".",
+			)
+		}
+	}
+}
+
+func resolveManagementKubeconfig(plan ClusterResourceModel, state ClusterResourceModel) string {
+	if !plan.ManagementKubeconfig.IsNull() && plan.ManagementKubeconfig.ValueString() != "" {
+		return plan.ManagementKubeconfig.ValueString()
+	}
+
+	if !state.ManagementKubeconfig.IsNull() && state.ManagementKubeconfig.ValueString() != "" {
+		return state.ManagementKubeconfig.ValueString()
+	}
+
+	if !plan.SelfManaged.IsNull() && plan.SelfManaged.ValueBool() {
+		if !plan.KubeconfigPath.IsNull() && plan.KubeconfigPath.ValueString() != "" {
+			return plan.KubeconfigPath.ValueString()
+		}
+		if !state.KubeconfigPath.IsNull() && state.KubeconfigPath.ValueString() != "" {
+			return state.KubeconfigPath.ValueString()
+		}
+	}
+
+	return ""
 }
