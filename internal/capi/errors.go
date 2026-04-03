@@ -35,9 +35,6 @@ var (
 
 	// ErrKubeconfig is returned when kubeconfig retrieval fails.
 	ErrKubeconfig = errors.New("failed to retrieve kubeconfig")
-
-	// ErrCommandNotFound is returned when a required CLI tool is not found.
-	ErrCommandNotFound = errors.New("required command not found in PATH")
 )
 
 // BootstrapError wraps bootstrap-related errors with context.

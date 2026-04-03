@@ -94,7 +94,7 @@ All interfaces are injectable via functional options on `Manager`, enabling full
 |---|---|
 | `createBootStrapClusterTask` | `KindBootstrapper.Create()` |
 | `installCAPIComponentsTask` | `ClusterctlInstaller.Init()` |
-| `createWorkloadClusterTask` | `ClusterctlTemplateGenerator.Generate()` + `KubectlApplier.Apply()` |
+| `createWorkloadClusterTask` | `ClusterctlTemplateGenerator.Generate()` + `DynamicApplier.Apply()` |
 | `moveClusterManagementTask` | `ClusterctlMover.Move()` |
 | `deleteBootstrapClusterTask` | `KindBootstrapper.Delete()` |
 
@@ -281,3 +281,108 @@ To add a new CAPI management operation, follow this pattern:
 2. Define default `CreateClusterOptions` similar to `internal/capi/docker/provider.go`
 3. Add any provider-specific pre/post hooks to the `Manager` workflow
 4. Add integration tests
+
+## Design - EKS Anywhere
+
+```mermaid
+graph TD
+    CLI["eksctl-anywhere CLI"]:::ui
+
+    subgraph Core["Core Components"]
+        Factory["Factory / DependencyInjection"]
+        CM["ClusterManager"]
+        PI["Provider Interface"]
+        CAPI["Cluster API Manager"]
+    end
+
+    subgraph Executables
+        K["kubectl wrapper"]
+        C["clusterctl wrapper"]
+        H["helm wrapper"]
+        O["other executables"]
+    end
+
+    subgraph Features
+        G["GitOps / Flux"]
+        A["AWS IAM Auth"]
+        P["Curated Packages"]
+    end
+
+    subgraph Providers
+        vSphere["vSphere Provider"]
+        Docker["Docker Provider"]
+        Tinkerbell["Tinkerbell Provider"]
+        CloudStack["CloudStack Provider"]
+        Nutanix["Nutanix Provider"]
+        Snow["Snow Provider"]
+    end
+
+    CLI --> Factory
+    Factory --> CM
+    Factory --> PI
+    CM --> CAPI
+    PI --> vSphere
+    PI --> Docker
+    PI --> Tinkerbell
+    PI --> CloudStack
+    PI --> Nutanix
+    PI --> Snow
+    Executables --> Core
+    Features --> Core
+```
+
+## Tinkerbell Provider
+
+### Hardware Management
+
+The Tinkerbell provider manages hardware resources through a catalogue system, which tracks available and allocated hardware for cluster components.
+
+```mermaid
+flowchart TD
+    CSV["Hardware CSV file"]
+    CSV -->|Input| PARSER["Hardware CSV Parser"]
+    PARSER -->|Normalized hardware| VALIDATOR["Machine Validator"]
+    BMC["BMC Options"]
+
+    VALIDATOR -->|Validated hardware| CATALOGUE["Hardware Catalogue"]
+    BMC -->|Configure| CATALOGUE
+
+    CATALOGUE --> INDICES["Hardware Indices"]
+    CATALOGUE -->|Apply to cluster| K8S["Kubernetes Cluster"]
+
+    INDICES -->|Hardware ID Index| LID["Lookup by ID"]
+    INDICES -->|BMC Ref Index| LBMC["Lookup by BMC Ref"]
+    INDICES -->|Secret Name Index| LSECRET["Lookup by Secret Name"]
+
+    K8S -->|Provision| SERVERS["Physical Servers"]
+```
+
+### Cluster Lifecycle Management
+
+```mermaid
+sequenceDiagram
+    actor User
+    participant CLI as eksctl anywhere CLI
+    participant TP as Tinkerbell Provider
+    participant BC as Bootstrap Cluster
+    participant HM as Hardware Machines
+    participant WC as Workload Cluster
+
+    User->>CLI: Create cluster command
+    CLI->>TP: SetupAndValidateCreateCluster()
+    TP-->>TP: configureSshKeys()
+    TP-->>TP: validateHardwareCSV()
+    TP-->>TP: validateAvailabilityOfHardware()
+    TP-->>TP: validateMachineConfigs()
+    TP->>BC: Install Tinkerbell Stack
+    TP->>BC: PreCAPIInstallOnBootstrap()
+    BC-->>BC: Install Tinkerbell CRDs
+    TP->>BC: GenerateCAPISpecForCreate()
+    BC->>HM: Apply hardware resources
+    BC->>HM: Wait for BMC connectivity
+    HM-->>HM: Provision machines
+    TP->>WC: PostWorkloadInit()
+    WC-->>WC: Install Tinkerbell Stack
+    TP->>BC: UninstallLocal()
+    CLI->>User: Cluster ready
+```

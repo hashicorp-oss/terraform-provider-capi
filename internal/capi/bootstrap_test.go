@@ -5,29 +5,18 @@ package capi
 
 import (
 	"context"
-	"os/exec"
 	"testing"
 )
 
-func TestKindBootstrapper_CheckAvailability(t *testing.T) {
+func TestKindBootstrapperConstructors(t *testing.T) {
 	b := NewKindBootstrapper()
-	// Check if kind is available (test may skip if not installed)
-	_, err := exec.LookPath("kind")
-	if err != nil {
-		t.Skip("kind not available in PATH, skipping")
+	if b.nodeImage != "" {
+		t.Errorf("expected empty nodeImage, got %q", b.nodeImage)
 	}
 
-	err = b.checkKindAvailable(context.Background())
-	if err != nil {
-		t.Errorf("expected kind to be available: %v", err)
-	}
-}
-
-func TestKindBootstrapper_CheckAvailability_MissingBinary(t *testing.T) {
-	b := NewKindBootstrapperWithBinary("/nonexistent/kind")
-	err := b.checkKindAvailable(context.Background())
-	if err == nil {
-		t.Error("expected error for missing binary")
+	b2 := NewKindBootstrapperWithNodeImage("kindest/node:v1.31.0")
+	if b2.nodeImage != "kindest/node:v1.31.0" {
+		t.Errorf("expected nodeImage 'kindest/node:v1.31.0', got %q", b2.nodeImage)
 	}
 }
 
@@ -82,15 +71,11 @@ nodes:
 }
 
 func TestKindBootstrapper_Exists_ClusterNotFound(t *testing.T) {
-	_, err := exec.LookPath("kind")
-	if err != nil {
-		t.Skip("kind not available in PATH, skipping")
-	}
-
 	b := NewKindBootstrapper()
 	exists, err := b.Exists(context.Background(), "nonexistent-cluster-12345")
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		// Docker may not be available - skip gracefully
+		t.Skip("Docker may not be available:", err)
 	}
 	if exists {
 		t.Error("expected cluster to not exist")

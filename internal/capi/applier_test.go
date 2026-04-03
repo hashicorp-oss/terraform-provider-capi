@@ -4,39 +4,19 @@
 package capi
 
 import (
-	"context"
-	"os/exec"
 	"testing"
 )
 
-func TestKubectlApplier_CheckAvailability(t *testing.T) {
-	a := NewKubectlApplier()
-	_, err := exec.LookPath("kubectl")
-	if err != nil {
-		t.Skip("kubectl not available in PATH, skipping")
-	}
-
-	err = a.checkKubectlAvailable()
-	if err != nil {
-		t.Errorf("expected kubectl to be available: %v", err)
+func TestDynamicApplier_NewDefaults(t *testing.T) {
+	a := NewDynamicApplier()
+	if a.fieldManager != "terraform-provider-capi" {
+		t.Errorf("expected field manager 'terraform-provider-capi', got %q", a.fieldManager)
 	}
 }
 
-func TestKubectlApplier_CheckAvailability_MissingBinary(t *testing.T) {
-	a := NewKubectlApplierWithBinary("/nonexistent/kubectl")
-	err := a.checkKubectlAvailable()
-	if err == nil {
-		t.Error("expected error for missing binary")
-	}
-}
-
-func TestKubectlWaiter_AreMachineDeploymentsReady_NoBinary(t *testing.T) {
-	w := &KubectlWaiter{kubectlBinary: "/nonexistent/kubectl"}
-	_, err := w.areMachineDeploymentsReady(context.Background(), &Cluster{
-		Name:           "test",
-		KubeconfigPath: "/tmp/fake",
-	}, "test", "default")
-	if err == nil {
-		t.Error("expected error for missing kubectl")
+func TestDynamicApplier_CustomFieldManager(t *testing.T) {
+	a := NewDynamicApplierWithFieldManager("custom-manager")
+	if a.fieldManager != "custom-manager" {
+		t.Errorf("expected field manager 'custom-manager', got %q", a.fieldManager)
 	}
 }

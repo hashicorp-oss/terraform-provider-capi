@@ -8,37 +8,35 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strings"
+	"time"
+
+	kindcluster "sigs.k8s.io/kind/pkg/cluster"
 )
 
 // KindBootstrapper creates bootstrap clusters using kind (Kubernetes in Docker).
+// Uses the kind Go library directly instead of shelling out to the kind CLI.
 // This mirrors EKS Anywhere's bootstrap cluster approach.
 type KindBootstrapper struct {
-	// kindBinary is the path to the kind binary. Defaults to "kind".
-	kindBinary string
+	// nodeImage overrides the default kind node image (e.g. "kindest/node:v1.31.0").
+	nodeImage string
 }
 
 // NewKindBootstrapper creates a new KindBootstrapper.
 func NewKindBootstrapper() *KindBootstrapper {
-	return &KindBootstrapper{
-		kindBinary: "kind",
-	}
+	return &KindBootstrapper{}
 }
 
-// NewKindBootstrapperWithBinary creates a KindBootstrapper with a specific kind binary path.
-func NewKindBootstrapperWithBinary(kindBinary string) *KindBootstrapper {
+// NewKindBootstrapperWithNodeImage creates a KindBootstrapper with a specific node image.
+func NewKindBootstrapperWithNodeImage(nodeImage string) *KindBootstrapper {
 	return &KindBootstrapper{
-		kindBinary: kindBinary,
+		nodeImage: nodeImage,
 	}
 }
 
 // Create creates a new kind cluster for use as a CAPI bootstrap cluster.
 func (b *KindBootstrapper) Create(ctx context.Context, opts BootstrapOptions) (*Cluster, error) {
-	if err := b.checkKindAvailable(ctx); err != nil {
-		return nil, err
-	}
+	provider := kindcluster.NewProvider()
 
 	name := opts.Name
 	if name == "" {
@@ -55,11 +53,16 @@ func (b *KindBootstrapper) Create(ctx context.Context, opts BootstrapOptions) (*
 		return b.clusterFromName(name)
 	}
 
-	// Build kind create command
-	args := []string{"create", "cluster", "--name", name}
+	// Build kind create options
+	var createOpts []kindcluster.CreateOption
 
+	// Set node image from explicit override or kubernetes version
+	nodeImage := b.nodeImage
 	if opts.KubernetesVersion != "" {
-		args = append(args, "--image", fmt.Sprintf("kindest/node:%s", opts.KubernetesVersion))
+		nodeImage = fmt.Sprintf("kindest/node:%s", opts.KubernetesVersion)
+	}
+	if nodeImage != "" {
+		createOpts = append(createOpts, kindcluster.CreateWithNodeImage(nodeImage))
 	}
 
 	// If extra port mappings are needed, generate a kind config
@@ -68,34 +71,17 @@ func (b *KindBootstrapper) Create(ctx context.Context, opts BootstrapOptions) (*
 		if err != nil {
 			return nil, &BootstrapError{ClusterName: name, Operation: "generate-config", Err: err}
 		}
-
-		tmpFile, err := os.CreateTemp("", "kind-config-*.yaml")
-		if err != nil {
-			return nil, &BootstrapError{ClusterName: name, Operation: "write-config", Err: err}
-		}
-		defer os.Remove(tmpFile.Name())
-
-		if _, err := tmpFile.Write([]byte(config)); err != nil {
-			tmpFile.Close()
-			return nil, &BootstrapError{ClusterName: name, Operation: "write-config", Err: err}
-		}
-		tmpFile.Close()
-
-		args = append(args, "--config", tmpFile.Name())
+		createOpts = append(createOpts, kindcluster.CreateWithRawConfig([]byte(config)))
 	}
 
 	// Wait for ready
-	args = append(args, "--wait", "5m")
+	createOpts = append(createOpts, kindcluster.CreateWithWaitForReady(5*time.Minute))
 
-	cmd := exec.CommandContext(ctx, b.kindBinary, args...)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
+	if err := provider.Create(name, createOpts...); err != nil {
 		return nil, &BootstrapError{
 			ClusterName: name,
 			Operation:   "create",
-			Err:         fmt.Errorf("%w: %s", ErrBootstrapClusterCreate, stderr.String()),
+			Err:         fmt.Errorf("%w: %v", ErrBootstrapClusterCreate, err),
 		}
 	}
 
@@ -104,19 +90,13 @@ func (b *KindBootstrapper) Create(ctx context.Context, opts BootstrapOptions) (*
 
 // Delete deletes a kind bootstrap cluster.
 func (b *KindBootstrapper) Delete(ctx context.Context, cluster *Cluster) error {
-	if err := b.checkKindAvailable(ctx); err != nil {
-		return err
-	}
+	provider := kindcluster.NewProvider()
 
-	cmd := exec.CommandContext(ctx, b.kindBinary, "delete", "cluster", "--name", cluster.Name)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
+	if err := provider.Delete(cluster.Name, ""); err != nil {
 		return &BootstrapError{
 			ClusterName: cluster.Name,
 			Operation:   "delete",
-			Err:         fmt.Errorf("%w: %s", ErrBootstrapClusterDelete, stderr.String()),
+			Err:         fmt.Errorf("%w: %v", ErrBootstrapClusterDelete, err),
 		}
 	}
 
@@ -125,17 +105,15 @@ func (b *KindBootstrapper) Delete(ctx context.Context, cluster *Cluster) error {
 
 // Exists checks if a kind cluster with the given name exists.
 func (b *KindBootstrapper) Exists(ctx context.Context, name string) (bool, error) {
-	cmd := exec.CommandContext(ctx, b.kindBinary, "get", "clusters")
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	provider := kindcluster.NewProvider()
 
-	if err := cmd.Run(); err != nil {
-		return false, fmt.Errorf("listing kind clusters: %s", stderr.String())
+	clusters, err := provider.List()
+	if err != nil {
+		return false, fmt.Errorf("listing kind clusters: %w", err)
 	}
 
-	for _, line := range strings.Split(strings.TrimSpace(stdout.String()), "\n") {
-		if strings.TrimSpace(line) == name {
+	for _, c := range clusters {
+		if c == name {
 			return true, nil
 		}
 	}
@@ -143,34 +121,23 @@ func (b *KindBootstrapper) Exists(ctx context.Context, name string) (bool, error
 	return false, nil
 }
 
-// checkKindAvailable verifies that the kind binary is available.
-func (b *KindBootstrapper) checkKindAvailable(ctx context.Context) error {
-	_, err := exec.LookPath(b.kindBinary)
-	if err != nil {
-		return fmt.Errorf("%w: kind binary not found at %q - install from https://kind.sigs.k8s.io/", ErrCommandNotFound, b.kindBinary)
-	}
-	return nil
-}
-
 // clusterFromName creates a Cluster from a kind cluster name.
 func (b *KindBootstrapper) clusterFromName(name string) (*Cluster, error) {
+	provider := kindcluster.NewProvider()
+
 	kubeconfigPath := filepath.Join(os.TempDir(), fmt.Sprintf("kind-%s-kubeconfig", name))
 
-	// Export kubeconfig
-	cmd := exec.Command(b.kindBinary, "get", "kubeconfig", "--name", name)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
+	// Get kubeconfig content using the kind Go library
+	kubeconfig, err := provider.KubeConfig(name, false)
+	if err != nil {
 		return nil, &BootstrapError{
 			ClusterName: name,
 			Operation:   "get-kubeconfig",
-			Err:         fmt.Errorf("getting kubeconfig: %s", stderr.String()),
+			Err:         fmt.Errorf("getting kubeconfig: %w", err),
 		}
 	}
 
-	if err := os.WriteFile(kubeconfigPath, stdout.Bytes(), 0600); err != nil {
+	if err := os.WriteFile(kubeconfigPath, []byte(kubeconfig), 0600); err != nil {
 		return nil, &BootstrapError{
 			ClusterName: name,
 			Operation:   "write-kubeconfig",

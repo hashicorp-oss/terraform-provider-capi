@@ -225,7 +225,7 @@ The workflow maps to these EKS Anywhere source files:
 | `Manager.CreateCluster()` | `pkg/workflows/management/create.go` → `Run()` |
 | `KindBootstrapper.Create()` | `pkg/workflows/management/create_bootstrap.go` → `createBootStrapClusterTask` |
 | `ClusterctlInstaller.Init()` | `pkg/workflows/management/create_install_capi.go` → `installCAPIComponentsTask` |
-| `ClusterctlTemplateGenerator.Generate()` + `KubectlApplier.Apply()` | `pkg/workflows/management/create_workload.go` → `createWorkloadClusterTask` |
+| `ClusterctlTemplateGenerator.Generate()` + `DynamicApplier.Apply()` | `pkg/workflows/management/create_workload.go` → `createWorkloadClusterTask` |
 | `ClusterctlMover.Move()` | `pkg/workflows/management/create_move_capi.go` → `moveClusterManagementTask` |
 | `KindBootstrapper.Delete()` | cleanup phase in `Run()` |
-| `KubectlWaiter` | `pkg/clustermanager/cluster_manager.go` → `waitForCAPI`, `waitForNodesReady` |
+| `DynamicWaiter` | `pkg/clustermanager/cluster_manager.go` → `waitForCAPI`, `waitForNodesReady` |
