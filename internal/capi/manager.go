@@ -159,13 +159,21 @@ func (m *Manager) CreateCluster(ctx context.Context, opts CreateClusterOptions) 
 		}
 	}
 
-	// Step 2: Install CAPI providers on management/bootstrap cluster
+	// Step 2: Install CAPI providers on management/bootstrap cluster.
+	// All addon providers (including those with customizations) go through
+	// clusterctl init. Customized addons have their component YAML modified
+	// transparently via the injected RepositoryClientFactory in the installer.
+	namespace := opts.Namespace
+	if namespace == "" {
+		namespace = "default"
+	}
 	if !opts.SkipInit {
 		m.logger.Printf("Installing CAPI providers on %s", mgmtCluster.Name)
 		initOpts := InitOptions{
 			CoreProvider:            opts.CoreProvider,
 			InfrastructureProviders: []string{opts.InfrastructureProvider},
-			AddonProviders:          opts.AddonProviders,
+			AddonProviders:          AddonProviderStrings(opts.Addons),
+			Addons:                  opts.Addons,
 		}
 		if opts.BootstrapProvider != "" {
 			initOpts.BootstrapProviders = []string{opts.BootstrapProvider}
@@ -183,10 +191,6 @@ func (m *Manager) CreateCluster(ctx context.Context, opts CreateClusterOptions) 
 
 	// Step 3: Generate cluster template
 	m.logger.Printf("Generating cluster template for %s", opts.Name)
-	namespace := opts.Namespace
-	if namespace == "" {
-		namespace = "default"
-	}
 
 	templateOpts := TemplateOptions{
 		ClusterName:              opts.Name,
@@ -275,7 +279,8 @@ func (m *Manager) CreateCluster(ctx context.Context, opts CreateClusterOptions) 
 		initOpts := InitOptions{
 			CoreProvider:            opts.CoreProvider,
 			InfrastructureProviders: []string{opts.InfrastructureProvider},
-			AddonProviders:          opts.AddonProviders,
+			AddonProviders:          AddonProviderStrings(opts.Addons),
+			Addons:                  opts.Addons,
 		}
 		if opts.BootstrapProvider != "" {
 			initOpts.BootstrapProviders = []string{opts.BootstrapProvider}

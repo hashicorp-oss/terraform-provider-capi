@@ -3,6 +3,7 @@ module github.com/tinkerbell-community/terraform-provider-capi
 go 1.25.5
 
 require (
+	github.com/evanphx/json-patch/v5 v5.9.11
 	github.com/hashicorp/terraform-plugin-framework v1.17.0
 	github.com/hashicorp/terraform-plugin-go v0.29.0
 	github.com/hashicorp/terraform-plugin-log v0.10.0
@@ -11,6 +12,7 @@ require (
 	k8s.io/client-go v0.34.3
 	sigs.k8s.io/cluster-api v1.12.2
 	sigs.k8s.io/kind v0.31.0
+	sigs.k8s.io/yaml v1.6.0
 )
 
 require (
@@ -37,7 +39,6 @@ require (
 	github.com/distribution/reference v0.6.0 // indirect
 	github.com/drone/envsubst/v2 v2.0.0-20210730161058-179042472c46 // indirect
 	github.com/emicklei/go-restful/v3 v3.13.0 // indirect
-	github.com/evanphx/json-patch/v5 v5.9.11 // indirect
 	github.com/fatih/color v1.18.0 // indirect
 	github.com/fsnotify/fsnotify v1.9.0 // indirect
 	github.com/fxamacker/cbor/v2 v2.9.0 // indirect
@@ -158,7 +159,6 @@ require (
 	sigs.k8s.io/json v0.0.0-20241014173422-cfa47c3a1cc8 // indirect
 	sigs.k8s.io/randfill v1.0.0 // indirect
 	sigs.k8s.io/structured-merge-diff/v6 v6.3.0 // indirect
-	sigs.k8s.io/yaml v1.6.0 // indirect
 )
 
 tool github.com/hashicorp/terraform-plugin-docs/cmd/tfplugindocs

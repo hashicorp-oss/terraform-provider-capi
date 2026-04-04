@@ -192,7 +192,7 @@ func (r *ClusterResource) Schema(ctx context.Context, req resource.SchemaRequest
 
 			// --- addons ---
 			"addons": schema.ListNestedAttribute{
-				MarkdownDescription: "Addon provider configurations modeled after the cluster-api-operator AddonProvider CRD (`operator.cluster.x-k8s.io/v1alpha2`). Each element installs one addon provider via `clusterctl init`.",
+				MarkdownDescription: "Addon provider configurations modeled after the cluster-api-operator AddonProvider CRD (`operator.cluster.x-k8s.io/v1alpha2`). Each element installs one addon provider via `clusterctl init`. Customizations (deployment, manager, patches) are applied natively by wrapping the clusterctl client's repository factory — the operator itself is not required.",
 				Optional:            true,
 				NestedObject: schema.NestedAttributeObject{
 					Attributes: map[string]schema.Attribute{
@@ -200,22 +200,19 @@ func (r *ClusterResource) Schema(ctx context.Context, req resource.SchemaRequest
 							MarkdownDescription: "Addon provider name and optional version (e.g., `helm:v0.2.12`).",
 							Required:            true,
 						},
-						"config_secret": schema.SingleNestedAttribute{
-							MarkdownDescription: "Reference to a Secret providing configuration variables for this addon provider. The secret contents will be treated as immutable.",
+						"config_variables": schema.MapAttribute{
+							MarkdownDescription: "Template variables injected into the provider's component YAML during processing (`${VAR}` substitution). These take precedence over clusterctl config and environment variables.",
+							ElementType:         types.StringType,
 							Optional:            true,
-							Attributes: map[string]schema.Attribute{
-								"name": schema.StringAttribute{
-									MarkdownDescription: "Name of the configuration Secret.",
-									Required:            true,
-								},
-								"namespace": schema.StringAttribute{
-									MarkdownDescription: "Namespace of the configuration Secret. Defaults to the provider namespace.",
-									Optional:            true,
-								},
-							},
+						},
+						"secret_config_variables": schema.MapAttribute{
+							MarkdownDescription: "Sensitive template variables injected into the provider's component YAML. Same mechanism as `config_variables` but for secret values.",
+							ElementType:         types.StringType,
+							Optional:            true,
+							Sensitive:          true,
 						},
 						"fetch_config": schema.SingleNestedAttribute{
-							MarkdownDescription: "Determines how the operator fetches components and metadata for the addon provider. Exactly one of `url`, `oci`, or `selector` must be specified.",
+							MarkdownDescription: "Determines how the provider fetches components and metadata. Exactly one of `url` or `oci` must be specified.",
 							Optional:            true,
 							Attributes: map[string]schema.Attribute{
 								"url": schema.StringAttribute{
@@ -225,17 +222,6 @@ func (r *ClusterResource) Schema(ctx context.Context, req resource.SchemaRequest
 								"oci": schema.StringAttribute{
 									MarkdownDescription: "OCI artifact reference for fetching provider components (e.g., `oci://ghcr.io/org/provider`).",
 									Optional:            true,
-								},
-								"selector": schema.SingleNestedAttribute{
-									MarkdownDescription: "Label selector for fetching components from ConfigMaps in the cluster.",
-									Optional:            true,
-									Attributes: map[string]schema.Attribute{
-										"match_labels": schema.MapAttribute{
-											MarkdownDescription: "Map of label key-value pairs to match ConfigMaps.",
-											ElementType:         types.StringType,
-											Optional:            true,
-										},
-									},
 								},
 							},
 						},
@@ -312,19 +298,9 @@ func (r *ClusterResource) Schema(ctx context.Context, req resource.SchemaRequest
 								},
 							},
 						},
-						"additional_manifests": schema.SingleNestedAttribute{
-							MarkdownDescription: "Reference to a ConfigMap containing additional manifests applied with the provider. The ConfigMap key must be `manifests`.",
+						"additional_manifests": schema.StringAttribute{
+							MarkdownDescription: "Inline YAML content of additional manifests to apply along with the provider components. Supports multi-document YAML (separated by `---`).",
 							Optional:            true,
-							Attributes: map[string]schema.Attribute{
-								"name": schema.StringAttribute{
-									MarkdownDescription: "Name of the ConfigMap.",
-									Required:            true,
-								},
-								"namespace": schema.StringAttribute{
-									MarkdownDescription: "Namespace of the ConfigMap. Defaults to the provider namespace.",
-									Optional:            true,
-								},
-							},
 						},
 						"manifest_patches": schema.ListAttribute{
 							MarkdownDescription: "JSON merge patches applied to rendered provider manifests. Each entry is an inline YAML/JSON blob string (RFC 7396). Cannot be used together with `patches`.",
@@ -847,6 +823,9 @@ func (r *ClusterResource) validateLifecycleConfig(ctx context.Context, data *Clu
 		}
 		validateInventory(ctx, inv, cpCount, workerCount, diags)
 	}
+
+	// Validate addons
+	validateAddons(ctx, data, diags)
 }
 
 func (r *ClusterResource) resolveManagementKubeconfig(ctx context.Context, plan *ClusterResourceModel, state *ClusterResourceModel) string {

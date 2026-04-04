@@ -57,6 +57,11 @@ type InitOptions struct {
 
 	// AddonProviders is the list of addon providers to install (e.g., "helm:v0.2.12").
 	AddonProviders []string
+
+	// Addons is the full addon configuration list. Addons with customizations
+	// trigger injection of a custom RepositoryClientFactory that applies
+	// capi-operator-style modifications to provider component YAML.
+	Addons []AddonConfig
 }
 
 // TemplateOptions configures cluster template generation.
@@ -187,8 +192,103 @@ type CreateClusterOptions struct {
 	// KubeconfigOutputPath is where to write the workload cluster kubeconfig.
 	KubeconfigOutputPath string
 
-	// AddonProviders is the list of addon providers to install.
-	AddonProviders []string
+	// Addons is the list of addon provider configurations.
+	// Simple addons (only Provider set) are installed via clusterctl init.
+	// Rich addons (with customizations) generate AddonProvider CRs for the operator.
+	Addons []AddonConfig
+}
+
+// AddonConfig carries the full configuration for a CAPI addon provider,
+// modeled after the cluster-api-operator AddonProvider CRD (v1alpha2).
+// Customizations are applied natively by wrapping the clusterctl client's
+// repository factory — the operator itself is not required.
+type AddonConfig struct {
+	// Provider is the addon provider name:version (e.g., "helm:v0.2.12").
+	Provider string
+
+	// ConfigVariables are template variables injected into the provider's
+	// component YAML during processing (${VAR} substitution).
+	ConfigVariables map[string]string
+
+	// SecretConfigVariables are sensitive template variables.
+	// Same mechanism as ConfigVariables, but for secret values.
+	SecretConfigVariables map[string]string
+
+	// FetchConfig configures how provider components are fetched.
+	FetchConfig *FetchConfig
+
+	// Deployment customizes the addon provider controller deployment.
+	Deployment *DeploymentConfig
+
+	// Manager configures the addon controller manager.
+	Manager *ManagerConfig
+
+	// AdditionalManifests is inline YAML content of additional manifests
+	// to apply along with the provider components.
+	AdditionalManifests string
+
+	// ManifestPatches are JSON merge patches applied to provider manifests (RFC 7396).
+	// Mutually exclusive with Patches.
+	ManifestPatches []string
+
+	// Patches are strategic merge or RFC6902 JSON patches with target selectors.
+	// Mutually exclusive with ManifestPatches.
+	Patches []PatchConfig
+}
+
+// HasCustomizations returns true if the addon has fields beyond the basic provider name:version.
+func (a *AddonConfig) HasCustomizations() bool {
+	return len(a.ConfigVariables) > 0 || len(a.SecretConfigVariables) > 0 ||
+		a.FetchConfig != nil || a.Deployment != nil ||
+		a.Manager != nil || a.AdditionalManifests != "" ||
+		len(a.ManifestPatches) > 0 || len(a.Patches) > 0
+}
+
+// FetchConfig configures how provider components are fetched.
+type FetchConfig struct {
+	URL string
+	OCI string
+}
+
+// DeploymentConfig customizes a provider controller deployment.
+type DeploymentConfig struct {
+	Replicas           *int64
+	NodeSelector       map[string]string
+	ServiceAccountName string
+	Containers         []ContainerConfig
+}
+
+// ContainerConfig overrides container settings in a provider deployment.
+type ContainerConfig struct {
+	Name     string
+	ImageURL string
+	Args     map[string]string
+	Command  []string
+}
+
+// ManagerConfig configures the provider controller manager.
+type ManagerConfig struct {
+	ProfilerAddress         string
+	MaxConcurrentReconciles *int64
+	Verbosity               *int64
+	FeatureGates            map[string]bool
+	AdditionalArgs          map[string]string
+}
+
+// PatchConfig is a patch with an optional target selector.
+type PatchConfig struct {
+	Patch  string
+	Target *PatchSelector
+}
+
+// PatchSelector selects objects to apply a patch to.
+type PatchSelector struct {
+	Group         string
+	Version       string
+	Kind          string
+	Name          string
+	Namespace     string
+	LabelSelector string
 }
 
 // DeleteClusterOptions configures cluster deletion.

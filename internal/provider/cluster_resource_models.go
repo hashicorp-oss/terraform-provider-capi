@@ -72,40 +72,24 @@ type WorkersModel struct {
 }
 
 // AddonModel describes a single CAPI addon provider, modeled after the
-// cluster-api-operator AddonProvider CRD (operator.cluster.x-k8s.io/v1alpha2).
+// cluster-api-operator AddonProvider CRD. Customizations are applied natively
+// by wrapping the clusterctl client's repository factory.
 type AddonModel struct {
-	Provider            types.String `tfsdk:"provider"`
-	ConfigSecret        types.Object `tfsdk:"config_secret"`
-	FetchConfig         types.Object `tfsdk:"fetch_config"`
-	Deployment          types.Object `tfsdk:"deployment"`
-	Manager             types.Object `tfsdk:"manager"`
-	AdditionalManifests types.Object `tfsdk:"additional_manifests"`
-	ManifestPatches     types.List   `tfsdk:"manifest_patches"`
-	Patches             types.List   `tfsdk:"patches"`
+	Provider              types.String `tfsdk:"provider"`
+	ConfigVariables       types.Map    `tfsdk:"config_variables"`
+	SecretConfigVariables types.Map    `tfsdk:"secret_config_variables"`
+	FetchConfig           types.Object `tfsdk:"fetch_config"`
+	Deployment            types.Object `tfsdk:"deployment"`
+	Manager               types.Object `tfsdk:"manager"`
+	AdditionalManifests   types.String `tfsdk:"additional_manifests"`
+	ManifestPatches       types.List   `tfsdk:"manifest_patches"`
+	Patches               types.List   `tfsdk:"patches"`
 }
 
-// AddonSecretRefModel maps to the cluster-api-operator SecretReference.
-type AddonSecretRefModel struct {
-	Name      types.String `tfsdk:"name"`
-	Namespace types.String `tfsdk:"namespace"`
-}
-
-// AddonConfigmapRefModel maps to the cluster-api-operator ConfigmapReference.
-type AddonConfigmapRefModel struct {
-	Name      types.String `tfsdk:"name"`
-	Namespace types.String `tfsdk:"namespace"`
-}
-
-// AddonFetchConfigModel maps to FetchConfiguration (oci, url, or selector).
+// AddonFetchConfigModel maps to FetchConfiguration (oci or url).
 type AddonFetchConfigModel struct {
-	URL      types.String `tfsdk:"url"`
-	OCI      types.String `tfsdk:"oci"`
-	Selector types.Object `tfsdk:"selector"`
-}
-
-// AddonLabelSelectorModel maps to metav1.LabelSelector (matchLabels only).
-type AddonLabelSelectorModel struct {
-	MatchLabels types.Map `tfsdk:"match_labels"`
+	URL types.String `tfsdk:"url"`
+	OCI types.String `tfsdk:"oci"`
 }
 
 // AddonDeploymentModel maps to the cluster-api-operator DeploymentSpec.
@@ -251,42 +235,22 @@ func workersAttrTypes() map[string]attr.Type {
 
 func addonAttrTypes() map[string]attr.Type {
 	return map[string]attr.Type{
-		"provider":             types.StringType,
-		"config_secret":        types.ObjectType{AttrTypes: addonSecretRefAttrTypes()},
-		"fetch_config":         types.ObjectType{AttrTypes: addonFetchConfigAttrTypes()},
-		"deployment":           types.ObjectType{AttrTypes: addonDeploymentAttrTypes()},
-		"manager":              types.ObjectType{AttrTypes: addonManagerAttrTypes()},
-		"additional_manifests": types.ObjectType{AttrTypes: addonConfigmapRefAttrTypes()},
-		"manifest_patches":     types.ListType{ElemType: types.StringType},
-		"patches":              types.ListType{ElemType: types.ObjectType{AttrTypes: addonPatchAttrTypes()}},
-	}
-}
-
-func addonSecretRefAttrTypes() map[string]attr.Type {
-	return map[string]attr.Type{
-		"name":      types.StringType,
-		"namespace": types.StringType,
-	}
-}
-
-func addonConfigmapRefAttrTypes() map[string]attr.Type {
-	return map[string]attr.Type{
-		"name":      types.StringType,
-		"namespace": types.StringType,
+		"provider":                types.StringType,
+		"config_variables":        types.MapType{ElemType: types.StringType},
+		"secret_config_variables": types.MapType{ElemType: types.StringType},
+		"fetch_config":            types.ObjectType{AttrTypes: addonFetchConfigAttrTypes()},
+		"deployment":              types.ObjectType{AttrTypes: addonDeploymentAttrTypes()},
+		"manager":                 types.ObjectType{AttrTypes: addonManagerAttrTypes()},
+		"additional_manifests":    types.StringType,
+		"manifest_patches":        types.ListType{ElemType: types.StringType},
+		"patches":                 types.ListType{ElemType: types.ObjectType{AttrTypes: addonPatchAttrTypes()}},
 	}
 }
 
 func addonFetchConfigAttrTypes() map[string]attr.Type {
 	return map[string]attr.Type{
-		"url":      types.StringType,
-		"oci":      types.StringType,
-		"selector": types.ObjectType{AttrTypes: addonLabelSelectorAttrTypes()},
-	}
-}
-
-func addonLabelSelectorAttrTypes() map[string]attr.Type {
-	return map[string]attr.Type{
-		"match_labels": types.MapType{ElemType: types.StringType},
+		"url": types.StringType,
+		"oci": types.StringType,
 	}
 }
 
@@ -696,9 +660,155 @@ func buildCreateOptions(ctx context.Context, data *ClusterResourceModel) (*capi.
 	addons, d := extractAddons(ctx, data)
 	diags.Append(d...)
 	for _, addon := range addons {
+		ac := capi.AddonConfig{}
 		if !addon.Provider.IsNull() {
-			opts.AddonProviders = append(opts.AddonProviders, addon.Provider.ValueString())
+			ac.Provider = addon.Provider.ValueString()
 		}
+
+		// ConfigVariables
+		if !addon.ConfigVariables.IsNull() && !addon.ConfigVariables.IsUnknown() {
+			vars := map[string]string{}
+			diags.Append(addon.ConfigVariables.ElementsAs(ctx, &vars, false)...)
+			ac.ConfigVariables = vars
+		}
+
+		// SecretConfigVariables
+		if !addon.SecretConfigVariables.IsNull() && !addon.SecretConfigVariables.IsUnknown() {
+			vars := map[string]string{}
+			diags.Append(addon.SecretConfigVariables.ElementsAs(ctx, &vars, false)...)
+			ac.SecretConfigVariables = vars
+		}
+
+		// FetchConfig
+		if !addon.FetchConfig.IsNull() && !addon.FetchConfig.IsUnknown() {
+			var fc AddonFetchConfigModel
+			diags.Append(addon.FetchConfig.As(ctx, &fc, basetypes.ObjectAsOptions{})...)
+			ac.FetchConfig = &capi.FetchConfig{}
+			if !fc.URL.IsNull() {
+				ac.FetchConfig.URL = fc.URL.ValueString()
+			}
+			if !fc.OCI.IsNull() {
+				ac.FetchConfig.OCI = fc.OCI.ValueString()
+			}
+		}
+
+		// Deployment
+		if !addon.Deployment.IsNull() && !addon.Deployment.IsUnknown() {
+			var dep AddonDeploymentModel
+			diags.Append(addon.Deployment.As(ctx, &dep, basetypes.ObjectAsOptions{})...)
+			ac.Deployment = &capi.DeploymentConfig{}
+			if !dep.Replicas.IsNull() {
+				r := dep.Replicas.ValueInt64()
+				ac.Deployment.Replicas = &r
+			}
+			if !dep.NodeSelector.IsNull() {
+				ns := map[string]string{}
+				diags.Append(dep.NodeSelector.ElementsAs(ctx, &ns, false)...)
+				ac.Deployment.NodeSelector = ns
+			}
+			if !dep.ServiceAccountName.IsNull() {
+				ac.Deployment.ServiceAccountName = dep.ServiceAccountName.ValueString()
+			}
+			if !dep.Containers.IsNull() && !dep.Containers.IsUnknown() {
+				var containers []AddonContainerModel
+				diags.Append(dep.Containers.ElementsAs(ctx, &containers, false)...)
+				for _, c := range containers {
+					cc := capi.ContainerConfig{Name: c.Name.ValueString()}
+					if !c.ImageURL.IsNull() {
+						cc.ImageURL = c.ImageURL.ValueString()
+					}
+					if !c.Args.IsNull() {
+						args := map[string]string{}
+						diags.Append(c.Args.ElementsAs(ctx, &args, false)...)
+						cc.Args = args
+					}
+					if !c.Command.IsNull() {
+						var cmd []string
+						diags.Append(c.Command.ElementsAs(ctx, &cmd, false)...)
+						cc.Command = cmd
+					}
+					ac.Deployment.Containers = append(ac.Deployment.Containers, cc)
+				}
+			}
+		}
+
+		// Manager
+		if !addon.Manager.IsNull() && !addon.Manager.IsUnknown() {
+			var mgr AddonManagerModel
+			diags.Append(addon.Manager.As(ctx, &mgr, basetypes.ObjectAsOptions{})...)
+			ac.Manager = &capi.ManagerConfig{}
+			if !mgr.ProfilerAddress.IsNull() {
+				ac.Manager.ProfilerAddress = mgr.ProfilerAddress.ValueString()
+			}
+			if !mgr.MaxConcurrentReconciles.IsNull() {
+				v := mgr.MaxConcurrentReconciles.ValueInt64()
+				ac.Manager.MaxConcurrentReconciles = &v
+			}
+			if !mgr.Verbosity.IsNull() {
+				v := mgr.Verbosity.ValueInt64()
+				ac.Manager.Verbosity = &v
+			}
+			if !mgr.FeatureGates.IsNull() {
+				gates := map[string]bool{}
+				diags.Append(mgr.FeatureGates.ElementsAs(ctx, &gates, false)...)
+				ac.Manager.FeatureGates = gates
+			}
+			if !mgr.AdditionalArgs.IsNull() {
+				args := map[string]string{}
+				diags.Append(mgr.AdditionalArgs.ElementsAs(ctx, &args, false)...)
+				ac.Manager.AdditionalArgs = args
+			}
+		}
+
+		// AdditionalManifests
+		if !addon.AdditionalManifests.IsNull() && !addon.AdditionalManifests.IsUnknown() {
+			ac.AdditionalManifests = addon.AdditionalManifests.ValueString()
+		}
+
+		// ManifestPatches
+		if !addon.ManifestPatches.IsNull() && !addon.ManifestPatches.IsUnknown() {
+			var patches []string
+			diags.Append(addon.ManifestPatches.ElementsAs(ctx, &patches, false)...)
+			ac.ManifestPatches = patches
+		}
+
+		// Patches
+		if !addon.Patches.IsNull() && !addon.Patches.IsUnknown() {
+			var patchModels []AddonPatchModel
+			diags.Append(addon.Patches.ElementsAs(ctx, &patchModels, false)...)
+			for _, pm := range patchModels {
+				pc := capi.PatchConfig{}
+				if !pm.Patch.IsNull() {
+					pc.Patch = pm.Patch.ValueString()
+				}
+				if !pm.Target.IsNull() && !pm.Target.IsUnknown() {
+					var sel AddonPatchSelectorModel
+					diags.Append(pm.Target.As(ctx, &sel, basetypes.ObjectAsOptions{})...)
+					pc.Target = &capi.PatchSelector{}
+					if !sel.Group.IsNull() {
+						pc.Target.Group = sel.Group.ValueString()
+					}
+					if !sel.Version.IsNull() {
+						pc.Target.Version = sel.Version.ValueString()
+					}
+					if !sel.Kind.IsNull() {
+						pc.Target.Kind = sel.Kind.ValueString()
+					}
+					if !sel.Name.IsNull() {
+						pc.Target.Name = sel.Name.ValueString()
+					}
+					if !sel.Namespace.IsNull() {
+						pc.Target.Namespace = sel.Namespace.ValueString()
+					}
+					if !sel.LabelSelector.IsNull() {
+						pc.Target.LabelSelector = sel.LabelSelector.ValueString()
+					}
+				}
+				ac.Patches = append(ac.Patches, pc)
+			}
+		}
+
+		opts.Addons = append(opts.Addons, ac)
 	}
 
 	return opts, diags
@@ -780,5 +890,54 @@ func validateInventory(ctx context.Context, inv *InventoryModel, cpCount, worker
 	if int64(workerMachines) < workerCount {
 		diags.AddError("Insufficient hardware",
 			fmt.Sprintf("Need %d worker machines, have %d", workerCount, workerMachines))
+	}
+}
+
+// --- Addon Validation ---
+
+func validateAddons(ctx context.Context, data *ClusterResourceModel, diags *diag.Diagnostics) {
+	addons, d := extractAddons(ctx, data)
+	diags.Append(d...)
+	if diags.HasError() {
+		return
+	}
+
+	for i, addon := range addons {
+		providerName := addon.Provider.ValueString()
+
+		// manifest_patches and patches are mutually exclusive (operator CRD constraint)
+		hasManifestPatches := !addon.ManifestPatches.IsNull() && !addon.ManifestPatches.IsUnknown()
+		hasPatches := !addon.Patches.IsNull() && !addon.Patches.IsUnknown()
+		if hasManifestPatches && hasPatches {
+			var mp []string
+			diags.Append(addon.ManifestPatches.ElementsAs(ctx, &mp, false)...)
+			var p []AddonPatchModel
+			diags.Append(addon.Patches.ElementsAs(ctx, &p, false)...)
+			if len(mp) > 0 && len(p) > 0 {
+				diags.AddError(
+					"Invalid addon configuration",
+					fmt.Sprintf("Addon %q (index %d): manifest_patches and patches are mutually exclusive. Use one or the other.", providerName, i),
+				)
+			}
+		}
+
+		// fetch_config: at most one of url or oci
+		if !addon.FetchConfig.IsNull() && !addon.FetchConfig.IsUnknown() {
+			var fc AddonFetchConfigModel
+			diags.Append(addon.FetchConfig.As(ctx, &fc, basetypes.ObjectAsOptions{})...)
+			sources := 0
+			if !fc.URL.IsNull() && fc.URL.ValueString() != "" {
+				sources++
+			}
+			if !fc.OCI.IsNull() && fc.OCI.ValueString() != "" {
+				sources++
+			}
+			if sources > 1 {
+				diags.AddError(
+					"Invalid addon fetch configuration",
+					fmt.Sprintf("Addon %q (index %d): fetch_config must specify at most one of url or oci.", providerName, i),
+				)
+			}
+		}
 	}
 }
