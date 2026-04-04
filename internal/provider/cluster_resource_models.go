@@ -256,10 +256,10 @@ func addonFetchConfigAttrTypes() map[string]attr.Type {
 
 func addonDeploymentAttrTypes() map[string]attr.Type {
 	return map[string]attr.Type{
-		"replicas":              types.Int64Type,
-		"node_selector":         types.MapType{ElemType: types.StringType},
-		"service_account_name":  types.StringType,
-		"containers":            types.ListType{ElemType: types.ObjectType{AttrTypes: addonContainerAttrTypes()}},
+		"replicas":             types.Int64Type,
+		"node_selector":        types.MapType{ElemType: types.StringType},
+		"service_account_name": types.StringType,
+		"containers":           types.ListType{ElemType: types.ObjectType{AttrTypes: addonContainerAttrTypes()}},
 	}
 }
 

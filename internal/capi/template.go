@@ -58,7 +58,7 @@ func (t *ClusterctlTemplateGenerator) Generate(ctx context.Context, cluster *Clu
 	if opts.InfrastructureProvider != "" {
 		templateOpts.ProviderRepositorySource = &clusterctlclient.ProviderRepositorySourceOptions{
 			InfrastructureProvider: opts.InfrastructureProvider,
-			Flavor:                opts.Flavor,
+			Flavor:                 opts.Flavor,
 		}
 	}
 

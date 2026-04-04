@@ -209,7 +209,7 @@ func (r *ClusterResource) Schema(ctx context.Context, req resource.SchemaRequest
 							MarkdownDescription: "Sensitive template variables injected into the provider's component YAML. Same mechanism as `config_variables` but for secret values.",
 							ElementType:         types.StringType,
 							Optional:            true,
-							Sensitive:          true,
+							Sensitive:           true,
 						},
 						"fetch_config": schema.SingleNestedAttribute{
 							MarkdownDescription: "Determines how the provider fetches components and metadata. Exactly one of `url` or `oci` must be specified.",

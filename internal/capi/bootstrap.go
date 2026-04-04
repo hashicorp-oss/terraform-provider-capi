@@ -166,9 +166,9 @@ func (b *KindBootstrapper) generateKindConfig(name string, opts BootstrapOptions
 			if protocol == "" {
 				protocol = "TCP"
 			}
-			buf.WriteString(fmt.Sprintf("  - containerPort: %d\n", pm.ContainerPort))
-			buf.WriteString(fmt.Sprintf("    hostPort: %d\n", pm.HostPort))
-			buf.WriteString(fmt.Sprintf("    protocol: %s\n", protocol))
+			fmt.Fprintf(&buf, "  - containerPort: %d\n", pm.ContainerPort)
+			fmt.Fprintf(&buf, "    hostPort: %d\n", pm.HostPort)
+			fmt.Fprintf(&buf, "    protocol: %s\n", protocol)
 		}
 	}
 
