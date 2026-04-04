@@ -190,6 +190,175 @@ func (r *ClusterResource) Schema(ctx context.Context, req resource.SchemaRequest
 				},
 			},
 
+			// --- addons ---
+			"addons": schema.ListNestedAttribute{
+				MarkdownDescription: "Addon provider configurations modeled after the cluster-api-operator AddonProvider CRD (`operator.cluster.x-k8s.io/v1alpha2`). Each element installs one addon provider via `clusterctl init`.",
+				Optional:            true,
+				NestedObject: schema.NestedAttributeObject{
+					Attributes: map[string]schema.Attribute{
+						"provider": schema.StringAttribute{
+							MarkdownDescription: "Addon provider name and optional version (e.g., `helm:v0.2.12`).",
+							Required:            true,
+						},
+						"config_secret": schema.SingleNestedAttribute{
+							MarkdownDescription: "Reference to a Secret providing configuration variables for this addon provider. The secret contents will be treated as immutable.",
+							Optional:            true,
+							Attributes: map[string]schema.Attribute{
+								"name": schema.StringAttribute{
+									MarkdownDescription: "Name of the configuration Secret.",
+									Required:            true,
+								},
+								"namespace": schema.StringAttribute{
+									MarkdownDescription: "Namespace of the configuration Secret. Defaults to the provider namespace.",
+									Optional:            true,
+								},
+							},
+						},
+						"fetch_config": schema.SingleNestedAttribute{
+							MarkdownDescription: "Determines how the operator fetches components and metadata for the addon provider. Exactly one of `url`, `oci`, or `selector` must be specified.",
+							Optional:            true,
+							Attributes: map[string]schema.Attribute{
+								"url": schema.StringAttribute{
+									MarkdownDescription: "URL for fetching provider components from a remote GitHub repository (e.g., `https://github.com/{owner}/{repo}/releases`).",
+									Optional:            true,
+								},
+								"oci": schema.StringAttribute{
+									MarkdownDescription: "OCI artifact reference for fetching provider components (e.g., `oci://ghcr.io/org/provider`).",
+									Optional:            true,
+								},
+								"selector": schema.SingleNestedAttribute{
+									MarkdownDescription: "Label selector for fetching components from ConfigMaps in the cluster.",
+									Optional:            true,
+									Attributes: map[string]schema.Attribute{
+										"match_labels": schema.MapAttribute{
+											MarkdownDescription: "Map of label key-value pairs to match ConfigMaps.",
+											ElementType:         types.StringType,
+											Optional:            true,
+										},
+									},
+								},
+							},
+						},
+						"deployment": schema.SingleNestedAttribute{
+							MarkdownDescription: "Deployment customization for the addon provider controller.",
+							Optional:            true,
+							Attributes: map[string]schema.Attribute{
+								"replicas": schema.Int64Attribute{
+									MarkdownDescription: "Number of desired pods. Defaults to 1.",
+									Optional:            true,
+								},
+								"node_selector": schema.MapAttribute{
+									MarkdownDescription: "Node selector labels for pod scheduling.",
+									ElementType:         types.StringType,
+									Optional:            true,
+								},
+								"service_account_name": schema.StringAttribute{
+									MarkdownDescription: "Service account name for the provider pod.",
+									Optional:            true,
+								},
+								"containers": schema.ListNestedAttribute{
+									MarkdownDescription: "Container overrides for the provider deployment.",
+									Optional:            true,
+									NestedObject: schema.NestedAttributeObject{
+										Attributes: map[string]schema.Attribute{
+											"name": schema.StringAttribute{
+												MarkdownDescription: "Container name. Must match an existing container in the deployment.",
+												Required:            true,
+											},
+											"image_url": schema.StringAttribute{
+												MarkdownDescription: "Container image URL override.",
+												Optional:            true,
+											},
+											"args": schema.MapAttribute{
+												MarkdownDescription: "Extra arguments passed to the container entrypoint. Explicit ManagerSpec values take precedence.",
+												ElementType:         types.StringType,
+												Optional:            true,
+											},
+											"command": schema.ListAttribute{
+												MarkdownDescription: "Override for the container entrypoint command.",
+												ElementType:         types.StringType,
+												Optional:            true,
+											},
+										},
+									},
+								},
+							},
+						},
+						"manager": schema.SingleNestedAttribute{
+							MarkdownDescription: "Controller manager configuration for the addon provider.",
+							Optional:            true,
+							Attributes: map[string]schema.Attribute{
+								"profiler_address": schema.StringAttribute{
+									MarkdownDescription: "Bind address for the pprof profiler (e.g., `localhost:6060`). Empty disables profiling.",
+									Optional:            true,
+								},
+								"max_concurrent_reconciles": schema.Int64Attribute{
+									MarkdownDescription: "Maximum number of concurrent reconciles.",
+									Optional:            true,
+								},
+								"verbosity": schema.Int64Attribute{
+									MarkdownDescription: "Log verbosity level. Defaults to 1.",
+									Optional:            true,
+								},
+								"feature_gates": schema.MapAttribute{
+									MarkdownDescription: "Provider-specific feature gates passed as `--feature-gates` to the controller manager.",
+									ElementType:         types.BoolType,
+									Optional:            true,
+								},
+								"additional_args": schema.MapAttribute{
+									MarkdownDescription: "Additional arguments passed as container args to the controller manager.",
+									ElementType:         types.StringType,
+									Optional:            true,
+								},
+							},
+						},
+						"additional_manifests": schema.SingleNestedAttribute{
+							MarkdownDescription: "Reference to a ConfigMap containing additional manifests applied with the provider. The ConfigMap key must be `manifests`.",
+							Optional:            true,
+							Attributes: map[string]schema.Attribute{
+								"name": schema.StringAttribute{
+									MarkdownDescription: "Name of the ConfigMap.",
+									Required:            true,
+								},
+								"namespace": schema.StringAttribute{
+									MarkdownDescription: "Namespace of the ConfigMap. Defaults to the provider namespace.",
+									Optional:            true,
+								},
+							},
+						},
+						"manifest_patches": schema.ListAttribute{
+							MarkdownDescription: "JSON merge patches applied to rendered provider manifests. Each entry is an inline YAML/JSON blob string (RFC 7396). Cannot be used together with `patches`.",
+							ElementType:         types.StringType,
+							Optional:            true,
+						},
+						"patches": schema.ListNestedAttribute{
+							MarkdownDescription: "Strategic merge patches or RFC 6902 JSON patches applied to rendered provider manifests. Cannot be used together with `manifest_patches`.",
+							Optional:            true,
+							NestedObject: schema.NestedAttributeObject{
+								Attributes: map[string]schema.Attribute{
+									"patch": schema.StringAttribute{
+										MarkdownDescription: "Inline YAML/JSON patch content.",
+										Optional:            true,
+									},
+									"target": schema.SingleNestedAttribute{
+										MarkdownDescription: "Target object selector for the patch.",
+										Optional:            true,
+										Attributes: map[string]schema.Attribute{
+											"group":          schema.StringAttribute{Optional: true, MarkdownDescription: "API group of the target."},
+											"version":        schema.StringAttribute{Optional: true, MarkdownDescription: "API version of the target."},
+											"kind":           schema.StringAttribute{Optional: true, MarkdownDescription: "Kind of the target."},
+											"name":           schema.StringAttribute{Optional: true, MarkdownDescription: "Name of the target."},
+											"namespace":      schema.StringAttribute{Optional: true, MarkdownDescription: "Namespace of the target."},
+											"label_selector": schema.StringAttribute{Optional: true, MarkdownDescription: "Label selector expression."},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+
 			// --- inventory ---
 			"inventory": schema.SingleNestedAttribute{
 				MarkdownDescription: "Hardware inventory for bare-metal provisioning.",
@@ -582,6 +751,8 @@ func (r *ClusterResource) UpgradeState(ctx context.Context) map[int64]resource.S
 				}
 
 				v1.Inventory = types.ObjectNull(inventoryAttrTypes())
+
+				v1.Addons = types.ListNull(types.ObjectType{AttrTypes: addonAttrTypes()})
 
 				wait := WaitModel{Enabled: v0.WaitForReady, Timeout: types.StringNull()}
 				waitVal, d := types.ObjectValueFrom(ctx, waitAttrTypes(), wait)

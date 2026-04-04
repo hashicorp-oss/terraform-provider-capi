@@ -30,6 +30,7 @@ type ClusterResourceModel struct {
 	ControlPlane   types.Object `tfsdk:"control_plane"`
 	Core           types.Object `tfsdk:"core"`
 	Workers        types.Object `tfsdk:"workers"`
+	Addons         types.List   `tfsdk:"addons"`
 	Inventory      types.Object `tfsdk:"inventory"`
 	Wait           types.Object `tfsdk:"wait"`
 	Output         types.Object `tfsdk:"output"`
@@ -68,6 +69,84 @@ type CoreModel struct {
 // WorkersModel groups attributes for worker node configuration.
 type WorkersModel struct {
 	MachineCount types.Int64 `tfsdk:"machine_count"`
+}
+
+// AddonModel describes a single CAPI addon provider, modeled after the
+// cluster-api-operator AddonProvider CRD (operator.cluster.x-k8s.io/v1alpha2).
+type AddonModel struct {
+	Provider            types.String `tfsdk:"provider"`
+	ConfigSecret        types.Object `tfsdk:"config_secret"`
+	FetchConfig         types.Object `tfsdk:"fetch_config"`
+	Deployment          types.Object `tfsdk:"deployment"`
+	Manager             types.Object `tfsdk:"manager"`
+	AdditionalManifests types.Object `tfsdk:"additional_manifests"`
+	ManifestPatches     types.List   `tfsdk:"manifest_patches"`
+	Patches             types.List   `tfsdk:"patches"`
+}
+
+// AddonSecretRefModel maps to the cluster-api-operator SecretReference.
+type AddonSecretRefModel struct {
+	Name      types.String `tfsdk:"name"`
+	Namespace types.String `tfsdk:"namespace"`
+}
+
+// AddonConfigmapRefModel maps to the cluster-api-operator ConfigmapReference.
+type AddonConfigmapRefModel struct {
+	Name      types.String `tfsdk:"name"`
+	Namespace types.String `tfsdk:"namespace"`
+}
+
+// AddonFetchConfigModel maps to FetchConfiguration (oci, url, or selector).
+type AddonFetchConfigModel struct {
+	URL      types.String `tfsdk:"url"`
+	OCI      types.String `tfsdk:"oci"`
+	Selector types.Object `tfsdk:"selector"`
+}
+
+// AddonLabelSelectorModel maps to metav1.LabelSelector (matchLabels only).
+type AddonLabelSelectorModel struct {
+	MatchLabels types.Map `tfsdk:"match_labels"`
+}
+
+// AddonDeploymentModel maps to the cluster-api-operator DeploymentSpec.
+type AddonDeploymentModel struct {
+	Replicas           types.Int64  `tfsdk:"replicas"`
+	NodeSelector       types.Map    `tfsdk:"node_selector"`
+	ServiceAccountName types.String `tfsdk:"service_account_name"`
+	Containers         types.List   `tfsdk:"containers"`
+}
+
+// AddonContainerModel maps to the cluster-api-operator ContainerSpec.
+type AddonContainerModel struct {
+	Name     types.String `tfsdk:"name"`
+	ImageURL types.String `tfsdk:"image_url"`
+	Args     types.Map    `tfsdk:"args"`
+	Command  types.List   `tfsdk:"command"`
+}
+
+// AddonManagerModel maps to the cluster-api-operator ManagerSpec.
+type AddonManagerModel struct {
+	ProfilerAddress         types.String `tfsdk:"profiler_address"`
+	MaxConcurrentReconciles types.Int64  `tfsdk:"max_concurrent_reconciles"`
+	Verbosity               types.Int64  `tfsdk:"verbosity"`
+	FeatureGates            types.Map    `tfsdk:"feature_gates"`
+	AdditionalArgs          types.Map    `tfsdk:"additional_args"`
+}
+
+// AddonPatchModel maps to the cluster-api-operator Patch.
+type AddonPatchModel struct {
+	Patch  types.String `tfsdk:"patch"`
+	Target types.Object `tfsdk:"target"`
+}
+
+// AddonPatchSelectorModel maps to the cluster-api-operator PatchSelector.
+type AddonPatchSelectorModel struct {
+	Group         types.String `tfsdk:"group"`
+	Version       types.String `tfsdk:"version"`
+	Kind          types.String `tfsdk:"kind"`
+	Name          types.String `tfsdk:"name"`
+	Namespace     types.String `tfsdk:"namespace"`
+	LabelSelector types.String `tfsdk:"label_selector"`
 }
 
 // InventoryModel groups attributes for hardware inventory.
@@ -167,6 +246,93 @@ func coreAttrTypes() map[string]attr.Type {
 func workersAttrTypes() map[string]attr.Type {
 	return map[string]attr.Type{
 		"machine_count": types.Int64Type,
+	}
+}
+
+func addonAttrTypes() map[string]attr.Type {
+	return map[string]attr.Type{
+		"provider":             types.StringType,
+		"config_secret":        types.ObjectType{AttrTypes: addonSecretRefAttrTypes()},
+		"fetch_config":         types.ObjectType{AttrTypes: addonFetchConfigAttrTypes()},
+		"deployment":           types.ObjectType{AttrTypes: addonDeploymentAttrTypes()},
+		"manager":              types.ObjectType{AttrTypes: addonManagerAttrTypes()},
+		"additional_manifests": types.ObjectType{AttrTypes: addonConfigmapRefAttrTypes()},
+		"manifest_patches":     types.ListType{ElemType: types.StringType},
+		"patches":              types.ListType{ElemType: types.ObjectType{AttrTypes: addonPatchAttrTypes()}},
+	}
+}
+
+func addonSecretRefAttrTypes() map[string]attr.Type {
+	return map[string]attr.Type{
+		"name":      types.StringType,
+		"namespace": types.StringType,
+	}
+}
+
+func addonConfigmapRefAttrTypes() map[string]attr.Type {
+	return map[string]attr.Type{
+		"name":      types.StringType,
+		"namespace": types.StringType,
+	}
+}
+
+func addonFetchConfigAttrTypes() map[string]attr.Type {
+	return map[string]attr.Type{
+		"url":      types.StringType,
+		"oci":      types.StringType,
+		"selector": types.ObjectType{AttrTypes: addonLabelSelectorAttrTypes()},
+	}
+}
+
+func addonLabelSelectorAttrTypes() map[string]attr.Type {
+	return map[string]attr.Type{
+		"match_labels": types.MapType{ElemType: types.StringType},
+	}
+}
+
+func addonDeploymentAttrTypes() map[string]attr.Type {
+	return map[string]attr.Type{
+		"replicas":              types.Int64Type,
+		"node_selector":         types.MapType{ElemType: types.StringType},
+		"service_account_name":  types.StringType,
+		"containers":            types.ListType{ElemType: types.ObjectType{AttrTypes: addonContainerAttrTypes()}},
+	}
+}
+
+func addonContainerAttrTypes() map[string]attr.Type {
+	return map[string]attr.Type{
+		"name":      types.StringType,
+		"image_url": types.StringType,
+		"args":      types.MapType{ElemType: types.StringType},
+		"command":   types.ListType{ElemType: types.StringType},
+	}
+}
+
+func addonManagerAttrTypes() map[string]attr.Type {
+	return map[string]attr.Type{
+		"profiler_address":          types.StringType,
+		"max_concurrent_reconciles": types.Int64Type,
+		"verbosity":                 types.Int64Type,
+		"feature_gates":             types.MapType{ElemType: types.BoolType},
+		"additional_args":           types.MapType{ElemType: types.StringType},
+	}
+}
+
+func addonPatchAttrTypes() map[string]attr.Type {
+	return map[string]attr.Type{
+		"patch":  types.StringType,
+		"target": types.ObjectType{AttrTypes: addonPatchSelectorAttrTypes()},
+	}
+}
+
+func addonPatchSelectorAttrTypes() map[string]attr.Type {
+	return map[string]attr.Type{
+		"group":          types.StringType,
+		"version":        types.StringType,
+		"kind":           types.StringType,
+		"name":           types.StringType,
+		"namespace":      types.StringType,
+		"label_selector": types.StringType,
 	}
 }
 
@@ -290,6 +456,15 @@ func extractWorkers(ctx context.Context, data *ClusterResourceModel) (*WorkersMo
 	var w WorkersModel
 	diags := data.Workers.As(ctx, &w, basetypes.ObjectAsOptions{})
 	return &w, diags
+}
+
+func extractAddons(ctx context.Context, data *ClusterResourceModel) ([]AddonModel, diag.Diagnostics) {
+	if data.Addons.IsNull() || data.Addons.IsUnknown() {
+		return nil, nil
+	}
+	var addons []AddonModel
+	diags := data.Addons.ElementsAs(ctx, &addons, false)
+	return addons, diags
 }
 
 func extractInventory(ctx context.Context, data *ClusterResourceModel) (*InventoryModel, diag.Diagnostics) {
@@ -515,6 +690,15 @@ func buildCreateOptions(ctx context.Context, data *ClusterResourceModel) (*capi.
 	diags.Append(d...)
 	if out != nil && !out.KubeconfigPath.IsNull() {
 		opts.KubeconfigOutputPath = out.KubeconfigPath.ValueString()
+	}
+
+	// Addons
+	addons, d := extractAddons(ctx, data)
+	diags.Append(d...)
+	for _, addon := range addons {
+		if !addon.Provider.IsNull() {
+			opts.AddonProviders = append(opts.AddonProviders, addon.Provider.ValueString())
+		}
 	}
 
 	return opts, diags

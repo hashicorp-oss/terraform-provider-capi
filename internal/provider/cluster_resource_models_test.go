@@ -51,6 +51,14 @@ func TestClusterResource_Schema(t *testing.T) {
 			t.Errorf("attribute %q should be SingleNestedAttribute, got %T", name, a)
 		}
 	}
+
+	// Verify addons is a ListNestedAttribute
+	addonsAttr, ok := resp.Schema.Attributes["addons"]
+	if !ok {
+		t.Error("missing attribute \"addons\"")
+	} else if _, isList := addonsAttr.(schema.ListNestedAttribute); !isList {
+		t.Errorf("attribute \"addons\" should be ListNestedAttribute, got %T", addonsAttr)
+	}
 }
 
 func TestClusterResource_SchemaRequiredAttributes(t *testing.T) {

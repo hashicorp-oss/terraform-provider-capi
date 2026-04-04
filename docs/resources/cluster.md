@@ -14,18 +14,34 @@ Manages a Cluster API cluster using the CAPI management workflow (bootstrap -> i
 
 ```terraform
 resource "capi_cluster" "example" {
-  name                        = "my-cluster"
-  infrastructure_provider     = "docker"
-  bootstrap_provider          = "kubeadm"
-  control_plane_provider      = "kubeadm"
-  kubernetes_version          = "v1.31.0"
-  control_plane_machine_count = 1
-  worker_machine_count        = 2
-  skip_init                   = false
-  wait_for_ready              = true
-  self_managed                = false
-  target_namespace            = "default"
-  kubeconfig_path             = "/tmp/my-cluster-kubeconfig"
+  name               = "my-cluster"
+  kubernetes_version = "v1.31.0"
+
+  infrastructure {
+    provider = "docker"
+  }
+
+  bootstrap {
+    provider = "kubeadm"
+  }
+
+  control_plane {
+    provider      = "kubeadm"
+    machine_count = 1
+  }
+
+  workers {
+    machine_count = 2
+  }
+
+  wait {
+    enabled = true
+    timeout = "30m"
+  }
+
+  output {
+    kubeconfig_path = "/tmp/my-cluster-kubeconfig"
+  }
 }
 ```
 
@@ -56,22 +72,23 @@ resource "capi_cluster" "example" {
 - `status` (Attributes) Computed cluster status. (see [below for nested schema](#nestedatt--status))
 
 <a id="nestedatt--infrastructure"></a>
+
 ### Nested Schema for `infrastructure`
 
 Required:
 
 - `provider` (String) Infrastructure provider name and optional version (e.g., `docker`, `tinkerbell:v0.5.4`).
 
-
 <a id="nestedatt--bootstrap"></a>
+
 ### Nested Schema for `bootstrap`
 
 Required:
 
 - `provider` (String) Bootstrap provider name and optional version (e.g., `kubeadm:v1.12.2`, `talos:v0.6.7`).
 
-
 <a id="nestedatt--control_plane"></a>
+
 ### Nested Schema for `control_plane`
 
 Optional:
@@ -79,16 +96,16 @@ Optional:
 - `machine_count` (Number) Number of control plane machines.
 - `provider` (String) Control plane provider name and optional version (e.g., `kubeadm:v1.12.2`, `talos:v0.6.7`).
 
-
 <a id="nestedatt--core"></a>
+
 ### Nested Schema for `core`
 
 Required:
 
 - `provider` (String) Core provider name and version (e.g., `cluster-api:v1.12.2`).
 
-
 <a id="nestedatt--inventory"></a>
+
 ### Nested Schema for `inventory`
 
 Optional:
@@ -97,6 +114,7 @@ Optional:
 - `source` (String) Path to a hardware inventory file (CSV or YAML).
 
 <a id="nestedatt--inventory--machine"></a>
+
 ### Nested Schema for `inventory.machine`
 
 Required:
@@ -111,6 +129,7 @@ Optional:
 - `labels` (Map of String) Labels. Use `type=cp` for control plane, `type=worker` for workers.
 
 <a id="nestedatt--inventory--machine--network"></a>
+
 ### Nested Schema for `inventory.machine.network`
 
 Required:
@@ -125,8 +144,8 @@ Optional:
 - `nameservers` (List of String) DNS nameservers.
 - `vlan_id` (String) VLAN ID.
 
-
 <a id="nestedatt--inventory--machine--bmc"></a>
+
 ### Nested Schema for `inventory.machine.bmc`
 
 Required:
@@ -135,18 +154,16 @@ Required:
 - `password` (String, Sensitive) BMC password.
 - `username` (String) BMC username.
 
-
 <a id="nestedatt--inventory--machine--disk"></a>
+
 ### Nested Schema for `inventory.machine.disk`
 
 Required:
 
 - `device` (String) Disk device path.
 
-
-
-
 <a id="nestedatt--management"></a>
+
 ### Nested Schema for `management`
 
 Optional:
@@ -156,16 +173,16 @@ Optional:
 - `self_managed` (Boolean) Pivot CAPI management from bootstrap to workload cluster (clusterctl move). Required `true` for Tinkerbell provider.
 - `skip_init` (Boolean) Skip running clusterctl init on the management cluster. Use when CAPI providers are already installed.
 
-
 <a id="nestedatt--output"></a>
+
 ### Nested Schema for `output`
 
 Optional:
 
 - `kubeconfig_path` (String) File path for the workload cluster kubeconfig.
 
-
 <a id="nestedatt--wait"></a>
+
 ### Nested Schema for `wait`
 
 Optional:
@@ -173,16 +190,16 @@ Optional:
 - `enabled` (Boolean) Wait for readiness.
 - `timeout` (String) Max wait time (Go duration, e.g., `30m`). Default: `30m`.
 
-
 <a id="nestedatt--workers"></a>
+
 ### Nested Schema for `workers`
 
 Optional:
 
 - `machine_count` (Number) Number of worker machines.
 
-
 <a id="nestedatt--status"></a>
+
 ### Nested Schema for `status`
 
 Read-Only:

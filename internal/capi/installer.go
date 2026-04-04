@@ -62,6 +62,10 @@ func (i *ClusterctlInstaller) Init(ctx context.Context, cluster *Cluster, opts I
 		initOpts.InfrastructureProviders = opts.InfrastructureProviders
 	}
 
+	if len(opts.AddonProviders) > 0 {
+		initOpts.AddonProviders = opts.AddonProviders
+	}
+
 	_, err = client.Init(ctx, initOpts)
 	if err != nil {
 		return &CAPIError{

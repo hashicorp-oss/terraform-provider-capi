@@ -165,6 +165,7 @@ func (m *Manager) CreateCluster(ctx context.Context, opts CreateClusterOptions) 
 		initOpts := InitOptions{
 			CoreProvider:            opts.CoreProvider,
 			InfrastructureProviders: []string{opts.InfrastructureProvider},
+			AddonProviders:          opts.AddonProviders,
 		}
 		if opts.BootstrapProvider != "" {
 			initOpts.BootstrapProviders = []string{opts.BootstrapProvider}
@@ -274,6 +275,7 @@ func (m *Manager) CreateCluster(ctx context.Context, opts CreateClusterOptions) 
 		initOpts := InitOptions{
 			CoreProvider:            opts.CoreProvider,
 			InfrastructureProviders: []string{opts.InfrastructureProvider},
+			AddonProviders:          opts.AddonProviders,
 		}
 		if opts.BootstrapProvider != "" {
 			initOpts.BootstrapProviders = []string{opts.BootstrapProvider}

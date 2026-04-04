@@ -54,6 +54,9 @@ type InitOptions struct {
 
 	// InfrastructureProviders is the list of infrastructure providers to install.
 	InfrastructureProviders []string
+
+	// AddonProviders is the list of addon providers to install (e.g., "helm:v0.2.12").
+	AddonProviders []string
 }
 
 // TemplateOptions configures cluster template generation.
@@ -183,6 +186,9 @@ type CreateClusterOptions struct {
 
 	// KubeconfigOutputPath is where to write the workload cluster kubeconfig.
 	KubeconfigOutputPath string
+
+	// AddonProviders is the list of addon providers to install.
+	AddonProviders []string
 }
 
 // DeleteClusterOptions configures cluster deletion.
