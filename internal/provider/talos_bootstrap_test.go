@@ -30,7 +30,7 @@ func TestBuildTalosBootstrapConfig_NilForKind(t *testing.T) {
 
 func TestBuildTalosBootstrapConfig_Full(t *testing.T) {
 	ctx := context.Background()
-	boot := &BootModel{Method: types.StringValue("http"), Timeout: types.StringValue("20m"), Attempts: types.Int64Value(5)}
+	boot := &BootModel{Method: types.StringValue("http"), Timeout: types.StringValue("20m"), Attempts: types.Int64Value(5), Device: types.StringValue("usb")}
 	img := testImageModel(ctx, t, "", "", "", []string{"iscsi-tools", "nvme-cli"})
 	tm := testTalosModel(ctx, t, img, []string{"a: 1\n", "b: 2\n"})
 	tm.Architecture = types.StringValue("arm64")
@@ -57,6 +57,9 @@ func TestBuildTalosBootstrapConfig_Full(t *testing.T) {
 	}
 	if cfg.Boot.Method != talos.BootMethodHTTP || cfg.Boot.Timeout != 20*time.Minute || cfg.Boot.Attempts != 5 {
 		t.Errorf("boot = %+v", cfg.Boot)
+	}
+	if cfg.Boot.Device != talos.BootDeviceUSB {
+		t.Errorf("boot device = %q, want usb", cfg.Boot.Device)
 	}
 	if cfg.Talos.Version != "v1.13.6" || cfg.Talos.Architecture != "arm64" || cfg.Talos.Endpoint != "https://10.1.1.100:6443" {
 		t.Errorf("talos = %+v", cfg.Talos)

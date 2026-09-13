@@ -66,6 +66,7 @@ type BootDevice string
 // BootDevice values used by the bootstrapper.
 const (
 	BootDeviceCDROM    BootDevice = "cdrom"
+	BootDeviceUSB      BootDevice = "usb"
 	BootDeviceUEFIHTTP BootDevice = "uefi_http"
 	BootDeviceDisk     BootDevice = "disk"
 )

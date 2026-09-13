@@ -78,6 +78,9 @@ func buildTalosBootstrapConfig(ctx context.Context, data *ClusterResourceModel) 
 		if !boot.Attempts.IsNull() && !boot.Attempts.IsUnknown() {
 			cfg.Boot.Attempts = int(boot.Attempts.ValueInt64())
 		}
+		if d := boot.Device.ValueString(); d != "" {
+			cfg.Boot.Device = talos.BootDevice(d)
+		}
 	}
 
 	tm, d := extractTalos(ctx, bs)

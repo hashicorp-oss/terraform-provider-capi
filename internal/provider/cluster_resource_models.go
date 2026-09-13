@@ -98,6 +98,7 @@ type BootModel struct {
 	Method   types.String `tfsdk:"method"`
 	Timeout  types.String `tfsdk:"timeout"`
 	Attempts types.Int64  `tfsdk:"attempts"`
+	Device   types.String `tfsdk:"device"`
 }
 
 // TalosModel controls the Talos version, images, and config patches.
@@ -333,6 +334,7 @@ func bootAttrTypes() map[string]attr.Type {
 		"method":   types.StringType,
 		"timeout":  types.StringType,
 		"attempts": types.Int64Type,
+		"device":   types.StringType,
 	}
 }
 

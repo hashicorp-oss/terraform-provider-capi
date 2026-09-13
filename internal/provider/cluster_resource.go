@@ -177,6 +177,12 @@ func (r *ClusterResource) Schema(ctx context.Context, req resource.SchemaRequest
 										Computed:            true,
 										Default:             int64default.StaticInt64(3),
 									},
+									"device": schema.StringAttribute{
+										MarkdownDescription: "Firmware boot target for attached virtual media: `cdrom` (default) or `usb`. Set `usb` for BMCs that expose virtual media as a USB device (many KVM-over-IP dongles such as NanoKVM), where a CD-ROM boot override never selects the media.",
+										Optional:            true,
+										Computed:            true,
+										Default:             stringdefault.StaticString("cdrom"),
+									},
 								},
 							},
 							"talos": schema.SingleNestedAttribute{

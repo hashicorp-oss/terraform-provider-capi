@@ -367,6 +367,16 @@ func (r *reconciler) resetToMaintenance(ctx context.Context) error {
 
 // attachMedia attaches installer media by the configured method. A pinned
 // method that the BMC lacks, or auto with no usable method, is ErrNoBootMethod.
+// mediaBootDevice is the firmware boot target for attached virtual media.
+// It defaults to CD-ROM; BMCs that present virtual media as USB (e.g. NanoKVM)
+// set Boot.Device to "usb" so the override actually selects the media.
+func (r *reconciler) mediaBootDevice() BootDevice {
+	if r.cfg.Boot.Device != "" {
+		return r.cfg.Boot.Device
+	}
+	return BootDeviceCDROM
+}
+
 func (r *reconciler) attachMedia(ctx context.Context) error {
 	// A BMC that arms the boot itself when media is attached (Intel AMT) must
 	// not get a SetBootDevice afterwards: that would replace the armed boot.
@@ -393,7 +403,7 @@ func (r *reconciler) attachMedia(ctx context.Context) error {
 		if armed {
 			return nil
 		}
-		return r.bmcDo(ctx, func(ctx context.Context) error { return r.bmc.SetBootDevice(ctx, BootDeviceCDROM, false, true) })
+		return r.bmcDo(ctx, func(ctx context.Context) error { return r.bmc.SetBootDevice(ctx, r.mediaBootDevice(), false, true) })
 	}
 	httpBoot := func(ctx context.Context) error {
 		if r.sess.images.UKI == "" {

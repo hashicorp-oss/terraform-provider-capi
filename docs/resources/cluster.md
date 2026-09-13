@@ -715,6 +715,7 @@ Optional:
 Optional:
 
 - `attempts` (Number) Boot attempts before giving up.
+- `device` (String) Firmware boot target for attached virtual media: `cdrom` (default) or `usb`. Set `usb` for BMCs that expose virtual media as a USB device (many KVM-over-IP dongles such as NanoKVM), where a CD-ROM boot override never selects the media.
 - `method` (String) `auto` (virtual media, then UEFI HTTP boot), `virtual_media`, or `http`.
 - `timeout` (String) Per-attempt boot and install timeout as a Go duration (e.g. `15m`).
 

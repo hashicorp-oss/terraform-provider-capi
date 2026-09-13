@@ -47,6 +47,11 @@ type BootConfig struct {
 	Method   BootMethod
 	Timeout  time.Duration
 	Attempts int
+	// Device is the firmware boot target for attached virtual media. Empty
+	// defaults to CD-ROM. BMCs that expose virtual media as a USB device (many
+	// KVM-over-IP dongles, e.g. NanoKVM) need "usb" or the Cd override never
+	// boots the media.
+	Device BootDevice
 }
 
 // TalosConfig controls the Talos version, images, and machine config.
