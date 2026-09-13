@@ -3,7 +3,7 @@
 # template, so point capi_cluster at this file:
 #
 #   template = {
-#     source    = "${path.module}/cluster-template-talos.yaml"
+#     source    = "path/to/cluster-template-talos.yaml"   # or file:// / https:// URL
 #     variables = { CONTROL_PLANE_VIP = "192.168.1.100" }
 #   }
 #
