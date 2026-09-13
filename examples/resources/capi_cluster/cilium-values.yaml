@@ -2,7 +2,7 @@
 #
 #   cni = {
 #     provider = "cilium"
-#     version  = "1.18.13"
+#     version  = "1.20.1"
 #     values   = file("${path.module}/cilium-values.yaml")
 #   }
 #
