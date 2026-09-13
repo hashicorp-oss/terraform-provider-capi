@@ -59,6 +59,10 @@ type InitOptions struct {
 	// entries with customizations have their component YAML altered through
 	// the injected repository factory.
 	Providers ProviderSet
+
+	// Variables are clusterctl variables (${VAR} in component and template
+	// YAML). They take precedence over the clusterctl config file and environment.
+	Variables map[string]string
 }
 
 // TemplateOptions configures cluster template generation.
@@ -81,6 +85,16 @@ type TemplateOptions struct {
 	// Providers is the full provider set, so template generation resolves the
 	// same provider names and fetch URLs that clusterctl init used.
 	Providers ProviderSet
+
+	// Source overrides where the cluster template comes from: a local path,
+	// a file:// URL, or an https:// URL (GitHub raw or blob URLs included).
+	// Empty means the infrastructure provider's release template (with Flavor).
+	Source string
+
+	// Variables are clusterctl variables substituted into the template
+	// (${CONTROL_PLANE_VIP} etc.), in addition to CLUSTER_NAME, NAMESPACE,
+	// KUBERNETES_VERSION and the machine counts clusterctl sets itself.
+	Variables map[string]string
 
 	// Flavor is the template flavor.
 	Flavor string
@@ -173,6 +187,15 @@ type CreateClusterOptions struct {
 
 	// Flavor is the template flavor.
 	Flavor string
+
+	// TemplateSource overrides where the cluster template comes from (local
+	// path, file:// or https:// URL). Empty uses the infrastructure provider's
+	// release template selected by Flavor.
+	TemplateSource string
+
+	// Variables are clusterctl variables (${VAR}) available to provider
+	// component YAML and the cluster template.
+	Variables map[string]string
 
 	// ManagementKubeconfig is an existing management cluster kubeconfig.
 	// If empty, a bootstrap cluster will be created.

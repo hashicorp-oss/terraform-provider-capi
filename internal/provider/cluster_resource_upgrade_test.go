@@ -76,8 +76,8 @@ func TestUpgradeV1JSON(t *testing.T) {
 	if string(got["topology"]) != wantTopo {
 		t.Errorf("topology = %s\nwant %s", got["topology"], wantTopo)
 	}
-	if string(got["ipam"]) != "null" || string(got["core"]) != "null" {
-		t.Errorf("ipam/core = %s/%s", got["ipam"], got["core"])
+	if string(got["ipam"]) != "null" || string(got["core"]) != "null" || string(got["template"]) != "null" {
+		t.Errorf("ipam/core/template = %s/%s/%s", got["ipam"], got["core"], got["template"])
 	}
 	if string(got["management"]) != "null" || string(got["name"]) != `"acc-talos"` {
 		t.Error("untouched attributes must pass through")

@@ -61,6 +61,7 @@ resource "capi_cluster" "example" {
 - `kubernetes_version` (String) Kubernetes version for the workload cluster (e.g., `v1.31.0`).
 - `management` (Attributes) Management cluster configuration. Controls how the CAPI lifecycle is managed. (see [below for nested schema](#nestedatt--management))
 - `output` (Attributes) Output configuration. (see [below for nested schema](#nestedatt--output))
+- `template` (Attributes) Cluster template configuration: where the workload cluster template comes from and the clusterctl variables substituted into it. (see [below for nested schema](#nestedatt--template))
 - `topology` (Attributes) Workload cluster topology. Mirrors `Cluster.spec.topology`. (see [below for nested schema](#nestedatt--topology))
 - `wait` (Attributes) Readiness wait configuration. (see [below for nested schema](#nestedatt--wait))
 
@@ -737,6 +738,15 @@ Optional:
 Optional:
 
 - `kubeconfig_path` (String) File path for the workload cluster kubeconfig.
+
+
+<a id="nestedatt--template"></a>
+### Nested Schema for `template`
+
+Optional:
+
+- `source` (String) Custom cluster template: a local path, a `file://` URL, or an `https://` URL (GitHub blob or raw URLs work). Omit to use the infrastructure provider's release template selected by `flavor`. Required for combinations the provider release does not ship, such as Tinkerbell with Talos.
+- `variables` (Map of String) clusterctl variables substituted into the template and provider components as `${VAR}` (e.g. `CONTROL_PLANE_VIP`, `POD_CIDR`). They take precedence over the clusterctl config file and environment. `CLUSTER_NAME`, `NAMESPACE`, `KUBERNETES_VERSION`, `CONTROL_PLANE_MACHINE_COUNT` and `WORKER_MACHINE_COUNT` are set from the resource.
 
 
 <a id="nestedatt--topology"></a>

@@ -459,13 +459,37 @@ clusterctl flavor templates expose a single `WORKER_MACHINE_COUNT`, filled from
 the **first** machine deployment's `replicas` (`CreateClusterOptions.WorkerMachineCount()`).
 Inventory validation counts workers as the sum of all replicas; names must be unique.
 
-### 3.6 Removed Attributes
+### 3.6 `template` — Cluster Template Source and Variables
+
+```go
+"template": schema.SingleNestedAttribute{
+    Optional: true,
+    Attributes: map[string]schema.Attribute{
+        "source":    schema.StringAttribute{Optional: true}, // local path, file:// or https:// URL
+        "variables": schema.MapAttribute{ElementType: types.StringType, Optional: true},
+    },
+},
+```
+
+- `source` overrides the cluster template. Empty means the infrastructure
+  provider's release template selected by `flavor`. A bare path is made
+  absolute (`capi.templateURL`) and handed to clusterctl as a `URLSource`.
+  Provider releases usually ship a kubeadm template only, so Tinkerbell +
+  Talos needs one (see `examples/resources/capi_cluster/cluster-template-talos.yaml`).
+- `variables` become clusterctl variables on the shared config client
+  (`newClusterctlClient`), so they apply to provider component YAML and the
+  template alike and win over `clusterctl.yaml` and the environment. clusterctl
+  sets `CLUSTER_NAME`, `NAMESPACE`, `KUBERNETES_VERSION`,
+  `CONTROL_PLANE_MACHINE_COUNT` and `WORKER_MACHINE_COUNT` itself.
+
+**Backend:** `CreateClusterOptions.TemplateSource` / `.Variables` →
+`TemplateOptions.Source` / `.Variables` and `InitOptions.Variables`.
+
+### 3.7 Removed Attributes
 
 `infrastructure.provider`, `bootstrap.provider`, `control_plane.provider`,
 `control_plane.machine_count`, `core.provider`, `workers`, and the `addons`
 list were replaced by the provider maps and `topology` in schema version 2.
-
-### 3.7 (reserved)
 
 ### 3.8 `inventory` — Hardware Inventory
 
@@ -666,6 +690,7 @@ type ClusterResourceModel struct {
     IPAM           types.Map    `tfsdk:"ipam"`
     Addon          types.Map    `tfsdk:"addon"`
     Topology       types.Object `tfsdk:"topology"`
+    Template       types.Object `tfsdk:"template"`   // TemplateModel {source, variables}
     Inventory      types.Object `tfsdk:"inventory"`
     Wait           types.Object `tfsdk:"wait"`
     Output         types.Object `tfsdk:"output"`
@@ -1320,6 +1345,8 @@ Quick reference for where every attribute lives in the schema:
 | *(new)* | `ipam.<name>` | `MapNestedAttribute` Optional | Immutable |
 | *(was `addons[]`)* | `addon.<name>` | `MapNestedAttribute` Optional | Immutable |
 | *(new)* | `<map>.<name>.fetch_config.{owner,repository,url,oci}` | `SingleNestedAttribute` Optional | Immutable |
+| *(new)* | `template.source` | `StringAttribute` Optional | **Mutable** |
+| *(new)* | `template.variables` | `MapAttribute` Optional | **Mutable** |
 | `control_plane_machine_count` | `topology.control_plane.replicas` | `Int64Attribute` Optional | **Mutable** |
 | `worker_machine_count` | `topology.workers.machine_deployments[].replicas` | `ListNestedAttribute` Optional | **Mutable** |
 | *(new)* | `inventory.source` | `StringAttribute` Optional | **Mutable** |

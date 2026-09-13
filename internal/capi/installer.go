@@ -28,7 +28,7 @@ func NewClusterctlInstaller(configPath string) *ClusterctlInstaller {
 // Init initializes CAPI providers on a cluster using clusterctl init.
 // This corresponds to EKS Anywhere's installCAPIComponentsTask.
 func (i *ClusterctlInstaller) Init(ctx context.Context, cluster *Cluster, opts InitOptions) error {
-	client, err := newClusterctlClient(ctx, i.configPath, opts.Providers)
+	client, err := newClusterctlClient(ctx, i.configPath, opts.Providers, opts.Variables)
 	if err != nil {
 		return &CAPIError{Operation: "init", Cluster: cluster.Name, Err: fmt.Errorf("%w: %v", ErrCAPIInit, err)}
 	}

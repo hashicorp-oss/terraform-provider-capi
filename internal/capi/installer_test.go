@@ -109,7 +109,7 @@ func TestNewClusterctlClient_ResolvesTemplateProvider(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	providers := ProviderSet{}
 	providers.Add(ProviderConfig{Type: ProviderTypeInfrastructure, Name: "tinkerbell", Version: "v0.7.9", FetchConfig: &FetchConfig{Owner: "tinkerbell-community"}})
-	client, err := newClusterctlClient(context.Background(), "", providers)
+	client, err := newClusterctlClient(context.Background(), "", providers, map[string]string{"CONTROL_PLANE_VIP": "10.0.0.160"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,4 +127,21 @@ func TestNewClusterctlClient_ResolvesTemplateProvider(t *testing.T) {
 		}
 	}
 	t.Fatal("clusterctl client cannot resolve infrastructure provider \"tinkerbell\"")
+}
+
+func TestNewProviderConfigClient_VariablesWinOverEnvironment(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CONTROL_PLANE_VIP", "from-env")
+	configClient, _, err := newProviderConfigClient(context.Background(), "", ProviderSet{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v, err := configClient.Variables().Get("CONTROL_PLANE_VIP"); err != nil || v != "from-env" {
+		t.Fatalf("env fallback: %q %v", v, err)
+	}
+	configClient.Variables().Set("CONTROL_PLANE_VIP", "10.0.0.160")
+	if v, _ := configClient.Variables().Get("CONTROL_PLANE_VIP"); v != "10.0.0.160" {
+		t.Errorf("explicit variable must win: %q", v)
+	}
 }

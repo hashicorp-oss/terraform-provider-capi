@@ -15,13 +15,17 @@ import (
 // providers: URL overrides (pinned versions, fetch_config, and names clusterctl
 // only knows in its "<name>-<name>" form) are registered through an isolated
 // config reader, and component customizations are applied through the
-// injected repository factory. Every clusterctl operation that resolves a
-// provider by name (init, template generation) must go through this so the
-// same names work everywhere.
-func newClusterctlClient(ctx context.Context, configPath string, providers ProviderSet) (clusterctlclient.Client, error) {
+// injected repository factory. variables become clusterctl variables, ahead
+// of the config file and environment. Every clusterctl operation that
+// resolves a provider by name (init, template generation) must go through
+// this so the same names work everywhere.
+func newClusterctlClient(ctx context.Context, configPath string, providers ProviderSet, variables map[string]string) (clusterctlclient.Client, error) {
 	configClient, _, err := newProviderConfigClient(ctx, configPath, providers)
 	if err != nil {
 		return nil, err
+	}
+	for k, v := range variables {
+		configClient.Variables().Set(k, v)
 	}
 	return clusterctlclient.New(ctx, configPath,
 		clusterctlclient.InjectConfig(configClient),

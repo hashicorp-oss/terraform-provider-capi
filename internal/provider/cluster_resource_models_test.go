@@ -77,6 +77,16 @@ func TestClusterResource_Schema_ProviderMaps(t *testing.T) {
 			t.Errorf("%s must be removed", gone)
 		}
 	}
+	tmpl, ok := resp.Schema.Attributes["template"].(schema.SingleNestedAttribute)
+	if !ok {
+		t.Fatal("template must be a SingleNestedAttribute")
+	}
+	if _, ok := tmpl.Attributes["source"].(schema.StringAttribute); !ok {
+		t.Error("template.source must be a string")
+	}
+	if _, ok := tmpl.Attributes["variables"].(schema.MapAttribute); !ok {
+		t.Error("template.variables must be a map")
+	}
 	topo, ok := resp.Schema.Attributes["topology"].(schema.SingleNestedAttribute)
 	if !ok {
 		t.Fatal("topology must be a SingleNestedAttribute")
@@ -352,6 +362,7 @@ func baseModel(t *testing.T, ctx context.Context) *ClusterResourceModel {
 		IPAM:           types.MapNull(providerMapType().ElemType),
 		Addon:          types.MapNull(providerMapType().ElemType),
 		Topology:       types.ObjectNull(topologyAttrTypes()),
+		Template:       types.ObjectNull(templateAttrTypes()),
 		Management:     types.ObjectNull(managementAttrTypes()),
 		Inventory:      types.ObjectNull(inventoryAttrTypes()),
 		Wait:           types.ObjectNull(waitAttrTypes()),
@@ -430,6 +441,9 @@ func TestBuildCreateOptions_Minimal(t *testing.T) {
 	if opts.ControlPlaneMachineCount != nil || opts.MachineDeployments != nil {
 		t.Error("counts must be nil without topology")
 	}
+	if opts.TemplateSource != "" || opts.Variables != nil {
+		t.Error("template source/variables must be empty without a template block")
+	}
 }
 
 func TestBuildCreateOptions_Full(t *testing.T) {
@@ -463,6 +477,8 @@ func TestBuildCreateOptions_Full(t *testing.T) {
 	data.Core = mustProviderMap(t, ctx, map[string]ProviderModel{"cluster-api": core})
 	data.Addon = mustProviderMap(t, ctx, map[string]ProviderModel{"helm": emptyProviderModel()})
 	data.Topology = topologyValue(t, ctx, 3, []MachineDeploymentModel{machineDeployment(t, ctx, "md-0", 5, map[string]string{"tier": "worker"})})
+	vars, _ := types.MapValueFrom(ctx, types.StringType, map[string]string{"CONTROL_PLANE_VIP": "10.0.0.160"})
+	data.Template, _ = types.ObjectValueFrom(ctx, templateAttrTypes(), TemplateModel{Source: types.StringValue("/srv/cluster-template-talos.yaml"), Variables: vars})
 
 	opts, diags := buildCreateOptions(ctx, data)
 	if diags.HasError() {
@@ -495,6 +511,9 @@ func TestBuildCreateOptions_Full(t *testing.T) {
 	}
 	if got := opts.WorkerMachineCount(); got == nil || *got != 5 {
 		t.Errorf("WorkerMachineCount() = %v", got)
+	}
+	if opts.TemplateSource != "/srv/cluster-template-talos.yaml" || opts.Variables["CONTROL_PLANE_VIP"] != "10.0.0.160" {
+		t.Errorf("template source/variables = %q %v", opts.TemplateSource, opts.Variables)
 	}
 	if opts.KubernetesVersion != "v1.34.0" || opts.Flavor != "ha" {
 		t.Errorf("k8s/flavor = %q/%q", opts.KubernetesVersion, opts.Flavor)

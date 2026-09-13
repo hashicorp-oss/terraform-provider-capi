@@ -173,7 +173,7 @@ func (m *Manager) CreateCluster(ctx context.Context, opts CreateClusterOptions) 
 	}
 	if !opts.SkipInit {
 		m.logger.Printf("Installing CAPI providers on %s", mgmtCluster.Name)
-		initOpts := InitOptions{Providers: opts.Providers}
+		initOpts := InitOptions{Providers: opts.Providers, Variables: opts.Variables}
 
 		if err := m.installer.Init(ctx, mgmtCluster, initOpts); err != nil {
 			m.cleanupOnError(ctx, bootstrapCluster)
@@ -192,6 +192,8 @@ func (m *Manager) CreateCluster(ctx context.Context, opts CreateClusterOptions) 
 		KubernetesVersion:        opts.KubernetesVersion,
 		InfrastructureProvider:   infra.InitString(),
 		Providers:                opts.Providers,
+		Source:                   opts.TemplateSource,
+		Variables:                opts.Variables,
 		Flavor:                   opts.Flavor,
 		ControlPlaneMachineCount: opts.ControlPlaneMachineCount,
 		WorkerMachineCount:       opts.WorkerMachineCount(),
@@ -305,7 +307,7 @@ func (m *Manager) CreateCluster(ctx context.Context, opts CreateClusterOptions) 
 		}
 
 		// Install CAPI on the workload cluster before move
-		initOpts := InitOptions{Providers: opts.Providers}
+		initOpts := InitOptions{Providers: opts.Providers, Variables: opts.Variables}
 
 		if err := m.installer.Init(ctx, workloadCluster, initOpts); err != nil {
 			m.cleanupOnError(ctx, bootstrapCluster)

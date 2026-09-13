@@ -36,6 +36,8 @@ func TestManager_CreateCluster_FullWorkflow(t *testing.T) {
 		Name:                     "test-cluster",
 		Namespace:                "default",
 		Providers:                dockerProviders(),
+		TemplateSource:           "/tmp/custom-template.yaml",
+		Variables:                map[string]string{"CONTROL_PLANE_VIP": "10.0.0.160"},
 		KubernetesVersion:        "v1.31.0",
 		ControlPlaneMachineCount: &cpCount,
 		MachineDeployments:       []MachineDeploymentTopology{{Name: "md-0", Replicas: &workerCount}},
@@ -73,6 +75,12 @@ func TestManager_CreateCluster_FullWorkflow(t *testing.T) {
 	}
 	if templateGen.GenerateCalls[0].Opts.InfrastructureProvider != "docker" {
 		t.Errorf("template infrastructure provider = %q", templateGen.GenerateCalls[0].Opts.InfrastructureProvider)
+	}
+	if templateGen.GenerateCalls[0].Opts.Source != "/tmp/custom-template.yaml" || templateGen.GenerateCalls[0].Opts.Variables["CONTROL_PLANE_VIP"] != "10.0.0.160" {
+		t.Errorf("template source/variables not passed through: %+v", templateGen.GenerateCalls[0].Opts)
+	}
+	if installer.InitCalls[0].Opts.Variables["CONTROL_PLANE_VIP"] != "10.0.0.160" {
+		t.Error("init must receive the same variables")
 	}
 
 	// Verify template was applied

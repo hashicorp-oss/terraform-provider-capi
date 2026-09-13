@@ -341,6 +341,23 @@ func (r *ClusterResource) Schema(ctx context.Context, req resource.SchemaRequest
 				},
 			},
 
+			// --- template ---
+			"template": schema.SingleNestedAttribute{
+				MarkdownDescription: "Cluster template configuration: where the workload cluster template comes from and the clusterctl variables substituted into it.",
+				Optional:            true,
+				Attributes: map[string]schema.Attribute{
+					"source": schema.StringAttribute{
+						MarkdownDescription: "Custom cluster template: a local path, a `file://` URL, or an `https://` URL (GitHub blob or raw URLs work). Omit to use the infrastructure provider's release template selected by `flavor`. Required for combinations the provider release does not ship, such as Tinkerbell with Talos.",
+						Optional:            true,
+					},
+					"variables": schema.MapAttribute{
+						MarkdownDescription: "clusterctl variables substituted into the template and provider components as `${VAR}` (e.g. `CONTROL_PLANE_VIP`, `POD_CIDR`). They take precedence over the clusterctl config file and environment. `CLUSTER_NAME`, `NAMESPACE`, `KUBERNETES_VERSION`, `CONTROL_PLANE_MACHINE_COUNT` and `WORKER_MACHINE_COUNT` are set from the resource.",
+						ElementType:         types.StringType,
+						Optional:            true,
+					},
+				},
+			},
+
 			// --- inventory ---
 			"inventory": schema.SingleNestedAttribute{
 				MarkdownDescription: "Hardware inventory for bare-metal provisioning.",
@@ -931,6 +948,7 @@ func (r *ClusterResource) UpgradeState(ctx context.Context) map[int64]resource.S
 				// MachineDeployment.
 				v1.Topology, d = legacyTopologyObject(ctx, v0.ControlPlaneMachineCount, v0.WorkerMachineCount)
 				resp.Diagnostics.Append(d...)
+				v1.Template = types.ObjectNull(templateAttrTypes())
 
 				v1.Inventory = types.ObjectNull(inventoryAttrTypes())
 

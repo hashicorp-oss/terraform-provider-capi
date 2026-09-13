@@ -6,6 +6,8 @@ package capi
 import (
 	"context"
 	"fmt"
+	"path/filepath"
+	"strings"
 
 	clusterctlclient "sigs.k8s.io/cluster-api/cmd/clusterctl/client"
 )
@@ -25,7 +27,7 @@ func NewClusterctlTemplateGenerator(configPath string) *ClusterctlTemplateGenera
 func (t *ClusterctlTemplateGenerator) Generate(ctx context.Context, cluster *Cluster, opts TemplateOptions) ([]byte, error) {
 	// The template comes from the infrastructure provider's release, so the
 	// client must resolve the same provider names and URLs that init used.
-	client, err := newClusterctlClient(ctx, t.configPath, opts.Providers)
+	client, err := newClusterctlClient(ctx, t.configPath, opts.Providers, opts.Variables)
 	if err != nil {
 		return nil, &CAPIError{
 			Operation: "generate-template",
@@ -51,7 +53,10 @@ func (t *ClusterctlTemplateGenerator) Generate(ctx context.Context, cluster *Clu
 		templateOpts.WorkerMachineCount = opts.WorkerMachineCount
 	}
 
-	if opts.InfrastructureProvider != "" {
+	switch {
+	case opts.Source != "":
+		templateOpts.URLSource = &clusterctlclient.URLSourceOptions{URL: templateURL(opts.Source)}
+	case opts.InfrastructureProvider != "":
 		templateOpts.ProviderRepositorySource = &clusterctlclient.ProviderRepositorySourceOptions{
 			InfrastructureProvider: opts.InfrastructureProvider,
 			Flavor:                 opts.Flavor,
@@ -77,4 +82,17 @@ func (t *ClusterctlTemplateGenerator) Generate(ctx context.Context, cluster *Clu
 	}
 
 	return yamlBytes, nil
+}
+
+// templateURL normalizes a template source for clusterctl. URLs (file://,
+// https://) pass through; a bare path is made absolute so it does not depend
+// on the provider process's working directory.
+func templateURL(source string) string {
+	if strings.Contains(source, "://") {
+		return source
+	}
+	if abs, err := filepath.Abs(source); err == nil {
+		return abs
+	}
+	return source
 }

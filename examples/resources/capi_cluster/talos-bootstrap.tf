@@ -60,6 +60,18 @@ resource "capi_cluster" "bare_metal" {
     }
   }
 
+  # Provider releases ship a kubeadm template only. For Talos, supply a
+  # custom template (local path, file:// or https:// URL) and the clusterctl
+  # variables it substitutes.
+  template = {
+    source = "${path.module}/cluster-template-talos.yaml"
+    variables = {
+      CONTROL_PLANE_VIP  = "192.168.1.100"
+      TALOS_VERSION      = "v1.13"
+      TALOS_INSTALL_DISK = "/dev/sda"
+    }
+  }
+
   management = {
     self_managed = true
 

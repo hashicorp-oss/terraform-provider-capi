@@ -65,6 +65,7 @@ type ClusterResourceModel struct {
 	IPAM           types.Map    `tfsdk:"ipam"`
 	Addon          types.Map    `tfsdk:"addon"`
 	Topology       types.Object `tfsdk:"topology"`
+	Template       types.Object `tfsdk:"template"`
 	Inventory      types.Object `tfsdk:"inventory"`
 	Wait           types.Object `tfsdk:"wait"`
 	Output         types.Object `tfsdk:"output"`
@@ -222,6 +223,13 @@ type MachineDeploymentModel struct {
 	Replicas      types.Int64  `tfsdk:"replicas"`
 	FailureDomain types.String `tfsdk:"failure_domain"`
 	Metadata      types.Object `tfsdk:"metadata"` // TopologyMetadataModel
+}
+
+// TemplateModel controls where the cluster template comes from and the
+// clusterctl variables substituted into it.
+type TemplateModel struct {
+	Source    types.String `tfsdk:"source"`
+	Variables types.Map    `tfsdk:"variables"`
 }
 
 // TopologyMetadataModel holds labels and annotations for topology machines.
@@ -412,6 +420,13 @@ func machineDeploymentAttrTypes() map[string]attr.Type {
 		"replicas":       types.Int64Type,
 		"failure_domain": types.StringType,
 		"metadata":       types.ObjectType{AttrTypes: topologyMetadataAttrTypes()},
+	}
+}
+
+func templateAttrTypes() map[string]attr.Type {
+	return map[string]attr.Type{
+		"source":    types.StringType,
+		"variables": types.MapType{ElemType: types.StringType},
 	}
 }
 
@@ -729,6 +744,26 @@ func extractTopology(ctx context.Context, data *ClusterResourceModel) (cp *int64
 	return cp, mds, diags
 }
 
+// extractTemplate returns the template source and variables (nil when unset).
+func extractTemplate(ctx context.Context, data *ClusterResourceModel) (source string, variables map[string]string, diags diag.Diagnostics) {
+	if data.Template.IsNull() || data.Template.IsUnknown() {
+		return "", nil, nil
+	}
+	var tm TemplateModel
+	diags.Append(data.Template.As(ctx, &tm, basetypes.ObjectAsOptions{})...)
+	if diags.HasError() {
+		return "", nil, diags
+	}
+	if !tm.Source.IsNull() && !tm.Source.IsUnknown() {
+		source = tm.Source.ValueString()
+	}
+	if !tm.Variables.IsNull() && !tm.Variables.IsUnknown() {
+		variables = map[string]string{}
+		diags.Append(tm.Variables.ElementsAs(ctx, &variables, false)...)
+	}
+	return source, variables, diags
+}
+
 // legacyTopologyObject builds a topology from the pre-v2 two counts: the
 // worker count becomes one MachineDeployment named "md-0". Used by upgraders.
 func legacyTopologyObject(ctx context.Context, cpCount, workerCount types.Int64) (types.Object, diag.Diagnostics) {
@@ -965,6 +1000,12 @@ func buildCreateOptions(ctx context.Context, data *ClusterResourceModel) (*capi.
 	diags.Append(d...)
 	opts.ControlPlaneMachineCount = cpCount
 	opts.MachineDeployments = mds
+
+	// Template
+	source, variables, d := extractTemplate(ctx, data)
+	diags.Append(d...)
+	opts.TemplateSource = source
+	opts.Variables = variables
 
 	// Wait
 	wait, d := extractWait(ctx, data)
