@@ -111,6 +111,10 @@ func TestApplyCNI_CiliumPrependsPatchAndAppendsRelease(t *testing.T) {
 	if !strings.Contains(rel.Values, "kubeProxyReplacement") {
 		t.Errorf("values must carry the cilium defaults: %q", rel.Values)
 	}
+	// Wait=true with a zero timeout gives Helm an already-expired deadline.
+	if rel.Timeout <= 0 {
+		t.Errorf("cilium release must have a non-zero install timeout, got %v", rel.Timeout)
+	}
 }
 
 func TestApplyCNI_UnknownProviderErrors(t *testing.T) {

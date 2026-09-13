@@ -52,9 +52,14 @@ l2announcements:
 bgpControlPlane:
   enabled: true
 
-# --- Gateway API (requires the Gateway API CRDs installed) ---
+# --- Gateway API ---
+# Off by default: Cilium does not bundle the Gateway API CRDs, and enabling this
+# renders a GatewayClass that fails to apply until those CRDs exist ("no matches
+# for kind GatewayClass"). Install the upstream Gateway API CRDs first, then set
+# enabled: true:
+#   kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.2.1/standard-install.yaml
 gatewayAPI:
-  enabled: true
+  enabled: false
   enableAlpn: true
   gatewayClass:
     create: "true"

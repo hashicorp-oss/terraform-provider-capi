@@ -6,6 +6,7 @@ package provider
 import (
 	"fmt"
 	"maps"
+	"time"
 
 	"sigs.k8s.io/yaml"
 
@@ -21,6 +22,11 @@ const ciliumNamespace = "kube-system"
 // kubePrismPort is the Talos KubePrism API load-balancer port. Cilium's
 // kube-proxy replacement talks to the API server through it.
 const kubePrismPort = 7445
+
+// ciliumInstallTimeout bounds the Helm install wait. Helm's install action
+// treats a zero timeout as an already-expired deadline when Wait is set, so
+// this must be non-zero. It allows for image pulls on a fresh node.
+const ciliumInstallTimeout = 15 * time.Minute
 
 // ciliumCNIPatch is the Talos machine-config patch that turns Talos's built-in
 // flannel and kube-proxy off and enables KubePrism, so Cilium owns networking.
@@ -55,6 +61,7 @@ func applyCNI(cfg *talos.Config, provider, version, values string) error {
 		Chart:     ciliumChart,
 		Version:   version,
 		Values:    vals,
+		Timeout:   ciliumInstallTimeout,
 	})
 	return nil
 }
