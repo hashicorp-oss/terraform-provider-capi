@@ -21,6 +21,7 @@ import (
 	"github.com/bmc-toolbox/bmclib/v2/bmc"
 	bmclibErrs "github.com/bmc-toolbox/bmclib/v2/errors"
 	"github.com/bmc-toolbox/bmclib/v2/providers/intelamt"
+	"github.com/bmc-toolbox/bmclib/v2/providers/redfish"
 	"github.com/jacobweinstock/iamt"
 )
 
@@ -168,15 +169,38 @@ func (b *BMCLib) preferredProvider() string {
 }
 
 func (b *BMCLib) rememberProvider(conns []string) {
-	if len(conns) != 1 {
+	p := preferProvider(conns)
+	if p == "" {
 		return
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.provider != conns[0] {
-		b.provider = conns[0]
-		b.logger.Printf("bmc %s: using provider %s for subsequent sessions", b.creds.Address, conns[0])
+	if b.provider != p {
+		b.provider = p
+		b.logger.Printf("bmc %s: using provider %s for subsequent sessions", b.creds.Address, p)
 	}
+}
+
+// preferProvider chooses the single provider all later sessions should use,
+// from the set that opened. Pinning one control surface is what keeps virtual
+// media and the boot override on the same device: a BMC that speaks both IPMI
+// and Redfish otherwise has bmclib attach the CD via Redfish but set the boot
+// device via IPMI (each capability picks its own driver), and the IPMI boot
+// flag does not select the Redfish virtual CD, so the node ignores the media
+// and drops to the boot menu. Intel AMT wins when present (it self-arms the
+// boot and can stream storage redirection); then Redfish, which serves power,
+// media, boot device and HTTP boot from one surface; otherwise the first
+// provider that opened.
+func preferProvider(conns []string) string {
+	for _, want := range []string{intelamt.ProviderName, redfish.ProviderName} {
+		if slices.Contains(conns, want) {
+			return want
+		}
+	}
+	if len(conns) > 0 {
+		return conns[0]
+	}
+	return ""
 }
 
 // withSession opens a session, runs fn, and closes the session. Errors are

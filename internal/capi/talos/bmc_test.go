@@ -17,6 +17,7 @@ import (
 // operation's own (which no longer lists the open connections).
 type fakeSession struct {
 	provider       string // provider name reported by Open; "gofish" when empty
+	openConns      []string // providers reported open; defaults to [name()]
 	failed         map[string]string
 	opened, closed bool
 	power          string
@@ -38,7 +39,11 @@ func (f *fakeSession) name() string {
 
 func (f *fakeSession) Open(context.Context) error {
 	f.opened = true
-	f.metadata = bmc.Metadata{SuccessfulOpenConns: []string{f.name()}, ProvidersAttempted: []string{f.name()}}
+	conns := f.openConns
+	if conns == nil {
+		conns = []string{f.name()}
+	}
+	f.metadata = bmc.Metadata{SuccessfulOpenConns: conns, ProvidersAttempted: conns}
 	return nil
 }
 
@@ -230,5 +235,42 @@ func TestBMCLib_ErrorCarriesMetadata(t *testing.T) {
 		if !strings.Contains(msg, want) {
 			t.Fatalf("error %q missing %q", msg, want)
 		}
+	}
+}
+
+func TestBMCLib_PinsSingleProviderFromMany(t *testing.T) {
+	// A BMC that speaks both IPMI and Redfish opens several providers. Without
+	// pinning, bmclib attaches virtual media via Redfish but sets the boot
+	// device via IPMI, and the IPMI boot flag does not select the Redfish CD.
+	// The BMC must settle on one provider, preferring Redfish.
+	s := &fakeSession{provider: "ipmi", openConns: []string{"ipmi", "lenovo", "gofish", "ipmitool"}}
+	b := newTestBMC(s)
+	if _, err := b.PowerState(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := b.preferredProvider(); got != "gofish" {
+		t.Fatalf("preferred provider = %q, want gofish", got)
+	}
+}
+
+func TestBMCLib_PrefersAMTWhenPresent(t *testing.T) {
+	s := &fakeSession{provider: "IntelAMT", openConns: []string{"gofish", "IntelAMT"}}
+	b := newTestBMC(s)
+	if _, err := b.PowerState(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := b.preferredProvider(); got != "IntelAMT" {
+		t.Fatalf("preferred provider = %q, want IntelAMT", got)
+	}
+}
+
+func TestBMCLib_PinsFirstWhenNoPreferred(t *testing.T) {
+	s := &fakeSession{provider: "ipmi", openConns: []string{"ipmi", "ipmitool"}}
+	b := newTestBMC(s)
+	if _, err := b.PowerState(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := b.preferredProvider(); got != "ipmi" {
+		t.Fatalf("preferred provider = %q, want ipmi", got)
 	}
 }
