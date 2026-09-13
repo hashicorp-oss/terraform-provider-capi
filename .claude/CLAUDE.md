@@ -482,9 +482,16 @@ and `addons.helm` (`internal/provider/cni.go`, `applyCNI`). When set to
 (`cluster.network.cni.name: none`, `cluster.proxy.disabled: true`,
 `machine.features.kubePrism` on 7445) and appends a Cilium Helm release
 (`oci://quay.io/cilium/charts/cilium`, `kube-system`) whose values are the
-defaults (`kubeProxyReplacement`, KubePrism host/port, Kubernetes IPAM)
-deep-merged with the block's `values`. `cni` is a new Optional attribute in
-schema version 2, so no version bump; the upgraders emit `cni: null`.
+Talos-required defaults deep-merged with the block's `values`. The defaults
+come from the official Talos+Cilium guide and are needed for Cilium to start
+on Talos: `kubeProxyReplacement`, KubePrism `k8sServiceHost`/`k8sServicePort`,
+Kubernetes IPAM, `cgroup.autoMount.enabled=false` + `cgroup.hostRoot`, and the
+restricted `securityContext.capabilities` lists (`ciliumAgent`,
+`cleanCiliumState`). Environment-specific values (BGP, native routing, Gateway
+API, Hubble, resource limits) go in `values`; see
+`examples/resources/capi_cluster/cilium-values.yaml`. `cni` is a new Optional
+attribute in schema version 2, so no version bump; the upgraders emit
+`cni: null`.
 
 For a pivoted CAPT workload cluster (not the Talos bootstrap path), CNI is a
 HelmChartProxy concern and out of scope here.

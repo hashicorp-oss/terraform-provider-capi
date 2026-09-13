@@ -63,11 +63,26 @@ func applyCNI(cfg *talos.Config, provider, version, values string) error {
 // defaults that pair with the Talos CNI patch (kube-proxy replacement via
 // KubePrism, Kubernetes IPAM). User keys win; unset defaults survive.
 func ciliumValues(userValues string) (string, error) {
+	// Defaults required to run Cilium on Talos, per the official Talos guide:
+	// KubePrism kube-proxy replacement, Kubernetes IPAM, no cgroup auto-mount
+	// (Talos already mounts cgroup2), and the restricted capability sets Talos
+	// permits. Anything beyond this (BGP, native routing, Gateway API, Hubble,
+	// resource limits) is environment-specific and belongs in cni.values.
 	merged := map[string]any{
 		"kubeProxyReplacement": true,
 		"k8sServiceHost":       "localhost",
 		"k8sServicePort":       kubePrismPort,
 		"ipam":                 map[string]any{"mode": "kubernetes"},
+		"cgroup": map[string]any{
+			"autoMount": map[string]any{"enabled": false},
+			"hostRoot":  "/sys/fs/cgroup",
+		},
+		"securityContext": map[string]any{
+			"capabilities": map[string]any{
+				"ciliumAgent":      []any{"BPF", "CHOWN", "DAC_OVERRIDE", "FOWNER", "IPC_LOCK", "KILL", "NET_ADMIN", "NET_RAW", "PERFMON", "SETGID", "SETUID", "SYS_ADMIN", "SYS_RESOURCE"},
+				"cleanCiliumState": []any{"NET_ADMIN", "SYS_ADMIN", "SYS_RESOURCE"},
+			},
+		},
 	}
 	if userValues != "" {
 		var user map[string]any

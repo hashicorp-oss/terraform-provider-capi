@@ -38,6 +38,23 @@ func TestCiliumValues_Defaults(t *testing.T) {
 	if ipam, _ := m["ipam"].(map[string]any); ipam["mode"] != "kubernetes" {
 		t.Errorf("ipam = %v, want mode kubernetes", m["ipam"])
 	}
+	// Talos requires Cilium not to auto-mount cgroups (Talos already mounts cgroup2).
+	cgroup, _ := m["cgroup"].(map[string]any)
+	if am, _ := cgroup["autoMount"].(map[string]any); am["enabled"] != false {
+		t.Errorf("cgroup.autoMount.enabled = %v, want false (Talos requirement)", cgroup["autoMount"])
+	}
+	if cgroup["hostRoot"] != "/sys/fs/cgroup" {
+		t.Errorf("cgroup.hostRoot = %v, want /sys/fs/cgroup", cgroup["hostRoot"])
+	}
+	// Talos rejects the default capability set; Cilium needs the restricted lists.
+	sc, _ := m["securityContext"].(map[string]any)
+	caps, _ := sc["capabilities"].(map[string]any)
+	if _, ok := caps["ciliumAgent"].([]any); !ok {
+		t.Errorf("securityContext.capabilities.ciliumAgent missing (Talos requirement): %v", sc)
+	}
+	if _, ok := caps["cleanCiliumState"].([]any); !ok {
+		t.Errorf("securityContext.capabilities.cleanCiliumState missing (Talos requirement): %v", sc)
+	}
 }
 
 func TestCiliumValues_UserMergeOverridesAndAdds(t *testing.T) {

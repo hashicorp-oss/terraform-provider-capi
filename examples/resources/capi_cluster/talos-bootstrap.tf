@@ -105,9 +105,17 @@ resource "capi_cluster" "bare_metal" {
   cni = {
     provider = "cilium"
     version  = "1.18.0"
+
+    # The provider already sets the Talos-required defaults (KubePrism
+    # kube-proxy replacement, Kubernetes IPAM, cgroup and securityContext).
+    # Add anything beyond that here; it is deep-merged over the defaults.
     values = yamlencode({
-      hubble = { relay = { enabled = true } }
+      hubble = { relay = { enabled = true }, ui = { enabled = true } }
     })
+
+    # For a fuller bare-metal setup (native routing, BGP, L2, Gateway API),
+    # see cilium-values.yaml and use:
+    #   values = file("${path.module}/cilium-values.yaml")
   }
 
   inventory = {

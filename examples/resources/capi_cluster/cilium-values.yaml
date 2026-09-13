@@ -1,0 +1,88 @@
+# Advanced Cilium values for the capi_cluster `cni` block:
+#
+#   cni = {
+#     provider = "cilium"
+#     version  = "1.18.0"
+#     values   = file("${path.module}/cilium-values.yaml")
+#   }
+#
+# These are DEEP-MERGED over the Talos-required defaults the provider already
+# sets (kubeProxyReplacement, k8sServiceHost/Port for KubePrism, Kubernetes
+# IPAM, cgroup.autoMount=false + hostRoot, and the securityContext capability
+# lists Talos permits). You only need to add what you want beyond those.
+#
+# Everything below is environment-specific — a bare-metal LAN with native
+# routing, BGP, and L2 announcements. Trim it to what your network provides.
+#
+# NOTE: routingMode=native and ipam.mode=cluster-pool both require a pod CIDR.
+# Replace 10.244.0.0/16 with your cluster's pod CIDR (it must match the
+# Cluster.spec.clusterNetwork.pods CIDR in your template), or delete these two
+# sections to fall back to the default Kubernetes IPAM with tunneling.
+
+# --- Native routing (no overlay); requires L2 adjacency between nodes ---
+routingMode: native
+autoDirectNodeRoutes: true
+ipv4NativeRoutingCIDR: 10.244.0.0/16
+enableIPv4Masquerade: true
+bpf:
+  masquerade: true
+  hostLegacyRouting: true
+
+ipam:
+  mode: cluster-pool
+  operator:
+    clusterPoolIPv4PodCIDRList:
+      - 10.244.0.0/16
+    clusterPoolIPv4MaskSize: 24
+
+# --- Load balancing / service exposure on bare metal ---
+loadBalancer:
+  algorithm: maglev
+  mode: snat
+externalIPs:
+  enabled: true
+l2announcements:
+  enabled: true
+bgpControlPlane:
+  enabled: true
+
+# --- Gateway API (requires the Gateway API CRDs installed) ---
+gatewayAPI:
+  enabled: true
+  enableAlpn: true
+  gatewayClass:
+    create: "true"
+
+# --- Observability ---
+hubble:
+  enabled: true
+  relay:
+    enabled: true
+    rollOutPods: true
+  ui:
+    enabled: true
+  metrics:
+    enableOpenMetrics: true
+    enabled:
+      - dns:query;ignoreAAAA
+      - drop
+      - flow
+      - icmp
+      - port-distribution
+      - tcp
+operator:
+  replicas: 1
+  rollOutPods: true
+prometheus:
+  enabled: true
+
+# --- Resource sizing ---
+resources:
+  requests:
+    cpu: 100m
+    memory: 512Mi
+  limits:
+    cpu: 500m
+    memory: 4Gi
+
+rollOutCiliumPods: true
