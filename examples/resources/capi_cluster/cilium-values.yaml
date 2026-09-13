@@ -2,9 +2,15 @@
 #
 #   cni = {
 #     provider = "cilium"
-#     version  = "1.18.0"
+#     version  = "1.18.13"
 #     values   = file("${path.module}/cilium-values.yaml")
 #   }
+#
+# Pin cni.version to a chart tag that exists on the OCI registry
+# (oci://quay.io/cilium/charts/cilium). quay keeps only recent patch releases
+# (e.g. 1.18.6+), and there is no floating "latest" tag, so an old or omitted
+# version fails with a "not found" FetchReference error. Check available tags:
+#   curl -s https://quay.io/v2/cilium/charts/cilium/tags/list
 #
 # These are DEEP-MERGED over the Talos-required defaults the provider already
 # sets (kubeProxyReplacement, k8sServiceHost/Port for KubePrism, Kubernetes

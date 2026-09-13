@@ -493,6 +493,12 @@ API, Hubble, resource limits) go in `values`; see
 attribute in schema version 2, so no version bump; the upgraders emit
 `cni: null`.
 
+`cni.version` must be a tag that exists on `oci://quay.io/cilium/charts/cilium`.
+quay retains only recent patch releases and has no floating `latest`, so an old
+or omitted version fails at apply with a `FetchReference ... not found` error
+(the cluster provisions first, then the addon install fails). List tags with
+`curl -s https://quay.io/v2/cilium/charts/cilium/tags/list`.
+
 For a pivoted CAPT workload cluster (not the Talos bootstrap path), CNI is a
 HelmChartProxy concern and out of scope here.
 

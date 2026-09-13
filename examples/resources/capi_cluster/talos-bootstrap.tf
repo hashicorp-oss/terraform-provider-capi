@@ -104,7 +104,7 @@ resource "capi_cluster" "bare_metal" {
   # values are deep-merged over those defaults.
   cni = {
     provider = "cilium"
-    version  = "1.18.0"
+    version  = "1.18.13"
 
     # The provider already sets the Talos-required defaults (KubePrism
     # kube-proxy replacement, Kubernetes IPAM, cgroup and securityContext).
