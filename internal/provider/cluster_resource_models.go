@@ -65,6 +65,7 @@ type ClusterResourceModel struct {
 	IPAM           types.Map    `tfsdk:"ipam"`
 	Addon          types.Map    `tfsdk:"addon"`
 	Topology       types.Object `tfsdk:"topology"`
+	CNI            types.Object `tfsdk:"cni"`
 	Template       types.Object `tfsdk:"template"`
 	Inventory      types.Object `tfsdk:"inventory"`
 	Wait           types.Object `tfsdk:"wait"`
@@ -149,6 +150,13 @@ type ProviderModel struct {
 	AdditionalManifests   types.String `tfsdk:"additional_manifests"`
 	ManifestPatches       types.List   `tfsdk:"manifest_patches"`
 	Patches               types.List   `tfsdk:"patches"`
+}
+
+// CNIModel configures the workload cluster CNI, replacing Talos's default.
+type CNIModel struct {
+	Provider types.String `tfsdk:"provider"`
+	Version  types.String `tfsdk:"version"`
+	Values   types.String `tfsdk:"values"`
 }
 
 // FetchConfigModel controls where provider components are fetched from.
@@ -385,6 +393,14 @@ func providerAttrTypes() map[string]attr.Type {
 // providerMapType is the Terraform type of every provider map attribute.
 func providerMapType() types.MapType {
 	return types.MapType{ElemType: types.ObjectType{AttrTypes: providerAttrTypes()}}
+}
+
+func cniAttrTypes() map[string]attr.Type {
+	return map[string]attr.Type{
+		"provider": types.StringType,
+		"version":  types.StringType,
+		"values":   types.StringType,
+	}
 }
 
 func fetchConfigAttrTypes() map[string]attr.Type {
@@ -742,6 +758,16 @@ func extractTopology(ctx context.Context, data *ClusterResourceModel) (cp *int64
 		}
 	}
 	return cp, mds, diags
+}
+
+// extractCNI returns the CNI configuration, or nil when unset.
+func extractCNI(ctx context.Context, data *ClusterResourceModel) (*CNIModel, diag.Diagnostics) {
+	if data.CNI.IsNull() || data.CNI.IsUnknown() {
+		return nil, nil
+	}
+	var cni CNIModel
+	diags := data.CNI.As(ctx, &cni, basetypes.ObjectAsOptions{})
+	return &cni, diags
 }
 
 // extractTemplate returns the template source and variables (nil when unset).

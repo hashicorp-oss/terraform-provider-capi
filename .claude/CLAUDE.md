@@ -459,6 +459,36 @@ clusterctl flavor templates expose a single `WORKER_MACHINE_COUNT`, filled from
 the **first** machine deployment's `replicas` (`CreateClusterOptions.WorkerMachineCount()`).
 Inventory validation counts workers as the sum of all replicas; names must be unique.
 
+### 3.6 `cni` — Container Network Interface (Talos bootstrap only)
+
+Replaces Talos's built-in flannel. `SingleNestedAttribute`, Optional; omitting
+it keeps flannel.
+
+```go
+"cni": schema.SingleNestedAttribute{
+    Optional: true,
+    Attributes: map[string]schema.Attribute{
+        "provider": schema.StringAttribute{Required: true}, // only "cilium" today
+        "version":  schema.StringAttribute{Optional: true}, // Helm chart version
+        "values":   schema.StringAttribute{Optional: true}, // extra Helm values (YAML), deep-merged over defaults
+    },
+},
+```
+
+Only valid with `management.bootstrap.type = "talos"`; anything else is a
+validation error, because the knob is sugar over that path's `config_patches`
+and `addons.helm` (`internal/provider/cni.go`, `applyCNI`). When set to
+`cilium`, `buildTalosBootstrapConfig` prepends a Talos machine-config patch
+(`cluster.network.cni.name: none`, `cluster.proxy.disabled: true`,
+`machine.features.kubePrism` on 7445) and appends a Cilium Helm release
+(`oci://quay.io/cilium/charts/cilium`, `kube-system`) whose values are the
+defaults (`kubeProxyReplacement`, KubePrism host/port, Kubernetes IPAM)
+deep-merged with the block's `values`. `cni` is a new Optional attribute in
+schema version 2, so no version bump; the upgraders emit `cni: null`.
+
+For a pivoted CAPT workload cluster (not the Talos bootstrap path), CNI is a
+HelmChartProxy concern and out of scope here.
+
 ### 3.6 `template` — Cluster Template Source and Variables
 
 ```go
@@ -690,6 +720,7 @@ type ClusterResourceModel struct {
     IPAM           types.Map    `tfsdk:"ipam"`
     Addon          types.Map    `tfsdk:"addon"`
     Topology       types.Object `tfsdk:"topology"`
+    CNI            types.Object `tfsdk:"cni"`       // CNIModel {provider, version, values}
     Template       types.Object `tfsdk:"template"`   // TemplateModel {source, variables}
     Inventory      types.Object `tfsdk:"inventory"`
     Wait           types.Object `tfsdk:"wait"`
@@ -1345,6 +1376,7 @@ Quick reference for where every attribute lives in the schema:
 | *(new)* | `ipam.<name>` | `MapNestedAttribute` Optional | Immutable |
 | *(was `addons[]`)* | `addon.<name>` | `MapNestedAttribute` Optional | Immutable |
 | *(new)* | `<map>.<name>.fetch_config.{owner,repository,url,oci}` | `SingleNestedAttribute` Optional | Immutable |
+| *(new)* | `cni.provider` / `cni.version` / `cni.values` | `SingleNestedAttribute` Optional | **Mutable** (Talos bootstrap only) |
 | *(new)* | `template.source` | `StringAttribute` Optional | **Mutable** |
 | *(new)* | `template.variables` | `MapAttribute` Optional | **Mutable** |
 | `control_plane_machine_count` | `topology.control_plane.replicas` | `Int64Attribute` Optional | **Mutable** |

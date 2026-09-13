@@ -86,6 +86,7 @@ func upgradeV1JSON(raw []byte) ([]byte, error) {
 		state["addon"] = b
 	}
 	state["ipam"] = nullJSON
+	state["cni"] = nullJSON
 	state["template"] = nullJSON
 
 	topology := map[string]json.RawMessage{

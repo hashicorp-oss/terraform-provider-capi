@@ -94,26 +94,20 @@ resource "capi_cluster" "bare_metal" {
           kernel_args = ["net.ifnames=0"]
         }
 
-        config_patches = [file("${path.module}/cni-none.yaml")]
-      }
-
-      addons = {
-        helm = [
-          {
-            name      = "cilium"
-            namespace = "kube-system"
-            chart     = "oci://quay.io/cilium/charts/cilium"
-            version   = "1.18.0"
-            values = yamlencode({
-              kubeProxyReplacement = true
-              k8sServiceHost       = "localhost"
-              k8sServicePort       = 7445
-              ipam                 = { mode = "kubernetes" }
-            })
-          }
-        ]
       }
     }
+  }
+
+  # First-class CNI: replaces Talos's built-in flannel with Cilium. This
+  # disables the built-in CNI and kube-proxy (KubePrism serves the API server)
+  # and installs the Cilium Helm release with kube-proxy replacement. Extra
+  # values are deep-merged over those defaults.
+  cni = {
+    provider = "cilium"
+    version  = "1.18.0"
+    values = yamlencode({
+      hubble = { relay = { enabled = true } }
+    })
   }
 
   inventory = {

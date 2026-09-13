@@ -158,6 +158,21 @@ resource "capi_cluster" "workload" {
 }
 ```
 
+For the Talos bootstrap (in-place) path, the `capi_cluster` `cni` block is the
+turnkey way to swap flannel for Cilium — it disables Talos's built-in CNI and
+kube-proxy and installs Cilium with kube-proxy replacement:
+
+```hcl
+  cni = {
+    provider = "cilium"
+    version  = "1.18.0"
+    # values = yamlencode({ hubble = { relay = { enabled = true } } })
+  }
+```
+
+For a pivoted CAPT workload cluster, use `HelmChartProxy` resources instead so
+they transfer during the pivot.
+
 Then apply `HelmChartProxy` resources to the bootstrap cluster before the pivot
 completes:
 

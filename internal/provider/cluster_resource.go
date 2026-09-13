@@ -341,6 +341,26 @@ func (r *ClusterResource) Schema(ctx context.Context, req resource.SchemaRequest
 				},
 			},
 
+			// --- cni ---
+			"cni": schema.SingleNestedAttribute{
+				MarkdownDescription: "Container Network Interface for the workload cluster, replacing Talos's built-in flannel. Only valid with a `talos` management bootstrap; it disables the built-in CNI and kube-proxy (KubePrism handles the API server) and installs the CNI as a Helm release.",
+				Optional:            true,
+				Attributes: map[string]schema.Attribute{
+					"provider": schema.StringAttribute{
+						MarkdownDescription: "CNI provider. Only `cilium` is supported today.",
+						Required:            true,
+					},
+					"version": schema.StringAttribute{
+						MarkdownDescription: "CNI Helm chart version. Omit to use the chart's latest release.",
+						Optional:            true,
+					},
+					"values": schema.StringAttribute{
+						MarkdownDescription: "Extra Helm values (YAML), deep-merged over the defaults (`kubeProxyReplacement`, KubePrism host/port, Kubernetes IPAM).",
+						Optional:            true,
+					},
+				},
+			},
+
 			// --- template ---
 			"template": schema.SingleNestedAttribute{
 				MarkdownDescription: "Cluster template configuration: where the workload cluster template comes from and the clusterctl variables substituted into it.",
@@ -948,6 +968,7 @@ func (r *ClusterResource) UpgradeState(ctx context.Context) map[int64]resource.S
 				// MachineDeployment.
 				v1.Topology, d = legacyTopologyObject(ctx, v0.ControlPlaneMachineCount, v0.WorkerMachineCount)
 				resp.Diagnostics.Append(d...)
+				v1.CNI = types.ObjectNull(cniAttrTypes())
 				v1.Template = types.ObjectNull(templateAttrTypes())
 
 				v1.Inventory = types.ObjectNull(inventoryAttrTypes())
@@ -1072,6 +1093,21 @@ func (r *ClusterResource) validateLifecycleConfig(ctx context.Context, data *Clu
 			cp = *cpCount
 		}
 		validateInventory(ctx, inv, cp, workerCount, diags)
+	}
+
+	// CNI is only wired through the Talos bootstrap path (config patches + Helm addons).
+	if cni, d := extractCNI(ctx, data); cni != nil {
+		diags.Append(d...)
+		if p := strings.ToLower(cni.Provider.ValueString()); p != "cilium" {
+			diags.AddError("Invalid cni configuration", fmt.Sprintf("cni.provider %q is not supported; only \"cilium\".", cni.Provider.ValueString()))
+		}
+		mgmt, d := extractManagement(ctx, data)
+		diags.Append(d...)
+		bs, d := extractManagementBootstrap(ctx, mgmt)
+		diags.Append(d...)
+		if bs == nil || strings.ToLower(bs.Type.ValueString()) != "talos" {
+			diags.AddError("Invalid cni configuration", "cni requires management.bootstrap.type = \"talos\".")
+		}
 	}
 
 	// Validate bootstrap cluster configuration

@@ -5,6 +5,7 @@ package provider
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -92,5 +93,39 @@ func TestManagerFor(t *testing.T) {
 	}
 	if mgr == nil || mgr == def {
 		t.Fatal("talos should return a new manager")
+	}
+}
+
+func TestBuildTalosBootstrapConfig_CNICilium(t *testing.T) {
+	ctx := context.Background()
+	data := talosTestData(ctx, t, buildTestBootstrap(ctx, t, "talos", "cp-1", nil, testTalosModel(ctx, t, nil, []string{"machine: {}\n"}), nil), goodMachine)
+	cniVal, d := types.ObjectValueFrom(ctx, cniAttrTypes(), CNIModel{
+		Provider: types.StringValue("cilium"),
+		Version:  types.StringValue("1.18.0"),
+		Values:   types.StringValue("kubeProxyReplacement: false\n"),
+	})
+	if d.HasError() {
+		t.Fatal(d)
+	}
+	data.CNI = cniVal
+
+	cfg, diags := buildTalosBootstrapConfig(ctx, data)
+	if diags.HasError() {
+		t.Fatalf("diags: %v", diags)
+	}
+	if len(cfg.Talos.ConfigPatches) != 2 || !strings.Contains(cfg.Talos.ConfigPatches[0], "name: none") {
+		t.Errorf("expected the cilium CNI patch prepended, got %v", cfg.Talos.ConfigPatches)
+	}
+	var cilium *talos.HelmRelease
+	for i := range cfg.Addons.Helm {
+		if cfg.Addons.Helm[i].Name == "cilium" {
+			cilium = &cfg.Addons.Helm[i]
+		}
+	}
+	if cilium == nil {
+		t.Fatalf("expected a cilium helm release, got %+v", cfg.Addons.Helm)
+	}
+	if cilium.Version != "1.18.0" || !strings.Contains(cilium.Values, "kubeProxyReplacement: false") {
+		t.Errorf("cilium release = %+v", cilium)
 	}
 }

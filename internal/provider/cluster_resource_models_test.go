@@ -362,6 +362,7 @@ func baseModel(t *testing.T, ctx context.Context) *ClusterResourceModel {
 		IPAM:           types.MapNull(providerMapType().ElemType),
 		Addon:          types.MapNull(providerMapType().ElemType),
 		Topology:       types.ObjectNull(topologyAttrTypes()),
+		CNI:            types.ObjectNull(cniAttrTypes()),
 		Template:       types.ObjectNull(templateAttrTypes()),
 		Management:     types.ObjectNull(managementAttrTypes()),
 		Inventory:      types.ObjectNull(inventoryAttrTypes()),

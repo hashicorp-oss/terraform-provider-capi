@@ -53,6 +53,7 @@ resource "capi_cluster" "example" {
 
 - `addon` (Attributes Map) Addon providers, keyed by name (e.g. `helm`). An empty object installs the default release. Each value is a provider object modeled after the cluster-api-operator provider CRDs (`operator.cluster.x-k8s.io/v1alpha2`); customizations are applied natively by wrapping the clusterctl repository factory, so the operator itself is not required. (see [below for nested schema](#nestedatt--addon))
 - `bootstrap` (Attributes Map) Bootstrap providers, keyed by name (e.g. `kubeadm`, `talos`). Each value is a provider object modeled after the cluster-api-operator provider CRDs (`operator.cluster.x-k8s.io/v1alpha2`); customizations are applied natively by wrapping the clusterctl repository factory, so the operator itself is not required. (see [below for nested schema](#nestedatt--bootstrap))
+- `cni` (Attributes) Container Network Interface for the workload cluster, replacing Talos's built-in flannel. Only valid with a `talos` management bootstrap; it disables the built-in CNI and kube-proxy (KubePrism handles the API server) and installs the CNI as a Helm release. (see [below for nested schema](#nestedatt--cni))
 - `control_plane` (Attributes Map) Control plane providers, keyed by name (e.g. `kubeadm`, `talos`). Each value is a provider object modeled after the cluster-api-operator provider CRDs (`operator.cluster.x-k8s.io/v1alpha2`); customizations are applied natively by wrapping the clusterctl repository factory, so the operator itself is not required. (see [below for nested schema](#nestedatt--control_plane))
 - `core` (Attributes Map) Core CAPI provider, keyed by name (`cluster-api`). Omit to let clusterctl install the default. Each value is a provider object modeled after the cluster-api-operator provider CRDs (`operator.cluster.x-k8s.io/v1alpha2`); customizations are applied natively by wrapping the clusterctl repository factory, so the operator itself is not required. (see [below for nested schema](#nestedatt--core))
 - `flavor` (String) Cluster template flavor to use. Maps to clusterctl template flavors.
@@ -327,6 +328,19 @@ Optional:
 - `version` (String) API version of the target.
 
 
+
+
+<a id="nestedatt--cni"></a>
+### Nested Schema for `cni`
+
+Required:
+
+- `provider` (String) CNI provider. Only `cilium` is supported today.
+
+Optional:
+
+- `values` (String) Extra Helm values (YAML), deep-merged over the defaults (`kubeProxyReplacement`, KubePrism host/port, Kubernetes IPAM).
+- `version` (String) CNI Helm chart version. Omit to use the chart's latest release.
 
 
 <a id="nestedatt--control_plane"></a>
