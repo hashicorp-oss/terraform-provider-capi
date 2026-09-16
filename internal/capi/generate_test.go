@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	apiextv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
@@ -292,4 +293,110 @@ func findObject(t *testing.T, manifest []byte, kind, name string) *unstructured.
 		}
 	}
 	return nil
+}
+
+func TestGenerate_ClusterClass_TinkerbellTalos(t *testing.T) {
+	gen := generatorFor(t, "core.yaml", "capt.yaml", "cacppt.yaml", "cabpt.yaml")
+	opts := tinkerbellTalosOptions()
+	opts.ClusterClass = true
+	got, err := gen.Generate(context.Background(), &Cluster{Name: "mgmt"}, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertManifestMatchesGolden(t, "clusterclass-tinkerbell-talos", got)
+}
+
+func TestGenerate_ClusterClass_SharedClassEmitsOneTemplateSet(t *testing.T) {
+	gen := generatorFor(t, "core.yaml", "capt.yaml", "cacppt.yaml", "cabpt.yaml")
+	opts := tinkerbellTalosOptions()
+	opts.ClusterClass = true
+	shared := map[string]any{"hardwareName": "shared"}
+	opts.MachineDeployments = []MachineDeploymentTopology{
+		{Name: "md-a", Class: "worker", Replicas: ptrInt64(1), Infrastructure: shared},
+		{Name: "md-b", Class: "worker", Replicas: ptrInt64(2), Infrastructure: shared},
+	}
+	got, err := gen.Generate(context.Background(), &Cluster{}, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	objs, err := parseMultiDocYAML(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var machineTemplates []string
+	for _, o := range objs {
+		if o.GetKind() == "TinkerbellMachineTemplate" && strings.HasPrefix(o.GetName(), "acc-worker-") {
+			machineTemplates = append(machineTemplates, o.GetName())
+		}
+	}
+	if len(machineTemplates) != 1 {
+		t.Errorf("want one machine template for class worker, got %v", machineTemplates)
+	}
+	cc := findObject(t, got, "ClusterClass", "acc")
+	cluster := findObject(t, got, "Cluster", "acc")
+	if cc == nil || cluster == nil {
+		t.Fatalf("manifest lacks the ClusterClass or Cluster:\n%s", got)
+	}
+	classes, _, _ := unstructured.NestedSlice(cc.Object, "spec", "workers", "machineDeployments")
+	if len(classes) != 1 {
+		t.Errorf("want one worker class, got %d", len(classes))
+	}
+	mds, _, _ := unstructured.NestedSlice(cluster.Object, "spec", "topology", "workers", "machineDeployments")
+	if len(mds) != 2 {
+		t.Errorf("want two topology machine deployments, got %d", len(mds))
+	}
+}
+
+func TestGenerate_ClusterClass_ConflictingSharedClassFails(t *testing.T) {
+	gen := generatorFor(t, "core.yaml", "capt.yaml", "cacppt.yaml", "cabpt.yaml")
+	opts := tinkerbellTalosOptions()
+	opts.ClusterClass = true
+	opts.MachineDeployments = []MachineDeploymentTopology{
+		{Name: "md-a", Class: "worker", Infrastructure: map[string]any{"hardwareName": "a"}},
+		{Name: "md-b", Class: "worker", Infrastructure: map[string]any{"hardwareName": "b"}},
+	}
+	_, err := gen.Generate(context.Background(), &Cluster{}, opts)
+	if err == nil || !strings.Contains(err.Error(), `class "worker"`) {
+		t.Fatalf("expected an error naming the conflicting class, got %v", err)
+	}
+}
+
+func TestGenerate_ClusterClass_ProviderWithoutTemplateKindFails(t *testing.T) {
+	var crds []apiextv1.CustomResourceDefinition
+	for _, crd := range loadTestCRDs(t, "core.yaml", "capt.yaml", "cacppt.yaml", "cabpt.yaml") {
+		if crd.Spec.Names.Kind != "TinkerbellClusterTemplate" {
+			crds = append(crds, crd)
+		}
+	}
+	gen := NewManifestGenerator(staticKindResolver{NewKindCatalog(crds)})
+	opts := tinkerbellTalosOptions()
+	opts.ClusterClass = true
+	_, err := gen.Generate(context.Background(), &Cluster{}, opts)
+	if !errors.Is(err, ErrKindNotFound) || !strings.Contains(err.Error(), "ClusterTemplate") {
+		t.Fatalf("expected ErrKindNotFound naming ClusterTemplate, got %v", err)
+	}
+}
+
+func TestGenerate_ClusterClass_RequiresKubernetesVersion(t *testing.T) {
+	gen := generatorFor(t, "core.yaml", "capt.yaml", "cacppt.yaml", "cabpt.yaml")
+	opts := tinkerbellTalosOptions()
+	opts.ClusterClass = true
+	opts.KubernetesVersion = ""
+	_, err := gen.Generate(context.Background(), &Cluster{}, opts)
+	if err == nil || !strings.Contains(err.Error(), "kubernetes_version") {
+		t.Fatalf("expected an error about kubernetes_version, got %v", err)
+	}
+}
+
+func TestGenerate_ClusterClass_RequiresV1beta2Core(t *testing.T) {
+	gen := generatorFor(t, "legacy-v1beta1.yaml")
+	providers := ProviderSet{}
+	providers.Add(ProviderConfig{Name: "docker", Type: ProviderTypeInfrastructure})
+	providers.Add(ProviderConfig{Name: "kubeadm", Type: ProviderTypeControlPlane})
+	_, err := gen.Generate(context.Background(), &Cluster{}, GenerateOptions{
+		ClusterName: "old", Namespace: "default", KubernetesVersion: "v1.29.0", Providers: providers, ClusterClass: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "v1beta2") {
+		t.Fatalf("expected an error about the v1beta2 core contract, got %v", err)
+	}
 }

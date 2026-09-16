@@ -41,7 +41,12 @@ func (g *CatalogManifestGenerator) Generate(ctx context.Context, mgmt *Cluster, 
 	if err != nil {
 		return nil, err
 	}
-	objs, err := b.direct()
+	var objs []unstructured.Unstructured
+	if opts.ClusterClass {
+		objs, err = b.clusterClass()
+	} else {
+		objs, err = b.direct()
+	}
 	if err != nil {
 		return nil, err
 	}
