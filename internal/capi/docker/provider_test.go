@@ -27,11 +27,11 @@ func TestDefaultCreateOptions(t *testing.T) {
 	if opts.KubernetesVersion != DefaultKubernetesVersion {
 		t.Errorf("expected k8s version %q, got %q", DefaultKubernetesVersion, opts.KubernetesVersion)
 	}
-	if *opts.ControlPlaneMachineCount != DefaultControlPlaneCount {
-		t.Errorf("expected cp count %d, got %d", DefaultControlPlaneCount, *opts.ControlPlaneMachineCount)
+	if *opts.ControlPlane.Replicas != DefaultControlPlaneCount {
+		t.Errorf("expected cp count %d, got %d", DefaultControlPlaneCount, *opts.ControlPlane.Replicas)
 	}
-	if *opts.WorkerMachineCount() != DefaultWorkerCount {
-		t.Errorf("expected worker count %d, got %d", DefaultWorkerCount, *opts.WorkerMachineCount())
+	if *opts.MachineDeployments[0].Replicas != DefaultWorkerCount {
+		t.Errorf("expected worker count %d, got %d", DefaultWorkerCount, *opts.MachineDeployments[0].Replicas)
 	}
 	if opts.Namespace != "default" {
 		t.Errorf("expected namespace 'default', got %q", opts.Namespace)

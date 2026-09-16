@@ -45,24 +45,23 @@ func TestCreateClusterOptions_Fields(t *testing.T) {
 			ProviderTypeInfrastructure: {{Type: ProviderTypeInfrastructure, Name: "docker"}},
 			ProviderTypeCore:           {{Type: ProviderTypeCore, Name: "cluster-api", Version: "v1.7.0"}},
 		},
-		KubernetesVersion:        "v1.31.0",
-		ControlPlaneMachineCount: &cpCount,
-		MachineDeployments:       []MachineDeploymentTopology{{Name: "md-0", Replicas: &workerCount}},
-		Flavor:                   "development",
-		ManagementKubeconfig:     "/tmp/kubeconfig",
-		SkipInit:                 false,
-		WaitForReady:             true,
-		SelfManaged:              true,
+		KubernetesVersion:    "v1.31.0",
+		ControlPlane:         ControlPlaneTopology{Replicas: &cpCount},
+		MachineDeployments:   []MachineDeploymentTopology{{Name: "md-0", Replicas: &workerCount}},
+		ManagementKubeconfig: "/tmp/kubeconfig",
+		SkipInit:             false,
+		WaitForReady:         true,
+		SelfManaged:          true,
 	}
 
 	if opts.Name != "prod" {
 		t.Error("name mismatch")
 	}
-	if *opts.ControlPlaneMachineCount != 3 {
-		t.Errorf("cp count mismatch: got %d", *opts.ControlPlaneMachineCount)
+	if *opts.ControlPlane.Replicas != 3 {
+		t.Errorf("cp count mismatch: got %d", *opts.ControlPlane.Replicas)
 	}
-	if *opts.WorkerMachineCount() != 5 {
-		t.Errorf("worker count mismatch: got %d", *opts.WorkerMachineCount())
+	if *opts.MachineDeployments[0].Replicas != 5 {
+		t.Errorf("worker count mismatch: got %d", *opts.MachineDeployments[0].Replicas)
 	}
 }
 
@@ -145,17 +144,6 @@ func TestProviderSet(t *testing.T) {
 	}
 	if got := s.All(); len(got) != 4 || got[0].Name != "talos" || got[2].Name != "tinkerbell" || got[3].Name != "helm" {
 		t.Errorf("All() order = %v", got)
-	}
-}
-
-func TestCreateClusterOptions_WorkerMachineCount(t *testing.T) {
-	if (CreateClusterOptions{}).WorkerMachineCount() != nil {
-		t.Error("no machine deployments -> nil")
-	}
-	n := int64(4)
-	opts := CreateClusterOptions{MachineDeployments: []MachineDeploymentTopology{{Name: "md-0", Replicas: &n}, {Name: "md-1"}}}
-	if got := opts.WorkerMachineCount(); got == nil || *got != 4 {
-		t.Errorf("WorkerMachineCount() = %v, want 4", got)
 	}
 }
 

@@ -42,11 +42,11 @@ func DefaultCreateOptions(name string) capi.CreateClusterOptions {
 			capi.ProviderTypeBootstrap:      {{Type: capi.ProviderTypeBootstrap, Name: BootstrapProviderName}},
 			capi.ProviderTypeControlPlane:   {{Type: capi.ProviderTypeControlPlane, Name: ControlPlaneProviderName}},
 		},
-		KubernetesVersion:        DefaultKubernetesVersion,
-		ControlPlaneMachineCount: &cpCount,
-		MachineDeployments:       []capi.MachineDeploymentTopology{{Name: "md-0", Replicas: &workerCount}},
-		WaitForReady:             true,
-		SelfManaged:              false,
-		Wait:                     capi.DefaultWaitOptions(),
+		KubernetesVersion:  DefaultKubernetesVersion,
+		ControlPlane:       capi.ControlPlaneTopology{Replicas: &cpCount},
+		MachineDeployments: []capi.MachineDeploymentTopology{{Name: "md-0", Replicas: &workerCount}},
+		WaitForReady:       true,
+		SelfManaged:        false,
+		Wait:               capi.DefaultWaitOptions(),
 	}
 }

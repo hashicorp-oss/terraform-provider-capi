@@ -12,7 +12,7 @@ import (
 func TestManager_CreateCluster_FullWorkflow(t *testing.T) {
 	bootstrapper := &MockBootstrapper{}
 	installer := &MockInstaller{}
-	templateGen := &MockTemplateGenerator{}
+	templateGen := &MockManifestGenerator{}
 	applier := &MockApplier{}
 	waiter := &MockWaiter{}
 	retriever := &MockKubeconfigRetriever{}
@@ -21,7 +21,7 @@ func TestManager_CreateCluster_FullWorkflow(t *testing.T) {
 	mgr := NewManager(
 		WithBootstrapper(bootstrapper),
 		WithInstaller(installer),
-		WithTemplateGenerator(templateGen),
+		WithManifestGenerator(templateGen),
 		WithApplier(applier),
 		WithWaiter(waiter),
 		WithInfoRetriever(retriever),
@@ -33,15 +33,15 @@ func TestManager_CreateCluster_FullWorkflow(t *testing.T) {
 	workerCount := int64(2)
 
 	result, err := mgr.CreateCluster(ctx, CreateClusterOptions{
-		Name:                     "test-cluster",
-		Namespace:                "default",
-		Providers:                dockerProviders(),
-		TemplateSource:           "/tmp/custom-template.yaml",
-		Variables:                map[string]string{"CONTROL_PLANE_VIP": "10.0.0.160"},
-		KubernetesVersion:        "v1.31.0",
-		ControlPlaneMachineCount: &cpCount,
-		MachineDeployments:       []MachineDeploymentTopology{{Name: "md-0", Replicas: &workerCount}},
-		WaitForReady:             true,
+		Name:               "test-cluster",
+		Namespace:          "default",
+		Providers:          dockerProviders(),
+		Variables:          map[string]string{"EXP_MACHINE_POOL": "true"},
+		KubernetesVersion:  "v1.31.0",
+		Network:            NetworkConfig{ControlPlaneEndpoint: &APIEndpoint{Host: "10.0.0.160", Port: 6443}},
+		ControlPlane:       ControlPlaneTopology{Replicas: &cpCount},
+		MachineDeployments: []MachineDeploymentTopology{{Name: "md-0", Replicas: &workerCount}},
+		WaitForReady:       true,
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -63,24 +63,38 @@ func TestManager_CreateCluster_FullWorkflow(t *testing.T) {
 		t.Errorf("expected infrastructure provider 'docker', got %v", got)
 	}
 
-	// Verify template was generated
+	// Verify the manifest was generated on the management cluster from the
+	// same provider set init used, with the cluster settings passed through.
 	if len(templateGen.GenerateCalls) != 1 {
-		t.Fatalf("expected 1 template gen call, got %d", len(templateGen.GenerateCalls))
+		t.Fatalf("expected 1 generate call, got %d", len(templateGen.GenerateCalls))
 	}
-	if templateGen.GenerateCalls[0].Opts.ClusterName != "test-cluster" {
-		t.Errorf("expected cluster name 'test-cluster', got %q", templateGen.GenerateCalls[0].Opts.ClusterName)
+	gen := templateGen.GenerateCalls[0]
+	if gen.Cluster == nil || gen.Cluster.Name != "test-cluster-bootstrap" {
+		t.Errorf("generation must run against the management (bootstrap) cluster, got %+v", gen.Cluster)
 	}
-	if got := templateGen.GenerateCalls[0].Opts.Providers.InitStrings(ProviderTypeInfrastructure); len(got) != 1 || got[0] != "docker" {
-		t.Errorf("template generation must receive the provider set (got %v) so it resolves the same names as init", got)
+	if gen.Opts.ClusterName != "test-cluster" || gen.Opts.Namespace != "default" || gen.Opts.KubernetesVersion != "v1.31.0" {
+		t.Errorf("cluster identity not passed through: %+v", gen.Opts)
 	}
-	if templateGen.GenerateCalls[0].Opts.InfrastructureProvider != "docker" {
-		t.Errorf("template infrastructure provider = %q", templateGen.GenerateCalls[0].Opts.InfrastructureProvider)
+	if got := gen.Opts.Providers.InitStrings(ProviderTypeInfrastructure); len(got) != 1 || got[0] != "docker" {
+		t.Errorf("generation must receive the provider set (got %v) so it resolves the same names as init", got)
 	}
-	if templateGen.GenerateCalls[0].Opts.Source != "/tmp/custom-template.yaml" || templateGen.GenerateCalls[0].Opts.Variables["CONTROL_PLANE_VIP"] != "10.0.0.160" {
-		t.Errorf("template source/variables not passed through: %+v", templateGen.GenerateCalls[0].Opts)
+	if gen.Opts.Network.ControlPlaneEndpoint == nil || gen.Opts.Network.ControlPlaneEndpoint.Host != "10.0.0.160" {
+		t.Errorf("network not passed through: %+v", gen.Opts.Network)
 	}
-	if installer.InitCalls[0].Opts.Variables["CONTROL_PLANE_VIP"] != "10.0.0.160" {
-		t.Error("init must receive the same variables")
+	if gen.Opts.ControlPlane.Replicas == nil || *gen.Opts.ControlPlane.Replicas != 1 {
+		t.Errorf("control plane topology not passed through: %+v", gen.Opts.ControlPlane)
+	}
+	if len(gen.Opts.MachineDeployments) != 1 || gen.Opts.MachineDeployments[0].Name != "md-0" {
+		t.Errorf("machine deployments not passed through: %+v", gen.Opts.MachineDeployments)
+	}
+	if gen.Opts.ClusterClass {
+		t.Error("ClusterClass must be off by default")
+	}
+	if installer.InitCalls[0].Opts.Variables["EXP_MACHINE_POOL"] != "true" {
+		t.Error("init must receive the caller's variables")
+	}
+	if _, set := installer.InitCalls[0].Opts.Variables["CLUSTER_TOPOLOGY"]; set {
+		t.Error("CLUSTER_TOPOLOGY must not be injected without ClusterClass")
 	}
 
 	// Verify template was applied
@@ -103,7 +117,7 @@ func TestManager_CreateCluster_FullWorkflow(t *testing.T) {
 func TestManager_CreateCluster_WithExistingManagement(t *testing.T) {
 	bootstrapper := &MockBootstrapper{}
 	installer := &MockInstaller{}
-	templateGen := &MockTemplateGenerator{}
+	templateGen := &MockManifestGenerator{}
 	applier := &MockApplier{}
 	waiter := &MockWaiter{}
 	retriever := &MockKubeconfigRetriever{}
@@ -112,7 +126,7 @@ func TestManager_CreateCluster_WithExistingManagement(t *testing.T) {
 	mgr := NewManager(
 		WithBootstrapper(bootstrapper),
 		WithInstaller(installer),
-		WithTemplateGenerator(templateGen),
+		WithManifestGenerator(templateGen),
 		WithApplier(applier),
 		WithWaiter(waiter),
 		WithInfoRetriever(retriever),
@@ -150,7 +164,7 @@ func TestManager_CreateCluster_WithExistingManagement(t *testing.T) {
 
 func TestManager_CreateCluster_SkipInit(t *testing.T) {
 	installer := &MockInstaller{}
-	templateGen := &MockTemplateGenerator{}
+	templateGen := &MockManifestGenerator{}
 	applier := &MockApplier{}
 	waiter := &MockWaiter{}
 	retriever := &MockKubeconfigRetriever{}
@@ -159,7 +173,7 @@ func TestManager_CreateCluster_SkipInit(t *testing.T) {
 	mgr := NewManager(
 		WithBootstrapper(&MockBootstrapper{}),
 		WithInstaller(installer),
-		WithTemplateGenerator(templateGen),
+		WithManifestGenerator(templateGen),
 		WithApplier(applier),
 		WithWaiter(waiter),
 		WithInfoRetriever(retriever),
@@ -203,7 +217,7 @@ func TestManager_CreateCluster_InitFailure_CleansUpBootstrap(t *testing.T) {
 	mgr := NewManager(
 		WithBootstrapper(bootstrapper),
 		WithInstaller(installer),
-		WithTemplateGenerator(&MockTemplateGenerator{}),
+		WithManifestGenerator(&MockManifestGenerator{}),
 		WithApplier(&MockApplier{}),
 		WithWaiter(&MockWaiter{}),
 		WithInfoRetriever(&MockKubeconfigRetriever{}),
@@ -230,8 +244,8 @@ func TestManager_CreateCluster_InitFailure_CleansUpBootstrap(t *testing.T) {
 
 func TestManager_CreateCluster_TemplateFailure_CleansUpBootstrap(t *testing.T) {
 	bootstrapper := &MockBootstrapper{}
-	templateGen := &MockTemplateGenerator{
-		GenerateFunc: func(ctx context.Context, cluster *Cluster, opts TemplateOptions) ([]byte, error) {
+	templateGen := &MockManifestGenerator{
+		GenerateFunc: func(ctx context.Context, cluster *Cluster, opts GenerateOptions) ([]byte, error) {
 			return nil, fmt.Errorf("template generation failed")
 		},
 	}
@@ -239,7 +253,7 @@ func TestManager_CreateCluster_TemplateFailure_CleansUpBootstrap(t *testing.T) {
 	mgr := NewManager(
 		WithBootstrapper(bootstrapper),
 		WithInstaller(&MockInstaller{}),
-		WithTemplateGenerator(templateGen),
+		WithManifestGenerator(templateGen),
 		WithApplier(&MockApplier{}),
 		WithWaiter(&MockWaiter{}),
 		WithInfoRetriever(&MockKubeconfigRetriever{}),
@@ -272,7 +286,7 @@ func TestManager_CreateCluster_ApplyFailure_CleansUpBootstrap(t *testing.T) {
 	mgr := NewManager(
 		WithBootstrapper(bootstrapper),
 		WithInstaller(&MockInstaller{}),
-		WithTemplateGenerator(&MockTemplateGenerator{}),
+		WithManifestGenerator(&MockManifestGenerator{}),
 		WithApplier(applier),
 		WithWaiter(&MockWaiter{}),
 		WithInfoRetriever(&MockKubeconfigRetriever{}),
@@ -304,7 +318,7 @@ func TestManager_CreateCluster_WaitFailure_CleansUpBootstrap(t *testing.T) {
 	mgr := NewManager(
 		WithBootstrapper(bootstrapper),
 		WithInstaller(&MockInstaller{}),
-		WithTemplateGenerator(&MockTemplateGenerator{}),
+		WithManifestGenerator(&MockManifestGenerator{}),
 		WithApplier(&MockApplier{}),
 		WithWaiter(waiter),
 		WithInfoRetriever(&MockKubeconfigRetriever{}),
@@ -327,12 +341,12 @@ func TestManager_CreateCluster_WaitFailure_CleansUpBootstrap(t *testing.T) {
 }
 
 func TestManager_CreateCluster_DefaultNamespace(t *testing.T) {
-	templateGen := &MockTemplateGenerator{}
+	templateGen := &MockManifestGenerator{}
 
 	mgr := NewManager(
 		WithBootstrapper(&MockBootstrapper{}),
 		WithInstaller(&MockInstaller{}),
-		WithTemplateGenerator(templateGen),
+		WithManifestGenerator(templateGen),
 		WithApplier(&MockApplier{}),
 		WithWaiter(&MockWaiter{}),
 		WithInfoRetriever(&MockKubeconfigRetriever{}),
@@ -471,7 +485,7 @@ func TestManager_CreateCluster_SelfManaged(t *testing.T) {
 	mgr := NewManager(
 		WithBootstrapper(bootstrapper),
 		WithInstaller(installer),
-		WithTemplateGenerator(&MockTemplateGenerator{}),
+		WithManifestGenerator(&MockManifestGenerator{}),
 		WithApplier(&MockApplier{}),
 		WithMover(mover),
 		WithWaiter(&MockWaiter{}),
@@ -535,7 +549,7 @@ func TestManager_CreateCluster_SelfManaged_RetriesMoveTransientErrors(t *testing
 	mgr := NewManager(
 		WithBootstrapper(bootstrapper),
 		WithInstaller(installer),
-		WithTemplateGenerator(&MockTemplateGenerator{}),
+		WithManifestGenerator(&MockManifestGenerator{}),
 		WithApplier(&MockApplier{}),
 		WithMover(mover),
 		WithWaiter(&MockWaiter{}),
@@ -556,6 +570,38 @@ func TestManager_CreateCluster_SelfManaged_RetriesMoveTransientErrors(t *testing
 
 	if moveCalls != 3 {
 		t.Fatalf("expected move to be retried 3 times, got %d", moveCalls)
+	}
+}
+
+func TestManager_CreateCluster_ClusterClassEnablesTopologyGate(t *testing.T) {
+	installer := &MockInstaller{}
+	generator := &MockManifestGenerator{}
+	mgr := NewManager(
+		WithBootstrapper(&MockBootstrapper{}),
+		WithInstaller(installer),
+		WithManifestGenerator(generator),
+		WithApplier(&MockApplier{}),
+		WithWaiter(&MockWaiter{}),
+		WithInfoRetriever(&MockKubeconfigRetriever{}),
+		WithDescriber(&MockClusterDescriber{}),
+	)
+
+	_, err := mgr.CreateCluster(context.Background(), CreateClusterOptions{
+		Name: "cc", Namespace: "default", Providers: dockerProviders(),
+		Variables: map[string]string{"OTHER": "x"}, ClusterClass: true,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(installer.InitCalls) != 1 {
+		t.Fatalf("expected 1 init call, got %d", len(installer.InitCalls))
+	}
+	vars := installer.InitCalls[0].Opts.Variables
+	if vars["CLUSTER_TOPOLOGY"] != "true" || vars["OTHER"] != "x" {
+		t.Errorf("init variables = %v, want CLUSTER_TOPOLOGY=true added to the caller's", vars)
+	}
+	if len(generator.GenerateCalls) != 1 || !generator.GenerateCalls[0].Opts.ClusterClass {
+		t.Error("generator must be asked for ClusterClass output")
 	}
 }
 

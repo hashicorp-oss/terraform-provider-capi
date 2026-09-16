@@ -65,47 +65,6 @@ type InitOptions struct {
 	Variables map[string]string
 }
 
-// TemplateOptions configures cluster template generation.
-type TemplateOptions struct {
-	// Kubeconfig is the management cluster kubeconfig path.
-	Kubeconfig string
-
-	// ClusterName is the name of the cluster to generate.
-	ClusterName string
-
-	// Namespace is the target namespace for the cluster.
-	Namespace string
-
-	// KubernetesVersion is the Kubernetes version for the workload cluster.
-	KubernetesVersion string
-
-	// InfrastructureProvider is the infrastructure provider to use.
-	InfrastructureProvider string
-
-	// Providers is the full provider set, so template generation resolves the
-	// same provider names and fetch URLs that clusterctl init used.
-	Providers ProviderSet
-
-	// Source overrides where the cluster template comes from: a local path,
-	// a file:// URL, or an https:// URL (GitHub raw or blob URLs included).
-	// Empty means the infrastructure provider's release template (with Flavor).
-	Source string
-
-	// Variables are clusterctl variables substituted into the template
-	// (${CONTROL_PLANE_VIP} etc.), in addition to CLUSTER_NAME, NAMESPACE,
-	// KUBERNETES_VERSION and the machine counts clusterctl sets itself.
-	Variables map[string]string
-
-	// Flavor is the template flavor.
-	Flavor string
-
-	// ControlPlaneMachineCount is the number of control plane machines.
-	ControlPlaneMachineCount *int64
-
-	// WorkerMachineCount is the number of worker machines.
-	WorkerMachineCount *int64
-}
-
 // MoveOptions configures CAPI management move operations.
 type MoveOptions struct {
 	// FromKubeconfig is the source cluster kubeconfig.
@@ -169,32 +128,30 @@ type CreateClusterOptions struct {
 	Namespace string
 
 	// Providers are the CAPI providers to install, grouped by type. Exactly one
-	// infrastructure provider is required; it also selects the cluster template.
+	// infrastructure provider is required; with the control-plane and
+	// bootstrap entries it selects the kinds the manifest generator emits.
 	Providers ProviderSet
 
 	// KubernetesVersion is the Kubernetes version.
 	KubernetesVersion string
 
-	// ControlPlaneMachineCount is the number of control plane nodes
-	// (Cluster.spec.topology.controlPlane.replicas).
-	ControlPlaneMachineCount *int64
+	// Network fills Cluster.spec.clusterNetwork and controlPlaneEndpoint.
+	Network NetworkConfig
+
+	// ControlPlane is the control plane topology (replicas and machine
+	// template spec).
+	ControlPlane ControlPlaneTopology
 
 	// MachineDeployments are the worker MachineDeployments
-	// (Cluster.spec.topology.workers.machineDeployments). clusterctl flavor
-	// templates expose a single WORKER_MACHINE_COUNT, filled from the first
-	// entry's Replicas; see WorkerMachineCount.
+	// (Cluster.spec.topology.workers.machineDeployments).
 	MachineDeployments []MachineDeploymentTopology
 
-	// Flavor is the template flavor.
-	Flavor string
+	// ClusterClass generates a ClusterClass and a topology Cluster instead of
+	// direct objects, enabling the ClusterTopology gate at init.
+	ClusterClass bool
 
-	// TemplateSource overrides where the cluster template comes from (local
-	// path, file:// or https:// URL). Empty uses the infrastructure provider's
-	// release template selected by Flavor.
-	TemplateSource string
-
-	// Variables are clusterctl variables (${VAR}) available to provider
-	// component YAML and the cluster template.
+	// Variables are clusterctl variables (${VAR}) substituted into provider
+	// component YAML at init.
 	Variables map[string]string
 
 	// ManagementKubeconfig is an existing management cluster kubeconfig.
@@ -236,16 +193,6 @@ type CreateClusterOptions struct {
 	PreTemplateManifests [][]byte
 }
 
-// WorkerMachineCount returns the replicas of the first MachineDeployment,
-// which is what clusterctl flavor templates consume as WORKER_MACHINE_COUNT.
-// Nil when there are no machine deployments or the first has no replicas.
-func (o CreateClusterOptions) WorkerMachineCount() *int64 {
-	if len(o.MachineDeployments) == 0 {
-		return nil
-	}
-	return o.MachineDeployments[0].Replicas
-}
-
 // MachineDeploymentTopology mirrors Cluster.spec.topology.workers.machineDeployments[].
 type MachineDeploymentTopology struct {
 	Name          string
@@ -254,6 +201,65 @@ type MachineDeploymentTopology struct {
 	FailureDomain string
 	Labels        map[string]string
 	Annotations   map[string]string
+
+	// Infrastructure is the spec of this deployment's <Infra>MachineTemplate.
+	Infrastructure map[string]any
+
+	// Bootstrap is the spec of this deployment's <Bootstrap>ConfigTemplate.
+	// Nil uses the bootstrap provider's ResourceConfig.
+	Bootstrap map[string]any
+}
+
+// ControlPlaneTopology mirrors Cluster.spec.topology.controlPlane plus the
+// spec of the control plane's <Infra>MachineTemplate.
+type ControlPlaneTopology struct {
+	Replicas       *int64
+	Infrastructure map[string]any
+}
+
+// APIEndpoint is Cluster.spec.controlPlaneEndpoint.
+type APIEndpoint struct {
+	Host string
+	Port int32
+}
+
+// NetworkConfig carries the Cluster.spec.clusterNetwork and controlPlaneEndpoint settings.
+type NetworkConfig struct {
+	ControlPlaneEndpoint *APIEndpoint
+	PodCIDRs             []string
+	ServiceCIDRs         []string
+	ServiceDomain        string
+}
+
+// GenerateOptions configures cluster manifest generation.
+type GenerateOptions struct {
+	// ClusterName is the name of the cluster to generate.
+	ClusterName string
+
+	// Namespace is the target namespace for every object.
+	Namespace string
+
+	// KubernetesVersion is the Kubernetes version for the workload cluster.
+	KubernetesVersion string
+
+	// Providers is the full provider set. The infrastructure, control-plane
+	// and bootstrap entries select the kinds to generate and carry the
+	// ResourceConfig merged into each object's spec.
+	Providers ProviderSet
+
+	// Network fills Cluster.spec.clusterNetwork and controlPlaneEndpoint.
+	Network NetworkConfig
+
+	// ControlPlane sets the control plane replicas and machine template spec.
+	ControlPlane ControlPlaneTopology
+
+	// MachineDeployments are the worker MachineDeployments (or worker classes
+	// and topology entries when ClusterClass is set).
+	MachineDeployments []MachineDeploymentTopology
+
+	// ClusterClass generates a ClusterClass and a topology Cluster instead of
+	// direct objects.
+	ClusterClass bool
 }
 
 // ProviderType is a CAPI provider category, spelled the way clusterctl names
@@ -361,6 +367,12 @@ type ProviderConfig struct {
 
 	// Patches are strategic merge or RFC6902 patches with target selectors.
 	Patches []PatchConfig
+
+	// ResourceConfig is deep-merged into the spec of the provider's
+	// cluster-scoped CAPI object (the <Infra>Cluster, <CP>ControlPlane or
+	// default <Bootstrap>ConfigTemplate). Nil leaves only defaults and wiring.
+	// It never alters component YAML, so it does not count as a customization.
+	ResourceConfig map[string]any
 }
 
 // InitString renders the "name" or "name:version" form clusterctl init expects.

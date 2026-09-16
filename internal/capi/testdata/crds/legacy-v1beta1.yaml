@@ -1,0 +1,103 @@
+# Synthetic v1beta1-contract management cluster: core stores v1beta1 and the
+# kubeadm control plane references its machine template the legacy way
+# (machineTemplate.infrastructureRef with apiVersion/namespace).
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: clusters.cluster.x-k8s.io
+  labels:
+    cluster.x-k8s.io/provider: cluster-api
+spec:
+  group: cluster.x-k8s.io
+  names: { kind: Cluster, listKind: ClusterList, plural: clusters, singular: cluster }
+  scope: Namespaced
+  versions:
+    - { name: v1beta1, served: true, storage: true }
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: machinedeployments.cluster.x-k8s.io
+  labels:
+    cluster.x-k8s.io/provider: cluster-api
+spec:
+  group: cluster.x-k8s.io
+  names: { kind: MachineDeployment, listKind: MachineDeploymentList, plural: machinedeployments, singular: machinedeployment }
+  scope: Namespaced
+  versions:
+    - { name: v1beta1, served: true, storage: true }
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: dockerclusters.infrastructure.cluster.x-k8s.io
+  labels:
+    cluster.x-k8s.io/provider: infrastructure-docker
+    cluster.x-k8s.io/v1beta1: v1beta1
+spec:
+  group: infrastructure.cluster.x-k8s.io
+  names: { kind: DockerCluster, listKind: DockerClusterList, plural: dockerclusters, singular: dockercluster }
+  scope: Namespaced
+  versions:
+    - { name: v1beta1, served: true, storage: true }
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: dockermachinetemplates.infrastructure.cluster.x-k8s.io
+  labels:
+    cluster.x-k8s.io/provider: infrastructure-docker
+    cluster.x-k8s.io/v1beta1: v1beta1
+spec:
+  group: infrastructure.cluster.x-k8s.io
+  names: { kind: DockerMachineTemplate, listKind: DockerMachineTemplateList, plural: dockermachinetemplates, singular: dockermachinetemplate }
+  scope: Namespaced
+  versions:
+    - { name: v1beta1, served: true, storage: true }
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: kubeadmcontrolplanes.controlplane.cluster.x-k8s.io
+  labels:
+    cluster.x-k8s.io/provider: control-plane-kubeadm
+    cluster.x-k8s.io/v1beta1: v1beta1
+spec:
+  group: controlplane.cluster.x-k8s.io
+  names: { kind: KubeadmControlPlane, listKind: KubeadmControlPlaneList, plural: kubeadmcontrolplanes, singular: kubeadmcontrolplane }
+  scope: Namespaced
+  versions:
+    - name: v1beta1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              properties:
+                machineTemplate:
+                  type: object
+                  properties:
+                    infrastructureRef:
+                      type: object
+                      properties:
+                        apiVersion: { type: string }
+                        kind: { type: string }
+                        name: { type: string }
+                        namespace: { type: string }
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: kubeadmconfigtemplates.bootstrap.cluster.x-k8s.io
+  labels:
+    cluster.x-k8s.io/provider: bootstrap-kubeadm
+    cluster.x-k8s.io/v1beta1: v1beta1
+spec:
+  group: bootstrap.cluster.x-k8s.io
+  names: { kind: KubeadmConfigTemplate, listKind: KubeadmConfigTemplateList, plural: kubeadmconfigtemplates, singular: kubeadmconfigtemplate }
+  scope: Namespaced
+  versions:
+    - { name: v1beta1, served: true, storage: true }

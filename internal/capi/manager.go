@@ -10,8 +10,8 @@
 //
 //  1. Create bootstrap cluster (kind)
 //  2. Install CAPI providers on bootstrap (clusterctl init)
-//  3. Generate workload cluster template (clusterctl generate)
-//  4. Apply template to bootstrap cluster (kubectl apply)
+//  3. Generate the workload cluster manifest from the configured providers
+//  4. Apply the manifest to the bootstrap cluster (server-side apply)
 //  5. Wait for workload cluster readiness
 //  6. Retrieve workload cluster kubeconfig
 //  7. (Optional) Install CAPI on workload cluster + move management
@@ -35,7 +35,7 @@ import (
 type Manager struct {
 	bootstrapper  Bootstrapper
 	installer     Installer
-	templateGen   TemplateGenerator
+	generator     ManifestGenerator
 	applier       Applier
 	mover         Mover
 	waiter        Waiter
@@ -57,9 +57,9 @@ func WithInstaller(i Installer) ManagerOption {
 	return func(m *Manager) { m.installer = i }
 }
 
-// WithTemplateGenerator sets the template generator implementation.
-func WithTemplateGenerator(t TemplateGenerator) ManagerOption {
-	return func(m *Manager) { m.templateGen = t }
+// WithManifestGenerator sets the manifest generator implementation.
+func WithManifestGenerator(g ManifestGenerator) ManagerOption {
+	return func(m *Manager) { m.generator = g }
 }
 
 // WithApplier sets the applier implementation.
@@ -104,7 +104,7 @@ func NewManager(opts ...ManagerOption) *Manager {
 	m := &Manager{
 		bootstrapper:  NewKindBootstrapper(),
 		installer:     NewClusterctlInstaller(configPath),
-		templateGen:   NewClusterctlTemplateGenerator(configPath),
+		generator:     NewManifestGenerator(NewCRDKindResolver()),
 		applier:       NewDynamicApplier(),
 		mover:         NewClusterctlMover(configPath),
 		waiter:        NewDynamicWaiter(),
@@ -126,7 +126,7 @@ func NewManager(opts ...ManagerOption) *Manager {
 //  1. setupAndValidateCreate
 //  2. createBootStrapClusterTask
 //  3. installCAPIComponentsTask
-//  4. createWorkloadClusterTask (generate + apply template)
+//  4. createWorkloadClusterTask (generate + apply manifest)
 //  5. Wait for readiness
 //  6. moveClusterManagementTask (optional, for self-managed clusters)
 //  7. deleteBootstrapClusterTask
@@ -173,7 +173,7 @@ func (m *Manager) CreateCluster(ctx context.Context, opts CreateClusterOptions) 
 	}
 	if !opts.SkipInit {
 		m.logger.Printf("Installing CAPI providers on %s", mgmtCluster.Name)
-		initOpts := InitOptions{Providers: opts.Providers, Variables: opts.Variables}
+		initOpts := InitOptions{Providers: opts.Providers, Variables: initVariables(opts)}
 
 		if err := m.installer.Init(ctx, mgmtCluster, initOpts); err != nil {
 			m.cleanupOnError(ctx, bootstrapCluster)
@@ -182,33 +182,28 @@ func (m *Manager) CreateCluster(ctx context.Context, opts CreateClusterOptions) 
 		m.logger.Printf("CAPI providers installed on %s", mgmtCluster.Name)
 	}
 
-	// Step 3: Generate cluster template
-	m.logger.Printf("Generating cluster template for %s", opts.Name)
+	// Step 3: Generate the cluster manifest from the installed provider CRDs
+	m.logger.Printf("Generating cluster manifest for %s", opts.Name)
 
-	infra, _ := opts.Providers.Infrastructure()
-	templateOpts := TemplateOptions{
-		ClusterName:              opts.Name,
-		Namespace:                namespace,
-		KubernetesVersion:        opts.KubernetesVersion,
-		InfrastructureProvider:   infra.InitString(),
-		Providers:                opts.Providers,
-		Source:                   opts.TemplateSource,
-		Variables:                opts.Variables,
-		Flavor:                   opts.Flavor,
-		ControlPlaneMachineCount: opts.ControlPlaneMachineCount,
-		WorkerMachineCount:       opts.WorkerMachineCount(),
-	}
-
-	manifest, err := m.templateGen.Generate(ctx, mgmtCluster, templateOpts)
+	manifest, err := m.generator.Generate(ctx, mgmtCluster, GenerateOptions{
+		ClusterName:        opts.Name,
+		Namespace:          namespace,
+		KubernetesVersion:  opts.KubernetesVersion,
+		Providers:          opts.Providers,
+		Network:            opts.Network,
+		ControlPlane:       opts.ControlPlane,
+		MachineDeployments: opts.MachineDeployments,
+		ClusterClass:       opts.ClusterClass,
+	})
 	if err != nil {
 		m.cleanupOnError(ctx, bootstrapCluster)
-		return nil, fmt.Errorf("generating cluster template: %w", err)
+		return nil, fmt.Errorf("generating cluster manifest: %w", err)
 	}
 
 	// Step 4a: Apply any pre-template manifests (e.g. a pre-populated Talos
 	// machine-secrets Secret and cluster kubeconfig Secret) so CAPI providers
 	// adopt them instead of generating fresh ones. These must land before the
-	// template's TalosControlPlane/TalosConfig objects reconcile. Manifests come
+	// generated TalosControlPlane/TalosConfig objects reconcile. Manifests come
 	// from the caller and, when a bootstrap cluster was created, from the
 	// bootstrapper (built from the bootstrap node's secrets).
 	preManifests := append([][]byte(nil), opts.PreTemplateManifests...)
@@ -232,11 +227,11 @@ func (m *Manager) CreateCluster(ctx context.Context, opts CreateClusterOptions) 
 		}
 	}
 
-	// Step 4: Apply template to management cluster
-	m.logger.Printf("Applying cluster template for %s", opts.Name)
+	// Step 4: Apply the manifest to the management cluster
+	m.logger.Printf("Applying cluster manifest for %s", opts.Name)
 	if err := m.applier.Apply(ctx, mgmtCluster, manifest); err != nil {
 		m.cleanupOnError(ctx, bootstrapCluster)
-		return nil, fmt.Errorf("applying cluster template: %w", err)
+		return nil, fmt.Errorf("applying cluster manifest: %w", err)
 	}
 
 	result := &ClusterResult{
@@ -307,7 +302,7 @@ func (m *Manager) CreateCluster(ctx context.Context, opts CreateClusterOptions) 
 		}
 
 		// Install CAPI on the workload cluster before move
-		initOpts := InitOptions{Providers: opts.Providers, Variables: opts.Variables}
+		initOpts := InitOptions{Providers: opts.Providers, Variables: initVariables(opts)}
 
 		if err := m.installer.Init(ctx, workloadCluster, initOpts); err != nil {
 			m.cleanupOnError(ctx, bootstrapCluster)
@@ -428,6 +423,21 @@ func (m *Manager) GetClusterInfo(ctx context.Context, mgmtKubeconfig, clusterNam
 	}
 
 	return result, nil
+}
+
+// initVariables returns the clusterctl variables for init: the caller's plus
+// CLUSTER_TOPOLOGY=true when a ClusterClass is generated, since the gate is
+// off by default in cluster-api.
+func initVariables(opts CreateClusterOptions) map[string]string {
+	if !opts.ClusterClass {
+		return opts.Variables
+	}
+	vars := make(map[string]string, len(opts.Variables)+1)
+	for k, v := range opts.Variables {
+		vars[k] = v
+	}
+	vars["CLUSTER_TOPOLOGY"] = "true"
+	return vars
 }
 
 // cleanupOnError deletes the bootstrap cluster if creation fails partway through.

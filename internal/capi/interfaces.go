@@ -38,10 +38,11 @@ type Installer interface {
 	Init(ctx context.Context, cluster *Cluster, opts InitOptions) error
 }
 
-// TemplateGenerator generates cluster templates.
-type TemplateGenerator interface {
-	// Generate generates a cluster template YAML manifest.
-	Generate(ctx context.Context, cluster *Cluster, opts TemplateOptions) ([]byte, error)
+// ManifestGenerator builds the workload cluster's CAPI objects from the
+// configured providers, using the CRDs installed on the management cluster.
+type ManifestGenerator interface {
+	// Generate returns a multi-document YAML manifest for the cluster.
+	Generate(ctx context.Context, mgmt *Cluster, opts GenerateOptions) ([]byte, error)
 }
 
 // Applier applies and deletes Kubernetes manifests on a cluster.

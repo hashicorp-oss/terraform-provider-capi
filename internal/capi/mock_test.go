@@ -57,19 +57,19 @@ func (m *MockInstaller) Init(ctx context.Context, cluster *Cluster, opts InitOpt
 	return nil
 }
 
-// MockTemplateGenerator is a test double for the TemplateGenerator interface.
-type MockTemplateGenerator struct {
-	GenerateFunc  func(ctx context.Context, cluster *Cluster, opts TemplateOptions) ([]byte, error)
+// MockManifestGenerator is a test double for the ManifestGenerator interface.
+type MockManifestGenerator struct {
+	GenerateFunc  func(ctx context.Context, cluster *Cluster, opts GenerateOptions) ([]byte, error)
 	GenerateCalls []struct {
 		Cluster *Cluster
-		Opts    TemplateOptions
+		Opts    GenerateOptions
 	}
 }
 
-func (m *MockTemplateGenerator) Generate(ctx context.Context, cluster *Cluster, opts TemplateOptions) ([]byte, error) {
+func (m *MockManifestGenerator) Generate(ctx context.Context, cluster *Cluster, opts GenerateOptions) ([]byte, error) {
 	m.GenerateCalls = append(m.GenerateCalls, struct {
 		Cluster *Cluster
-		Opts    TemplateOptions
+		Opts    GenerateOptions
 	}{cluster, opts})
 	if m.GenerateFunc != nil {
 		return m.GenerateFunc(ctx, cluster, opts)

@@ -19,9 +19,9 @@ func (n *noopInstaller) Init(_ context.Context, c *capi.Cluster, _ capi.InitOpti
 	return nil
 }
 
-type noopTemplate struct{}
+type noopGenerator struct{}
 
-func (noopTemplate) Generate(context.Context, *capi.Cluster, capi.TemplateOptions) ([]byte, error) {
+func (noopGenerator) Generate(context.Context, *capi.Cluster, capi.GenerateOptions) ([]byte, error) {
 	return []byte("kind: Cluster\n"), nil
 }
 
@@ -67,7 +67,7 @@ func TestManager_UsesTalosBootstrapperForSelfManagedCreate(t *testing.T) {
 	mgr := capi.NewManager(
 		capi.WithBootstrapper(b),
 		capi.WithInstaller(installer),
-		capi.WithTemplateGenerator(noopTemplate{}),
+		capi.WithManifestGenerator(noopGenerator{}),
 		capi.WithApplier(noopApplier{}),
 		capi.WithMover(mover),
 		capi.WithWaiter(noopWaiter{}),
