@@ -124,6 +124,10 @@ func (r *ClusterResource) Schema(ctx context.Context, req resource.SchemaRequest
 						Optional:            true,
 						Computed:            true,
 						PlanModifiers: []planmodifier.String{
+							// Keep the computed value across updates; without this it
+							// recomputes to unknown on any in-place change and, being
+							// RequiresReplace, forces a spurious full rebuild.
+							stringplanmodifier.UseStateForUnknown(),
 							stringplanmodifier.RequiresReplace(),
 						},
 					},
