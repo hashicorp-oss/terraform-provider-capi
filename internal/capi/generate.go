@@ -59,9 +59,13 @@ type manifestBuilder struct {
 	opts        GenerateOptions
 	coreVersion string
 	infra       ProviderConfig
-	cp          *ProviderConfig
-	bootstrap   *ProviderConfig
+	cp          ProviderConfig
+	bootstrap   ProviderConfig
 }
+
+// defaultProviderName is what clusterctl init installs when a bootstrap or
+// control-plane provider is not configured, so generation defaults the same way.
+const defaultProviderName = "kubeadm"
 
 func newManifestBuilder(catalog *KindCatalog, opts GenerateOptions) (*manifestBuilder, error) {
 	infra, ok := opts.Providers.Infrastructure()
@@ -72,26 +76,27 @@ func newManifestBuilder(catalog *KindCatalog, opts GenerateOptions) (*manifestBu
 	if err != nil {
 		return nil, err
 	}
-	b := &manifestBuilder{catalog: catalog, opts: opts, coreVersion: core, infra: infra}
-	if cps := opts.Providers[ProviderTypeControlPlane]; len(cps) > 0 {
-		b.cp = &cps[0]
+	return &manifestBuilder{
+		catalog:     catalog,
+		opts:        opts,
+		coreVersion: core,
+		infra:       infra,
+		cp:          firstOrDefault(opts.Providers, ProviderTypeControlPlane),
+		bootstrap:   firstOrDefault(opts.Providers, ProviderTypeBootstrap),
+	}, nil
+}
+
+// firstOrDefault returns the first provider of a type, or the kubeadm default.
+func firstOrDefault(providers ProviderSet, typ ProviderType) ProviderConfig {
+	if ps := providers[typ]; len(ps) > 0 {
+		return ps[0]
 	}
-	if bss := opts.Providers[ProviderTypeBootstrap]; len(bss) > 0 {
-		b.bootstrap = &bss[0]
-	}
-	return b, nil
+	return ProviderConfig{Type: typ, Name: defaultProviderName}
 }
 
 // direct generates the Cluster, provider cluster, control plane, and one
 // MachineDeployment (with its templates) per topology entry.
 func (b *manifestBuilder) direct() ([]unstructured.Unstructured, error) {
-	if b.cp == nil {
-		return nil, fmt.Errorf("generating cluster %s: no control_plane provider configured (direct generation needs one, e.g. control_plane = { kubeadm = {} })", b.opts.ClusterName)
-	}
-	if len(b.opts.MachineDeployments) > 0 && b.bootstrap == nil {
-		return nil, fmt.Errorf("generating cluster %s: no bootstrap provider configured (machine deployments need one, e.g. bootstrap = { kubeadm = {} })", b.opts.ClusterName)
-	}
-
 	clusterGVK, err := b.catalog.Resolve(ProviderKey{ProviderTypeCore, "cluster-api"}, "Cluster")
 	if err != nil {
 		return nil, err

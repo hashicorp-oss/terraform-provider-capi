@@ -26,12 +26,6 @@ func (b *manifestBuilder) clusterClass() ([]unstructured.Unstructured, error) {
 	if b.coreRefShape() != RefShapeContract {
 		return nil, fmt.Errorf("generating cluster %s: ClusterClass generation needs the v1beta2 core contract, but the management cluster stores %s", name, b.coreVersion)
 	}
-	if b.cp == nil {
-		return nil, fmt.Errorf("generating cluster %s: no control_plane provider configured (a ClusterClass needs one)", name)
-	}
-	if len(b.opts.MachineDeployments) > 0 && b.bootstrap == nil {
-		return nil, fmt.Errorf("generating cluster %s: no bootstrap provider configured (machine deployments need one)", name)
-	}
 	if b.opts.KubernetesVersion == "" {
 		return nil, fmt.Errorf("generating cluster %s: kubernetes_version is required with cluster_class (Cluster.spec.topology.version)", name)
 	}
@@ -133,7 +127,7 @@ func (b *manifestBuilder) workerClasses() ([]workerClass, error) {
 			className = md.Name
 		}
 		bootstrap := md.Bootstrap
-		if bootstrap == nil && b.bootstrap != nil {
+		if bootstrap == nil {
 			bootstrap = b.bootstrap.ResourceConfig
 		}
 		if i, seen := index[className]; seen {

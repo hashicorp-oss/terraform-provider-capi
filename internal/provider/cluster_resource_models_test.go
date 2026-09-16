@@ -5,13 +5,20 @@ package provider
 
 import (
 	"context"
+	"math/big"
+	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+	"github.com/hashicorp/terraform-plugin-framework/types/basetypes"
+	"github.com/hashicorp/terraform-plugin-go/tftypes"
 
 	"github.com/tinkerbell-community/terraform-provider-capi/internal/capi"
 )
@@ -26,8 +33,8 @@ func TestClusterResource_Schema_ProviderMaps(t *testing.T) {
 	if resp.Diagnostics.HasError() {
 		t.Fatalf("schema diagnostics: %v", resp.Diagnostics)
 	}
-	if resp.Schema.Version != 2 {
-		t.Errorf("schema version = %d, want 2", resp.Schema.Version)
+	if resp.Schema.Version != 3 {
+		t.Errorf("schema version = %d, want 3", resp.Schema.Version)
 	}
 
 	var reference map[string]schema.Attribute
@@ -57,10 +64,13 @@ func TestClusterResource_Schema_ProviderMaps(t *testing.T) {
 			t.Errorf("%s nested object differs from the shared provider object", name)
 		}
 	}
-	for _, name := range []string{"version", "fetch_config", "config_variables", "secret_config_variables", "deployment", "manager", "additional_manifests", "manifest_patches", "patches"} {
+	for _, name := range []string{"version", "fetch_config", "config_variables", "secret_config_variables", "deployment", "manager", "additional_manifests", "manifest_patches", "patches", "resource_config"} {
 		if _, ok := reference[name]; !ok {
 			t.Errorf("provider object missing %s", name)
 		}
+	}
+	if rc, ok := reference["resource_config"].(schema.DynamicAttribute); !ok || !rc.Optional {
+		t.Errorf("resource_config must be an optional DynamicAttribute, got %T", reference["resource_config"])
 	}
 	fc, ok := reference["fetch_config"].(schema.SingleNestedAttribute)
 	if !ok {
@@ -72,20 +82,10 @@ func TestClusterResource_Schema_ProviderMaps(t *testing.T) {
 		}
 	}
 
-	for _, gone := range []string{"workers", "addons"} {
+	for _, gone := range []string{"workers", "addons", "template", "flavor"} {
 		if _, ok := resp.Schema.Attributes[gone]; ok {
 			t.Errorf("%s must be removed", gone)
 		}
-	}
-	tmpl, ok := resp.Schema.Attributes["template"].(schema.SingleNestedAttribute)
-	if !ok {
-		t.Fatal("template must be a SingleNestedAttribute")
-	}
-	if _, ok := tmpl.Attributes["source"].(schema.StringAttribute); !ok {
-		t.Error("template.source must be a string")
-	}
-	if _, ok := tmpl.Attributes["variables"].(schema.MapAttribute); !ok {
-		t.Error("template.variables must be a map")
 	}
 	topo, ok := resp.Schema.Attributes["topology"].(schema.SingleNestedAttribute)
 	if !ok {
@@ -97,6 +97,9 @@ func TestClusterResource_Schema_ProviderMaps(t *testing.T) {
 	}
 	if _, ok := cp.Attributes["replicas"].(schema.Int64Attribute); !ok {
 		t.Error("topology.control_plane.replicas must be Int64")
+	}
+	if _, ok := cp.Attributes["infrastructure"].(schema.DynamicAttribute); !ok {
+		t.Error("topology.control_plane.infrastructure must be a DynamicAttribute")
 	}
 	workers, ok := topo.Attributes["workers"].(schema.SingleNestedAttribute)
 	if !ok {
@@ -111,8 +114,57 @@ func TestClusterResource_Schema_ProviderMaps(t *testing.T) {
 			t.Errorf("machine_deployments missing %s", name)
 		}
 	}
+	for _, name := range []string{"infrastructure", "bootstrap"} {
+		if _, ok := mds.NestedObject.Attributes[name].(schema.DynamicAttribute); !ok {
+			t.Errorf("machine_deployments.%s must be a DynamicAttribute", name)
+		}
+	}
 	if nameAttr, ok := mds.NestedObject.Attributes["name"].(schema.StringAttribute); !ok || !nameAttr.Required {
 		t.Error("machine_deployments.name must be a required string")
+	}
+}
+
+func TestClusterResource_Schema_NetworkAndClusterClass(t *testing.T) {
+	ctx := context.Background()
+	resp := &resource.SchemaResponse{}
+	NewClusterResource().Schema(ctx, resource.SchemaRequest{}, resp)
+	if resp.Diagnostics.HasError() {
+		t.Fatal(resp.Diagnostics)
+	}
+
+	cc, ok := resp.Schema.Attributes["cluster_class"].(schema.BoolAttribute)
+	if !ok || !cc.Optional || !cc.Computed || cc.Default == nil || len(cc.PlanModifiers) == 0 {
+		t.Errorf("cluster_class must be an optional+computed bool with a default and RequiresReplace, got %+v", resp.Schema.Attributes["cluster_class"])
+	}
+
+	network, ok := resp.Schema.Attributes["network"].(schema.SingleNestedAttribute)
+	if !ok || !network.Optional {
+		t.Fatalf("network must be an optional SingleNestedAttribute, got %T", resp.Schema.Attributes["network"])
+	}
+	if len(network.PlanModifiers) != 0 {
+		t.Error("network must update in place")
+	}
+	ep, ok := network.Attributes["control_plane_endpoint"].(schema.SingleNestedAttribute)
+	if !ok {
+		t.Fatal("network.control_plane_endpoint must be a SingleNestedAttribute")
+	}
+	if host, ok := ep.Attributes["host"].(schema.StringAttribute); !ok || !host.Required {
+		t.Error("control_plane_endpoint.host must be a required string")
+	}
+	if port, ok := ep.Attributes["port"].(schema.Int64Attribute); !ok || !port.Optional {
+		t.Error("control_plane_endpoint.port must be an optional int64")
+	}
+	for _, name := range []string{"pods", "services"} {
+		ranges, ok := network.Attributes[name].(schema.SingleNestedAttribute)
+		if !ok {
+			t.Fatalf("network.%s must be a SingleNestedAttribute", name)
+		}
+		if _, ok := ranges.Attributes["cidr_blocks"].(schema.ListAttribute); !ok {
+			t.Errorf("network.%s.cidr_blocks must be a ListAttribute", name)
+		}
+	}
+	if _, ok := network.Attributes["service_domain"].(schema.StringAttribute); !ok {
+		t.Error("network.service_domain must be a string")
 	}
 }
 
@@ -243,8 +295,8 @@ func TestExtractProviders_Null(t *testing.T) {
 func TestExtractTopology_Null(t *testing.T) {
 	ctx := context.Background()
 	cp, mds, diags := extractTopology(ctx, &ClusterResourceModel{Topology: types.ObjectNull(topologyAttrTypes())})
-	if diags.HasError() || cp != nil || mds != nil {
-		t.Errorf("null topology must yield nils, got %v %v %v", cp, mds, diags)
+	if diags.HasError() || cp.Replicas != nil || cp.Infrastructure != nil || mds != nil {
+		t.Errorf("null topology must yield nils, got %+v %v %v", cp, mds, diags)
 	}
 }
 
@@ -258,8 +310,8 @@ func TestLegacyTopologyObject(t *testing.T) {
 	if diags.HasError() {
 		t.Fatal(diags)
 	}
-	if cp == nil || *cp != 3 {
-		t.Errorf("cp = %v", cp)
+	if cp.Replicas == nil || *cp.Replicas != 3 {
+		t.Errorf("cp = %+v", cp)
 	}
 	if len(mds) != 1 || mds[0].Name != "md-0" || mds[0].Replicas == nil || *mds[0].Replicas != 2 {
 		t.Errorf("mds = %+v", mds)
@@ -363,7 +415,8 @@ func baseModel(t *testing.T, ctx context.Context) *ClusterResourceModel {
 		Addon:          types.MapNull(providerMapType().ElemType),
 		Topology:       types.ObjectNull(topologyAttrTypes()),
 		CNI:            types.ObjectNull(cniAttrTypes()),
-		Template:       types.ObjectNull(templateAttrTypes()),
+		ClusterClass:   types.BoolValue(false),
+		Network:        types.ObjectNull(clusterNetworkAttrTypes()),
 		Management:     types.ObjectNull(managementAttrTypes()),
 		Inventory:      types.ObjectNull(inventoryAttrTypes()),
 		Wait:           types.ObjectNull(waitAttrTypes()),
@@ -385,7 +438,7 @@ func selfManaged(t *testing.T, ctx context.Context) types.Object {
 
 func topologyValue(t *testing.T, ctx context.Context, cpReplicas int64, mds []MachineDeploymentModel) types.Object {
 	t.Helper()
-	cp, d := types.ObjectValueFrom(ctx, controlPlaneTopologyAttrTypes(), ControlPlaneTopologyModel{Replicas: types.Int64Value(cpReplicas)})
+	cp, d := types.ObjectValueFrom(ctx, controlPlaneTopologyAttrTypes(), ControlPlaneTopologyModel{Replicas: types.Int64Value(cpReplicas), Infrastructure: types.DynamicNull()})
 	if d.HasError() {
 		t.Fatal(d)
 	}
@@ -423,7 +476,106 @@ func machineDeployment(t *testing.T, ctx context.Context, name string, replicas 
 	return MachineDeploymentModel{
 		Name: types.StringValue(name), Class: types.StringNull(), Replicas: types.Int64Value(replicas),
 		FailureDomain: types.StringNull(), Metadata: meta,
+		Infrastructure: types.DynamicNull(), Bootstrap: types.DynamicNull(),
 	}
+}
+
+// dynamicObjectValue wraps attribute values as a dynamic object, the way a
+// `{ key = value }` expression reaches a DynamicAttribute.
+func dynamicObjectValue(t *testing.T, attrs map[string]attr.Value) types.Dynamic {
+	t.Helper()
+	ctx := context.Background()
+	attrTypes := map[string]attr.Type{}
+	for k, v := range attrs {
+		attrTypes[k] = v.Type(ctx)
+	}
+	obj, d := types.ObjectValue(attrTypes, attrs)
+	if d.HasError() {
+		t.Fatal(d)
+	}
+	return types.DynamicValue(obj)
+}
+
+func TestDynamicObject_ConvertsNestedValues(t *testing.T) {
+	ctx := context.Background()
+	d := dynamicObjectValue(t, map[string]attr.Value{
+		"replicas": types.NumberValue(big.NewFloat(3)),
+		"ratio":    types.NumberValue(big.NewFloat(1.5)),
+		"count":    types.Int64Value(4),
+		"enabled":  types.BoolValue(true),
+		"nested":   dynamicObjectValue(t, map[string]attr.Value{"talosVersion": types.StringValue("v1.13")}).UnderlyingValue(),
+		"tuple":    types.TupleValueMust([]attr.Type{types.StringType, types.NumberType}, []attr.Value{types.StringValue("a"), types.NumberValue(big.NewFloat(2))}),
+		"list":     types.ListValueMust(types.StringType, []attr.Value{types.StringValue("x")}),
+		"map":      types.MapValueMust(types.StringType, map[string]attr.Value{"k": types.StringValue("v")}),
+		"none":     types.StringNull(),
+	})
+	got, diags := dynamicObject(ctx, d, "test")
+	if diags.HasError() {
+		t.Fatal(diags)
+	}
+	want := map[string]any{
+		"replicas": int64(3), "ratio": 1.5, "count": int64(4), "enabled": true,
+		"nested": map[string]any{"talosVersion": "v1.13"},
+		"tuple":  []any{"a", int64(2)}, "list": []any{"x"}, "map": map[string]any{"k": "v"},
+		"none": nil,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("dynamicObject = %#v\nwant %#v", got, want)
+	}
+}
+
+func TestDynamicObject_NullAndUnknownYieldNil(t *testing.T) {
+	ctx := context.Background()
+	for name, d := range map[string]types.Dynamic{"null": types.DynamicNull(), "unknown": types.DynamicUnknown()} {
+		got, diags := dynamicObject(ctx, d, "test")
+		if diags.HasError() || got != nil {
+			t.Errorf("%s: got %v %v, want nil without diagnostics", name, got, diags)
+		}
+	}
+}
+
+func TestDynamicObject_RejectsNonObject(t *testing.T) {
+	ctx := context.Background()
+	_, diags := dynamicObject(ctx, types.DynamicValue(types.StringValue("x")), "infrastructure[\"docker\"].resource_config")
+	if !hasErrorContaining(diags, "infrastructure[\"docker\"].resource_config") || !hasErrorContaining(diags, "object") {
+		t.Errorf("a string must be rejected naming the attribute: %v", diags)
+	}
+}
+
+func TestProviderMapRequiresReplace_IgnoresResourceConfig(t *testing.T) {
+	ctx := context.Background()
+	base := emptyProviderModel()
+	base.Version = types.StringValue("v0.7.1")
+	state := mustProviderMap(t, ctx, map[string]ProviderModel{"talos": base})
+
+	rcOnly := base
+	rcOnly.ResourceConfig = dynamicObjectValue(t, map[string]attr.Value{"rolloutStrategy": types.StringValue("OnDelete")})
+	if got := requiresReplace(t, ctx, state, mustProviderMap(t, ctx, map[string]ProviderModel{"talos": rcOnly})); got {
+		t.Error("a resource_config change must update in place")
+	}
+
+	bumped := rcOnly
+	bumped.Version = types.StringValue("v0.8.0")
+	if got := requiresReplace(t, ctx, state, mustProviderMap(t, ctx, map[string]ProviderModel{"talos": bumped})); !got {
+		t.Error("a version change must still replace")
+	}
+	if got := requiresReplace(t, ctx, state, mustProviderMap(t, ctx, map[string]ProviderModel{"kubeadm": base})); !got {
+		t.Error("a provider name change must still replace")
+	}
+}
+
+func requiresReplace(t *testing.T, ctx context.Context, state, plan types.Map) bool {
+	t.Helper()
+	nonNull := tftypes.NewValue(tftypes.String, "x")
+	resp := &planmodifier.MapResponse{PlanValue: plan}
+	providerMapRequiresReplace().PlanModifyMap(ctx, planmodifier.MapRequest{
+		StateValue: state, PlanValue: plan,
+		State: tfsdk.State{Raw: nonNull}, Plan: tfsdk.Plan{Raw: nonNull},
+	}, resp)
+	if resp.Diagnostics.HasError() {
+		t.Fatal(resp.Diagnostics)
+	}
+	return resp.RequiresReplace
 }
 
 func TestBuildCreateOptions_Minimal(t *testing.T) {
@@ -439,11 +591,11 @@ func TestBuildCreateOptions_Minimal(t *testing.T) {
 	if !opts.WaitForReady {
 		t.Error("WaitForReady should default to true")
 	}
-	if opts.ControlPlaneMachineCount != nil || opts.MachineDeployments != nil {
+	if opts.ControlPlane.Replicas != nil || opts.MachineDeployments != nil {
 		t.Error("counts must be nil without topology")
 	}
-	if opts.TemplateSource != "" || opts.Variables != nil {
-		t.Error("template source/variables must be empty without a template block")
+	if opts.Network.ControlPlaneEndpoint != nil || opts.Network.PodCIDRs != nil || opts.ClusterClass {
+		t.Errorf("network and cluster_class must be unset by default: %+v %v", opts.Network, opts.ClusterClass)
 	}
 }
 
@@ -451,7 +603,8 @@ func TestBuildCreateOptions_Full(t *testing.T) {
 	ctx := context.Background()
 	data := baseModel(t, ctx)
 	data.KubernetesVersion = types.StringValue("v1.34.0")
-	data.Flavor = types.StringValue("ha")
+	data.ClusterClass = types.BoolValue(true)
+	data.Network = networkValue(t, ctx, "10.0.0.160", 6443, []string{"10.244.0.0/16"}, []string{"10.96.0.0/12"}, "cluster.local")
 
 	fetch, _ := types.ObjectValueFrom(ctx, fetchConfigAttrTypes(), FetchConfigModel{
 		Owner: types.StringValue("tinkerbell-community"), Repository: types.StringNull(), URL: types.StringNull(), OCI: types.StringNull(),
@@ -465,6 +618,7 @@ func TestBuildCreateOptions_Full(t *testing.T) {
 	tink.Version = types.StringValue("v0.7.9")
 	tink.FetchConfig = fetch
 	tink.Manager = mgr
+	tink.ResourceConfig = dynamicObjectValue(t, map[string]attr.Value{"templateInline": types.StringValue("version: \"0.1\"")})
 	data.Infrastructure = mustProviderMap(t, ctx, map[string]ProviderModel{"tinkerbell": tink})
 
 	talosBS := emptyProviderModel()
@@ -477,9 +631,19 @@ func TestBuildCreateOptions_Full(t *testing.T) {
 	core.Version = types.StringValue("v1.12.2")
 	data.Core = mustProviderMap(t, ctx, map[string]ProviderModel{"cluster-api": core})
 	data.Addon = mustProviderMap(t, ctx, map[string]ProviderModel{"helm": emptyProviderModel()})
-	data.Topology = topologyValue(t, ctx, 3, []MachineDeploymentModel{machineDeployment(t, ctx, "md-0", 5, map[string]string{"tier": "worker"})})
-	vars, _ := types.MapValueFrom(ctx, types.StringType, map[string]string{"CONTROL_PLANE_VIP": "10.0.0.160"})
-	data.Template, _ = types.ObjectValueFrom(ctx, templateAttrTypes(), TemplateModel{Source: types.StringValue("/srv/cluster-template-talos.yaml"), Variables: vars})
+	md := machineDeployment(t, ctx, "md-0", 5, map[string]string{"tier": "worker"})
+	md.Bootstrap = dynamicObjectValue(t, map[string]attr.Value{"talosVersion": types.StringValue("v1.14")})
+	data.Topology = topologyValue(t, ctx, 3, []MachineDeploymentModel{md})
+	cpTopo, _ := types.ObjectValueFrom(ctx, controlPlaneTopologyAttrTypes(), ControlPlaneTopologyModel{
+		Replicas:       types.Int64Value(3),
+		Infrastructure: dynamicObjectValue(t, map[string]attr.Value{"hardwareName": types.StringValue("cp-1")}),
+	})
+	var topo TopologyModel
+	if d := data.Topology.As(ctx, &topo, basetypes.ObjectAsOptions{}); d.HasError() {
+		t.Fatal(d)
+	}
+	topo.ControlPlane = cpTopo
+	data.Topology, _ = types.ObjectValueFrom(ctx, topologyAttrTypes(), topo)
 
 	opts, diags := buildCreateOptions(ctx, data)
 	if diags.HasError() {
@@ -504,21 +668,56 @@ func TestBuildCreateOptions_Full(t *testing.T) {
 	if got := opts.Providers.InitStrings(capi.ProviderTypeAddon); len(got) != 1 || got[0] != "helm" {
 		t.Errorf("addon = %v", got)
 	}
-	if opts.ControlPlaneMachineCount == nil || *opts.ControlPlaneMachineCount != 3 {
+	if opts.ControlPlane.Replicas == nil || *opts.ControlPlane.Replicas != 3 {
 		t.Error("control plane replicas should be 3")
 	}
 	if len(opts.MachineDeployments) != 1 || *opts.MachineDeployments[0].Replicas != 5 || opts.MachineDeployments[0].Labels["tier"] != "worker" {
 		t.Errorf("machine deployments = %+v", opts.MachineDeployments)
 	}
-	if got := opts.WorkerMachineCount(); got == nil || *got != 5 {
-		t.Errorf("WorkerMachineCount() = %v", got)
+	if opts.KubernetesVersion != "v1.34.0" || !opts.ClusterClass {
+		t.Errorf("k8s/cluster_class = %q/%v", opts.KubernetesVersion, opts.ClusterClass)
 	}
-	if opts.TemplateSource != "/srv/cluster-template-talos.yaml" || opts.Variables["CONTROL_PLANE_VIP"] != "10.0.0.160" {
-		t.Errorf("template source/variables = %q %v", opts.TemplateSource, opts.Variables)
+	if ep := opts.Network.ControlPlaneEndpoint; ep == nil || ep.Host != "10.0.0.160" || ep.Port != 6443 {
+		t.Errorf("endpoint = %+v", ep)
 	}
-	if opts.KubernetesVersion != "v1.34.0" || opts.Flavor != "ha" {
-		t.Errorf("k8s/flavor = %q/%q", opts.KubernetesVersion, opts.Flavor)
+	if len(opts.Network.PodCIDRs) != 1 || opts.Network.PodCIDRs[0] != "10.244.0.0/16" || opts.Network.ServiceCIDRs[0] != "10.96.0.0/12" || opts.Network.ServiceDomain != "cluster.local" {
+		t.Errorf("network = %+v", opts.Network)
 	}
+	if infra.ResourceConfig["templateInline"] != "version: \"0.1\"" {
+		t.Errorf("infra resource_config = %v", infra.ResourceConfig)
+	}
+	if opts.ControlPlane.Infrastructure["hardwareName"] != "cp-1" {
+		t.Errorf("control plane infrastructure = %v", opts.ControlPlane.Infrastructure)
+	}
+	if opts.MachineDeployments[0].Bootstrap["talosVersion"] != "v1.14" || opts.MachineDeployments[0].Infrastructure != nil {
+		t.Errorf("machine deployment dynamics = %+v", opts.MachineDeployments[0])
+	}
+}
+
+func networkValue(t *testing.T, ctx context.Context, host string, port int64, pods, services []string, domain string) types.Object {
+	t.Helper()
+	ep, d := types.ObjectValueFrom(ctx, endpointAttrTypes(), EndpointModel{Host: types.StringValue(host), Port: types.Int64Value(port)})
+	if d.HasError() {
+		t.Fatal(d)
+	}
+	ranges := func(cidrs []string) types.Object {
+		l, d := types.ListValueFrom(ctx, types.StringType, cidrs)
+		if d.HasError() {
+			t.Fatal(d)
+		}
+		o, d := types.ObjectValueFrom(ctx, networkRangesAttrTypes(), NetworkRangesModel{CIDRBlocks: l})
+		if d.HasError() {
+			t.Fatal(d)
+		}
+		return o
+	}
+	net, d := types.ObjectValueFrom(ctx, clusterNetworkAttrTypes(), ClusterNetworkModel{
+		ControlPlaneEndpoint: ep, Pods: ranges(pods), Services: ranges(services), ServiceDomain: types.StringValue(domain),
+	})
+	if d.HasError() {
+		t.Fatal(d)
+	}
+	return net
 }
 
 func TestBuildCreateOptions_ProviderOrderIsDeterministic(t *testing.T) {
@@ -668,6 +867,86 @@ func TestValidateLifecycleConfig_DuplicateMachineDeployment(t *testing.T) {
 	})
 	if !hasErrorContaining(diags, "Duplicate machine deployment") {
 		t.Errorf("duplicate names must fail: %v", diags)
+	}
+}
+
+func TestValidateLifecycleConfig_ResourceConfigOnlyOnClusterProviders(t *testing.T) {
+	ctx := context.Background()
+	rc := dynamicObjectValue(t, map[string]attr.Value{"x": types.StringValue("y")})
+	for _, allowed := range []string{"infrastructure", "control_plane", "bootstrap"} {
+		diags := validateWith(t, ctx, func(d *ClusterResourceModel) {
+			pm := emptyProviderModel()
+			pm.ResourceConfig = rc
+			switch allowed {
+			case "infrastructure":
+				d.Infrastructure = mustProviderMap(t, ctx, map[string]ProviderModel{"docker": pm})
+			case "control_plane":
+				d.ControlPlane = mustProviderMap(t, ctx, map[string]ProviderModel{"kubeadm": pm})
+			case "bootstrap":
+				d.Bootstrap = mustProviderMap(t, ctx, map[string]ProviderModel{"kubeadm": pm})
+			}
+		})
+		if diags.HasError() {
+			t.Errorf("resource_config on %s must be valid: %v", allowed, diags)
+		}
+	}
+	for _, denied := range []string{"core", "ipam", "addon"} {
+		diags := validateWith(t, ctx, func(d *ClusterResourceModel) {
+			pm := emptyProviderModel()
+			pm.ResourceConfig = rc
+			switch denied {
+			case "core":
+				d.Core = mustProviderMap(t, ctx, map[string]ProviderModel{"cluster-api": pm})
+			case "ipam":
+				d.IPAM = mustProviderMap(t, ctx, map[string]ProviderModel{"in-cluster": pm})
+			case "addon":
+				d.Addon = mustProviderMap(t, ctx, map[string]ProviderModel{"helm": pm})
+			}
+		})
+		if !hasErrorContaining(diags, "resource_config") {
+			t.Errorf("resource_config on %s must be rejected: %v", denied, diags)
+		}
+	}
+}
+
+func TestValidateLifecycleConfig_ResourceConfigMustBeObject(t *testing.T) {
+	ctx := context.Background()
+	diags := validateWith(t, ctx, func(d *ClusterResourceModel) {
+		pm := emptyProviderModel()
+		pm.ResourceConfig = types.DynamicValue(types.StringValue("templateInline: x"))
+		d.Infrastructure = mustProviderMap(t, ctx, map[string]ProviderModel{"docker": pm})
+	})
+	if !hasErrorContaining(diags, "infrastructure[\"docker\"].resource_config") {
+		t.Errorf("a non-object resource_config must be rejected naming the attribute: %v", diags)
+	}
+}
+
+func TestValidateLifecycleConfig_TopologyDynamicsMustBeObjects(t *testing.T) {
+	ctx := context.Background()
+	diags := validateWith(t, ctx, func(d *ClusterResourceModel) {
+		md := machineDeployment(t, ctx, "md-0", 1, nil)
+		md.Bootstrap = types.DynamicValue(types.ListValueMust(types.StringType, []attr.Value{types.StringValue("x")}))
+		d.Topology = topologyValue(t, ctx, 1, []MachineDeploymentModel{md})
+	})
+	if !hasErrorContaining(diags, "machine_deployments[0].bootstrap") {
+		t.Errorf("a non-object bootstrap must be rejected naming the attribute: %v", diags)
+	}
+}
+
+func TestValidateLifecycleConfig_SharedClassMustAgree(t *testing.T) {
+	ctx := context.Background()
+	diags := validateWith(t, ctx, func(d *ClusterResourceModel) {
+		d.ClusterClass = types.BoolValue(true)
+		a := machineDeployment(t, ctx, "md-a", 1, nil)
+		a.Class = types.StringValue("worker")
+		a.Infrastructure = dynamicObjectValue(t, map[string]attr.Value{"hardwareName": types.StringValue("a")})
+		b := machineDeployment(t, ctx, "md-b", 1, nil)
+		b.Class = types.StringValue("worker")
+		b.Infrastructure = dynamicObjectValue(t, map[string]attr.Value{"hardwareName": types.StringValue("b")})
+		d.Topology = topologyValue(t, ctx, 1, []MachineDeploymentModel{a, b})
+	})
+	if !hasErrorContaining(diags, `class "worker"`) {
+		t.Errorf("deployments sharing a class with different specs must be rejected: %v", diags)
 	}
 }
 
@@ -921,8 +1200,10 @@ func TestClusterResource_UpgradeState(t *testing.T) {
 	if !ok || v0.PriorSchema == nil || v0.StateUpgrader == nil {
 		t.Error("expected v0 upgrader with PriorSchema and StateUpgrader")
 	}
-	v1, ok := upgraders[1]
-	if !ok || v1.PriorSchema != nil || v1.StateUpgrader == nil {
-		t.Error("expected raw-JSON v1 upgrader without PriorSchema")
+	for _, v := range []int64{1, 2} {
+		up, ok := upgraders[v]
+		if !ok || up.PriorSchema != nil || up.StateUpgrader == nil {
+			t.Errorf("expected raw-JSON v%d upgrader without PriorSchema", v)
+		}
 	}
 }

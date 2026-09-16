@@ -7,11 +7,14 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"maps"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"time"
 
+	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
@@ -55,7 +58,7 @@ func (r *ClusterResource) Metadata(ctx context.Context, req resource.MetadataReq
 
 func (r *ClusterResource) Schema(ctx context.Context, req resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		Version:             2,
+		Version:             3,
 		MarkdownDescription: "Manages a Cluster API cluster using the CAPI management workflow (bootstrap -> init -> apply -> wait -> move).",
 
 		Attributes: map[string]schema.Attribute{
@@ -71,9 +74,60 @@ func (r *ClusterResource) Schema(ctx context.Context, req resource.SchemaRequest
 				MarkdownDescription: "Kubernetes version for the workload cluster (e.g., `v1.31.0`).",
 				Optional:            true,
 			},
-			"flavor": schema.StringAttribute{
-				MarkdownDescription: "Cluster template flavor to use. Maps to clusterctl template flavors.",
+			"cluster_class": schema.BoolAttribute{
+				MarkdownDescription: "Generate a `ClusterClass` and a `Cluster` with `spec.topology` instead of direct objects. Every provider must ship `*Template` kinds; the `ClusterTopology` feature gate is enabled at init. Default `false`.",
 				Optional:            true,
+				Computed:            true,
+				Default:             booldefault.StaticBool(false),
+				PlanModifiers: []planmodifier.Bool{
+					boolplanmodifier.RequiresReplace(),
+				},
+			},
+			"network": schema.SingleNestedAttribute{
+				MarkdownDescription: "Cluster networking, as in `Cluster.spec.clusterNetwork` and `Cluster.spec.controlPlaneEndpoint`. Omit for providers that fill the endpoint themselves (e.g. Docker).",
+				Optional:            true,
+				Attributes: map[string]schema.Attribute{
+					"control_plane_endpoint": schema.SingleNestedAttribute{
+						MarkdownDescription: "API server endpoint (`Cluster.spec.controlPlaneEndpoint`); on bare metal, the control plane VIP.",
+						Optional:            true,
+						Attributes: map[string]schema.Attribute{
+							"host": schema.StringAttribute{
+								MarkdownDescription: "Endpoint host or IP.",
+								Required:            true,
+							},
+							"port": schema.Int64Attribute{
+								MarkdownDescription: "Endpoint port. Defaults to 6443.",
+								Optional:            true,
+							},
+						},
+					},
+					"pods": schema.SingleNestedAttribute{
+						MarkdownDescription: "Pod network ranges (`clusterNetwork.pods`).",
+						Optional:            true,
+						Attributes: map[string]schema.Attribute{
+							"cidr_blocks": schema.ListAttribute{
+								MarkdownDescription: "Pod CIDR blocks.",
+								ElementType:         types.StringType,
+								Optional:            true,
+							},
+						},
+					},
+					"services": schema.SingleNestedAttribute{
+						MarkdownDescription: "Service network ranges (`clusterNetwork.services`).",
+						Optional:            true,
+						Attributes: map[string]schema.Attribute{
+							"cidr_blocks": schema.ListAttribute{
+								MarkdownDescription: "Service CIDR blocks.",
+								ElementType:         types.StringType,
+								Optional:            true,
+							},
+						},
+					},
+					"service_domain": schema.StringAttribute{
+						MarkdownDescription: "Cluster DNS domain (`clusterNetwork.serviceDomain`), e.g. `cluster.local`.",
+						Optional:            true,
+					},
+				},
 			},
 			"id": schema.StringAttribute{
 				Computed:            true,
@@ -289,7 +343,7 @@ func (r *ClusterResource) Schema(ctx context.Context, req resource.SchemaRequest
 
 			// --- providers (cluster-api-operator style maps keyed by provider name) ---
 			"core":           providerMapAttribute("Core CAPI provider, keyed by name (`cluster-api`). Omit to let clusterctl install the default.", false),
-			"infrastructure": providerMapAttribute("Infrastructure provider, keyed by name (e.g. `docker`, `tinkerbell`). Exactly one entry is required; it also selects the cluster template.", true),
+			"infrastructure": providerMapAttribute("Infrastructure provider, keyed by name (e.g. `docker`, `tinkerbell`). Exactly one entry is required; with `control_plane` and `bootstrap` (default `kubeadm`) it selects the kinds of the generated cluster objects.", true),
 			"bootstrap":      providerMapAttribute("Bootstrap providers, keyed by name (e.g. `kubeadm`, `talos`).", false),
 			"control_plane":  providerMapAttribute("Control plane providers, keyed by name (e.g. `kubeadm`, `talos`).", false),
 			"ipam":           providerMapAttribute("IPAM providers, keyed by name (e.g. `in-cluster`, `unifi`).", false),
@@ -308,6 +362,10 @@ func (r *ClusterResource) Schema(ctx context.Context, req resource.SchemaRequest
 								MarkdownDescription: "Number of control plane machines. Use an odd number for HA (1, 3, 5).",
 								Optional:            true,
 							},
+							"infrastructure": schema.DynamicAttribute{
+								MarkdownDescription: "Spec of the control plane's `<Infra>MachineTemplate` (e.g. Tinkerbell `hardwareAffinity`), as an object with the CRD's camelCase keys. A change creates a new template and rolls the control plane.",
+								Optional:            true,
+							},
 						},
 					},
 					"workers": schema.SingleNestedAttribute{
@@ -315,7 +373,7 @@ func (r *ClusterResource) Schema(ctx context.Context, req resource.SchemaRequest
 						Optional:            true,
 						Attributes: map[string]schema.Attribute{
 							"machine_deployments": schema.ListNestedAttribute{
-								MarkdownDescription: "Worker MachineDeployments, as in `Cluster.spec.topology.workers.machineDeployments`. clusterctl flavor templates expose a single `WORKER_MACHINE_COUNT`, which is taken from the first entry's `replicas`.",
+								MarkdownDescription: "Worker MachineDeployments, as in `Cluster.spec.topology.workers.machineDeployments`. Each entry becomes a MachineDeployment with its own machine and bootstrap config templates (or, with `cluster_class`, a worker class and a topology entry).",
 								Optional:            true,
 								NestedObject: schema.NestedAttributeObject{
 									Attributes: map[string]schema.Attribute{
@@ -324,7 +382,15 @@ func (r *ClusterResource) Schema(ctx context.Context, req resource.SchemaRequest
 											Required:            true,
 										},
 										"class": schema.StringAttribute{
-											MarkdownDescription: "ClusterClass worker class (`machineDeploymentClass` name). Unused by flavor templates.",
+											MarkdownDescription: "Worker class name, used with `cluster_class`: deployments sharing a class share templates and must agree on `infrastructure` and `bootstrap`. Defaults to `name`.",
+											Optional:            true,
+										},
+										"infrastructure": schema.DynamicAttribute{
+											MarkdownDescription: "Spec of this deployment's `<Infra>MachineTemplate`, as an object with the CRD's camelCase keys. A change creates a new template and rolls the deployment.",
+											Optional:            true,
+										},
+										"bootstrap": schema.DynamicAttribute{
+											MarkdownDescription: "Spec of this deployment's `<Bootstrap>ConfigTemplate`. Omit to use `bootstrap.<name>.resource_config`.",
 											Optional:            true,
 										},
 										"replicas": schema.Int64Attribute{
@@ -381,23 +447,6 @@ func (r *ClusterResource) Schema(ctx context.Context, req resource.SchemaRequest
 								Optional:            true,
 							},
 						},
-					},
-				},
-			},
-
-			// --- template ---
-			"template": schema.SingleNestedAttribute{
-				MarkdownDescription: "Cluster template configuration: where the workload cluster template comes from and the clusterctl variables substituted into it.",
-				Optional:            true,
-				Attributes: map[string]schema.Attribute{
-					"source": schema.StringAttribute{
-						MarkdownDescription: "Custom cluster template: a local path, a `file://` URL, or an `https://` URL (GitHub blob or raw URLs work). Omit to use the infrastructure provider's release template selected by `flavor`. Required for combinations the provider release does not ship, such as Tinkerbell with Talos.",
-						Optional:            true,
-					},
-					"variables": schema.MapAttribute{
-						MarkdownDescription: "clusterctl variables substituted into the template and provider components as `${VAR}` (e.g. `CONTROL_PLANE_VIP`, `POD_CIDR`). They take precedence over the clusterctl config file and environment. `CLUSTER_NAME`, `NAMESPACE`, `KUBERNETES_VERSION`, `CONTROL_PLANE_MACHINE_COUNT` and `WORKER_MACHINE_COUNT` are set from the resource.",
-						ElementType:         types.StringType,
-						Optional:            true,
 					},
 				},
 			},
@@ -510,24 +559,71 @@ func (r *ClusterResource) Schema(ctx context.Context, req resource.SchemaRequest
 }
 
 // providerMapAttribute builds one of the six provider maps. Every map shares
-// providerNestedObject and is immutable: providers are installed once by
-// clusterctl init, so any change recreates the cluster.
+// providerNestedObject. Providers are installed once by clusterctl init, so
+// any change other than resource_config recreates the cluster.
 func providerMapAttribute(desc string, required bool) schema.MapNestedAttribute {
 	return schema.MapNestedAttribute{
-		MarkdownDescription: desc + " Each value is a provider object modeled after the cluster-api-operator provider CRDs (`operator.cluster.x-k8s.io/v1alpha2`); customizations are applied natively by wrapping the clusterctl repository factory, so the operator itself is not required.",
+		MarkdownDescription: desc + " Each value is a provider object modeled after the cluster-api-operator provider CRDs (`operator.cluster.x-k8s.io/v1alpha2`); customizations are applied natively by wrapping the clusterctl repository factory, so the operator itself is not required. Changing anything but `resource_config` recreates the cluster.",
 		Required:            required,
 		Optional:            !required,
 		NestedObject:        providerNestedObject(),
 		PlanModifiers: []planmodifier.Map{
-			mapplanmodifier.RequiresReplace(),
+			providerMapRequiresReplace(),
 		},
 	}
+}
+
+// providerMapRequiresReplace replaces the cluster when a provider map changes
+// in any way other than an entry's resource_config, which is re-applied to the
+// generated cluster objects in place.
+func providerMapRequiresReplace() planmodifier.Map {
+	return mapplanmodifier.RequiresReplaceIf(
+		func(ctx context.Context, req planmodifier.MapRequest, resp *mapplanmodifier.RequiresReplaceIfFuncResponse) {
+			if req.PlanValue.IsUnknown() || req.StateValue.IsUnknown() {
+				resp.RequiresReplace = true
+				return
+			}
+			resp.RequiresReplace = !withoutResourceConfig(ctx, req.StateValue).Equal(withoutResourceConfig(ctx, req.PlanValue))
+		},
+		"Changing anything but resource_config requires replacing the cluster.",
+		"Changing anything but `resource_config` requires replacing the cluster.",
+	)
+}
+
+// withoutResourceConfig returns the provider map with every entry's
+// resource_config nulled, for change comparison.
+func withoutResourceConfig(ctx context.Context, m types.Map) types.Map {
+	elems := map[string]attr.Value{}
+	for name, el := range m.Elements() {
+		obj, ok := el.(types.Object)
+		if !ok {
+			elems[name] = el
+			continue
+		}
+		attrs := maps.Clone(obj.Attributes())
+		attrs["resource_config"] = types.DynamicNull()
+		stripped, d := types.ObjectValue(obj.AttributeTypes(ctx), attrs)
+		if d.HasError() {
+			elems[name] = el
+			continue
+		}
+		elems[name] = stripped
+	}
+	out, d := types.MapValue(m.ElementType(ctx), elems)
+	if d.HasError() {
+		return m
+	}
+	return out
 }
 
 // providerNestedObject is the provider object shared by every provider map.
 func providerNestedObject() schema.NestedAttributeObject {
 	return schema.NestedAttributeObject{
 		Attributes: map[string]schema.Attribute{
+			"resource_config": schema.DynamicAttribute{
+				MarkdownDescription: "Provider-specific settings deep-merged into the spec of the provider's generated cluster object (RFC 7396: nested maps merge, lists and scalars replace, `null` deletes): `infrastructure` → the `<Infra>Cluster` (or `<Infra>ClusterTemplate` with `cluster_class`), `control_plane` → the `<CP>ControlPlane` (or its template), `bootstrap` → the default worker `<Bootstrap>ConfigTemplate`. Use the CRD's camelCase field names. Not valid on `core`, `ipam` or `addon`. Changes apply in place.",
+				Optional:            true,
+			},
 			"version": schema.StringAttribute{
 				MarkdownDescription: "Release tag to install (e.g. `v0.7.9`). Omit for clusterctl's latest release.",
 				Optional:            true,
@@ -928,9 +1024,10 @@ func (r *ClusterResource) ImportState(ctx context.Context, req resource.ImportSt
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("name"), req.ID)...)
 }
 
-// UpgradeState migrates v0 (flat) and v1 (nested objects with provider
-// strings) state to v2 (provider maps and topology). Terraform does not chain
-// upgraders, so both emit v2 directly.
+// UpgradeState migrates v0 (flat), v1 (nested objects with provider strings)
+// and v2 (provider maps with a clusterctl template) state to v3 (generated
+// manifests: no template/flavor, cluster_class, network, resource_config).
+// Terraform does not chain upgraders, so every entry emits v3 directly.
 func (r *ClusterResource) UpgradeState(ctx context.Context) map[int64]resource.StateUpgrader {
 	v0Schema := clusterResourceSchemaV0()
 	return map[int64]resource.StateUpgrader{
@@ -946,8 +1043,9 @@ func (r *ClusterResource) UpgradeState(ctx context.Context) map[int64]resource.S
 				v1 := ClusterResourceModel{
 					Name:              v0.Name,
 					KubernetesVersion: v0.KubernetesVersion,
-					Flavor:            v0.Flavor,
+					ClusterClass:      types.BoolValue(false),
 					Id:                v0.Id,
+					Network:           types.ObjectNull(clusterNetworkAttrTypes()),
 				}
 
 				// Management
@@ -993,7 +1091,6 @@ func (r *ClusterResource) UpgradeState(ctx context.Context) map[int64]resource.S
 				v1.Topology, d = legacyTopologyObject(ctx, v0.ControlPlaneMachineCount, v0.WorkerMachineCount)
 				resp.Diagnostics.Append(d...)
 				v1.CNI = types.ObjectNull(cniAttrTypes())
-				v1.Template = types.ObjectNull(templateAttrTypes())
 
 				v1.Inventory = types.ObjectNull(inventoryAttrTypes())
 
@@ -1021,26 +1118,53 @@ func (r *ClusterResource) UpgradeState(ctx context.Context) map[int64]resource.S
 				resp.Diagnostics.Append(resp.State.Set(ctx, v1)...)
 			},
 		},
-		1: {
-			// No PriorSchema: the v1 schema was large and only a handful of
-			// attributes change shape, so the upgrade rewrites the raw JSON.
-			StateUpgrader: func(_ context.Context, req resource.UpgradeStateRequest, resp *resource.UpgradeStateResponse) {
-				if req.RawState == nil || len(req.RawState.JSON) == 0 {
-					resp.Diagnostics.AddError("Unable to upgrade state", "Missing raw state for schema version 1.")
-					return
-				}
-				out, err := upgradeV1JSON(req.RawState.JSON)
-				if err != nil {
-					resp.Diagnostics.AddError("Unable to upgrade state", fmt.Sprintf("Upgrading capi_cluster state from schema version 1 to 2: %s", err))
-					return
-				}
-				resp.DynamicValue = &tfprotov6.DynamicValue{JSON: out}
-			},
+		// No PriorSchema for v1 and v2: the schemas were large and only a
+		// handful of attributes change shape, so the upgrades rewrite raw JSON.
+		1: rawJSONUpgrader(1, upgradeV1JSON),
+		2: rawJSONUpgrader(2, upgradeV2JSON),
+	}
+}
+
+// rawJSONUpgrader wraps a raw-JSON rewrite as a StateUpgrader.
+func rawJSONUpgrader(from int, upgrade func([]byte) ([]byte, error)) resource.StateUpgrader {
+	return resource.StateUpgrader{
+		StateUpgrader: func(_ context.Context, req resource.UpgradeStateRequest, resp *resource.UpgradeStateResponse) {
+			if req.RawState == nil || len(req.RawState.JSON) == 0 {
+				resp.Diagnostics.AddError("Unable to upgrade state", fmt.Sprintf("Missing raw state for schema version %d.", from))
+				return
+			}
+			out, err := upgrade(req.RawState.JSON)
+			if err != nil {
+				resp.Diagnostics.AddError("Unable to upgrade state", fmt.Sprintf("Upgrading capi_cluster state from schema version %d: %s", from, err))
+				return
+			}
+			resp.DynamicValue = &tfprotov6.DynamicValue{JSON: out}
 		},
 	}
 }
 
 // --- Validation ---
+
+// validateWorkerClasses checks that machine deployments sharing a ClusterClass
+// worker class (class, or name when unset) agree on their template specs.
+func validateWorkerClasses(mds []capi.MachineDeploymentTopology, diags *diag.Diagnostics) {
+	first := map[string]capi.MachineDeploymentTopology{}
+	for _, md := range mds {
+		class := md.Class
+		if class == "" {
+			class = md.Name
+		}
+		prev, ok := first[class]
+		if !ok {
+			first[class] = md
+			continue
+		}
+		if !reflect.DeepEqual(prev.Infrastructure, md.Infrastructure) || !reflect.DeepEqual(prev.Bootstrap, md.Bootstrap) {
+			diags.AddError("Conflicting worker class",
+				fmt.Sprintf("topology.workers.machine_deployments %q and %q share class %q but differ in infrastructure or bootstrap.", prev.Name, md.Name, class))
+		}
+	}
+}
 
 func (r *ClusterResource) validateLifecycleConfig(ctx context.Context, data *ClusterResourceModel, diags *diag.Diagnostics) {
 	// Per-entry rules and name collection for every provider map.
@@ -1094,7 +1218,7 @@ func (r *ClusterResource) validateLifecycleConfig(ctx context.Context, data *Clu
 	}
 
 	// Topology: unique machine deployment names; counts feed inventory validation.
-	cpCount, mds, d := extractTopology(ctx, data)
+	cpTopo, mds, d := extractTopology(ctx, data)
 	diags.Append(d...)
 	seen := map[string]bool{}
 	var workerCount int64
@@ -1107,14 +1231,17 @@ func (r *ClusterResource) validateLifecycleConfig(ctx context.Context, data *Clu
 			workerCount += *md.Replicas
 		}
 	}
+	if data.ClusterClass.ValueBool() {
+		validateWorkerClasses(mds, diags)
+	}
 
 	// Validate inventory
 	inv, d := extractInventory(ctx, data)
 	diags.Append(d...)
 	if inv != nil {
 		var cp int64
-		if cpCount != nil {
-			cp = *cpCount
+		if cpTopo.Replicas != nil {
+			cp = *cpTopo.Replicas
 		}
 		validateInventory(ctx, inv, cp, workerCount, diags)
 	}

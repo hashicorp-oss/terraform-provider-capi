@@ -178,11 +178,12 @@ func TestGenerate_Direct_TinkerbellTalos(t *testing.T) {
 	assertManifestMatchesGolden(t, "direct-tinkerbell-talos", got)
 }
 
+// The minimal `infrastructure = { docker = {} }` configuration: clusterctl
+// installs the kubeadm bootstrap and control-plane providers by default, so
+// generation defaults to them too.
 func TestGenerate_Direct_DockerKubeadmMinimal(t *testing.T) {
 	providers := ProviderSet{}
 	providers.Add(ProviderConfig{Name: "docker", Type: ProviderTypeInfrastructure})
-	providers.Add(ProviderConfig{Name: "kubeadm", Type: ProviderTypeControlPlane})
-	providers.Add(ProviderConfig{Name: "kubeadm", Type: ProviderTypeBootstrap})
 	gen := generatorFor(t, "core.yaml", "docker-kubeadm.yaml")
 	got, err := gen.Generate(context.Background(), &Cluster{Name: "mgmt"}, GenerateOptions{
 		ClusterName: "dev", Namespace: "default", KubernetesVersion: "v1.31.0", Providers: providers,
@@ -245,27 +246,19 @@ func TestGenerate_Direct_TemplateRotationFollowsSpecChanges(t *testing.T) {
 	}
 }
 
-func TestGenerate_Direct_RequiresControlPlaneProvider(t *testing.T) {
+func TestGenerate_Direct_DefaultsBootstrapToKubeadmForMachineDeployments(t *testing.T) {
 	providers := ProviderSet{}
 	providers.Add(ProviderConfig{Name: "docker", Type: ProviderTypeInfrastructure})
 	gen := generatorFor(t, "core.yaml", "docker-kubeadm.yaml")
-	_, err := gen.Generate(context.Background(), &Cluster{}, GenerateOptions{ClusterName: "dev", Namespace: "default", Providers: providers})
-	if err == nil || !strings.Contains(err.Error(), "control_plane") {
-		t.Fatalf("expected an error naming the missing control_plane provider, got %v", err)
-	}
-}
-
-func TestGenerate_Direct_RequiresBootstrapProviderForMachineDeployments(t *testing.T) {
-	providers := ProviderSet{}
-	providers.Add(ProviderConfig{Name: "docker", Type: ProviderTypeInfrastructure})
-	providers.Add(ProviderConfig{Name: "kubeadm", Type: ProviderTypeControlPlane})
-	gen := generatorFor(t, "core.yaml", "docker-kubeadm.yaml")
-	_, err := gen.Generate(context.Background(), &Cluster{}, GenerateOptions{
-		ClusterName: "dev", Namespace: "default", Providers: providers,
+	got, err := gen.Generate(context.Background(), &Cluster{}, GenerateOptions{
+		ClusterName: "dev", Namespace: "default", KubernetesVersion: "v1.31.0", Providers: providers,
 		MachineDeployments: []MachineDeploymentTopology{{Name: "md-0"}},
 	})
-	if err == nil || !strings.Contains(err.Error(), "bootstrap") {
-		t.Fatalf("expected an error naming the missing bootstrap provider, got %v", err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if findObject(t, got, "KubeadmConfigTemplate", "dev-md-0-9e458ff9") == nil {
+		t.Errorf("expected a kubeadm config template for the deployment:\n%s", got)
 	}
 }
 

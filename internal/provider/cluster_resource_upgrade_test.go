@@ -6,6 +6,7 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"reflect"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-framework/resource"
@@ -55,8 +56,11 @@ func TestUpgradeV1JSON(t *testing.T) {
 	if string(infra["tinkerbell"]["version"]) != `"v0.5.4"` {
 		t.Errorf("infrastructure = %s", got["infrastructure"])
 	}
-	if len(infra["tinkerbell"]) != 9 {
-		t.Errorf("provider object must carry all 9 attributes, got %d", len(infra["tinkerbell"]))
+	if len(infra["tinkerbell"]) != 10 {
+		t.Errorf("provider object must carry all 10 attributes, got %d", len(infra["tinkerbell"]))
+	}
+	if string(infra["tinkerbell"]["resource_config"]) != "null" {
+		t.Errorf("resource_config must be null after upgrade: %s", infra["tinkerbell"]["resource_config"])
 	}
 	var addon map[string]map[string]json.RawMessage
 	if err := json.Unmarshal(got["addon"], &addon); err != nil {
@@ -72,13 +76,14 @@ func TestUpgradeV1JSON(t *testing.T) {
 	if string(fc["url"]) != `"https://example.com/addon-components.yaml"` || string(fc["owner"]) != "null" || string(fc["repository"]) != "null" {
 		t.Errorf("fetch_config = %s", addon["helm"]["fetch_config"])
 	}
-	wantTopo := `{"control_plane":{"replicas":1},"workers":{"machine_deployments":[{"class":null,"failure_domain":null,"metadata":null,"name":"md-0","replicas":2}]}}`
+	wantTopo := `{"control_plane":{"infrastructure":null,"replicas":1},"workers":{"machine_deployments":[{"bootstrap":null,"class":null,"failure_domain":null,"infrastructure":null,"metadata":null,"name":"md-0","replicas":2}]}}`
 	if string(got["topology"]) != wantTopo {
 		t.Errorf("topology = %s\nwant %s", got["topology"], wantTopo)
 	}
-	if string(got["ipam"]) != "null" || string(got["core"]) != "null" || string(got["template"]) != "null" {
-		t.Errorf("ipam/core/template = %s/%s/%s", got["ipam"], got["core"], got["template"])
+	if string(got["ipam"]) != "null" || string(got["core"]) != "null" {
+		t.Errorf("ipam/core = %s/%s", got["ipam"], got["core"])
 	}
+	assertV3Shape(t, got)
 	if string(got["management"]) != "null" || string(got["name"]) != `"acc-talos"` {
 		t.Error("untouched attributes must pass through")
 	}
@@ -105,8 +110,125 @@ func TestUpgradeV1JSON_NoCountsNoAddons(t *testing.T) {
 	}
 }
 
-// v2Schema returns the current resource schema.
-func v2Schema(t *testing.T, ctx context.Context) schema.Schema {
+// assertV3Shape checks the attributes every upgrader must emit for schema v3.
+func assertV3Shape(t *testing.T, got map[string]json.RawMessage) {
+	t.Helper()
+	for _, gone := range []string{"template", "flavor"} {
+		if _, ok := got[gone]; ok {
+			t.Errorf("%s must be removed", gone)
+		}
+	}
+	if string(got["cluster_class"]) != "false" {
+		t.Errorf("cluster_class = %s, want false", got["cluster_class"])
+	}
+	if string(got["network"]) != "null" {
+		t.Errorf("network = %s, want null", got["network"])
+	}
+}
+
+const v2State = `{
+  "id": "acc", "name": "acc", "kubernetes_version": "v1.34.0", "flavor": "ha",
+  "provider_secrets": null,
+  "core": null, "ipam": null, "addon": null,
+  "infrastructure": {"tinkerbell": {"version": "v0.7.9", "fetch_config": {"owner": "tinkerbell-community", "repository": null, "url": null, "oci": null}, "config_variables": null, "secret_config_variables": null, "deployment": null, "manager": null, "additional_manifests": null, "manifest_patches": null, "patches": null}},
+  "bootstrap": {"talos": {"version": "v0.8.2", "fetch_config": null, "config_variables": null, "secret_config_variables": null, "deployment": null, "manager": null, "additional_manifests": null, "manifest_patches": null, "patches": null}},
+  "control_plane": {"talos": {"version": "v0.7.1", "fetch_config": null, "config_variables": null, "secret_config_variables": null, "deployment": null, "manager": null, "additional_manifests": null, "manifest_patches": null, "patches": null}},
+  "topology": {"control_plane": {"replicas": 1}, "workers": {"machine_deployments": [{"name": "md-0", "class": null, "replicas": 2, "failure_domain": null, "metadata": {"labels": {"tier": "worker"}, "annotations": null}}]}},
+  "cni": null,
+  "template": {"source": "/srv/cluster-template-talos.yaml", "variables": {"CONTROL_PLANE_VIP": "10.0.0.160"}},
+  "management": null, "inventory": null, "wait": null, "output": null, "status": null
+}`
+
+func TestUpgradeV2JSON(t *testing.T) {
+	out, err := upgradeV2JSON([]byte(v2State))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]json.RawMessage
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatal(err)
+	}
+	assertV3Shape(t, got)
+	for _, attr := range []string{"infrastructure", "bootstrap", "control_plane"} {
+		var m map[string]map[string]json.RawMessage
+		if err := json.Unmarshal(got[attr], &m); err != nil {
+			t.Fatalf("%s: %v", attr, err)
+		}
+		for name, entry := range m {
+			if len(entry) != 10 || string(entry["resource_config"]) != "null" {
+				t.Errorf("%s[%s] must gain a null resource_config: %s", attr, name, got[attr])
+			}
+		}
+	}
+	if string(got["core"]) != "null" || string(got["addon"]) != "null" {
+		t.Error("null provider maps must stay null")
+	}
+	// Untouched sub-objects pass through verbatim, so compare semantically.
+	wantTopo := `{"control_plane":{"infrastructure":null,"replicas":1},"workers":{"machine_deployments":[{"bootstrap":null,"class":null,"failure_domain":null,"infrastructure":null,"metadata":{"annotations":null,"labels":{"tier":"worker"}},"name":"md-0","replicas":2}]}}`
+	var gotTopo, wantTopoVal any
+	if err := json.Unmarshal(got["topology"], &gotTopo); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(wantTopo), &wantTopoVal); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(gotTopo, wantTopoVal) {
+		t.Errorf("topology = %s\nwant %s", got["topology"], wantTopo)
+	}
+	if string(got["kubernetes_version"]) != `"v1.34.0"` || string(got["cni"]) != "null" {
+		t.Error("untouched attributes must pass through")
+	}
+}
+
+func TestUpgradeState_V2ToV3_DecodesAgainstSchema(t *testing.T) {
+	ctx := context.Background()
+	r := &ClusterResource{}
+	up := r.UpgradeState(ctx)[2]
+	if up.PriorSchema != nil {
+		t.Fatal("v2 upgrader must rewrite raw JSON without a prior schema")
+	}
+	resp := &resource.UpgradeStateResponse{}
+	up.StateUpgrader(ctx, resource.UpgradeStateRequest{RawState: &tfprotov6.RawState{JSON: []byte(v2State)}}, resp)
+	if resp.Diagnostics.HasError() {
+		t.Fatal(resp.Diagnostics)
+	}
+	out := decodeUpgraded(t, ctx, resp)
+	infra, _ := extractProviders(ctx, out.Infrastructure)
+	if infra["tinkerbell"].Version.ValueString() != "v0.7.9" || !infra["tinkerbell"].ResourceConfig.IsNull() {
+		t.Errorf("infrastructure = %v", out.Infrastructure)
+	}
+	if !out.ClusterClass.IsNull() && out.ClusterClass.ValueBool() {
+		t.Error("cluster_class must be false")
+	}
+	if !out.Network.IsNull() {
+		t.Error("network must be null")
+	}
+	cp, mds, _ := extractTopology(ctx, &out)
+	if cp.Replicas == nil || *cp.Replicas != 1 || len(mds) != 1 || *mds[0].Replicas != 2 || mds[0].Labels["tier"] != "worker" {
+		t.Errorf("topology = %+v %+v", cp, mds)
+	}
+}
+
+// decodeUpgraded decodes a raw-JSON upgrade result against the current schema.
+func decodeUpgraded(t *testing.T, ctx context.Context, resp *resource.UpgradeStateResponse) ClusterResourceModel {
+	t.Helper()
+	if resp.DynamicValue == nil {
+		t.Fatal("raw-JSON upgrader must set DynamicValue")
+	}
+	schema := currentSchema(t, ctx)
+	val, err := resp.DynamicValue.Unmarshal(schema.Type().TerraformType(ctx))
+	if err != nil {
+		t.Fatalf("upgraded state does not decode against the current schema: %v", err)
+	}
+	var out ClusterResourceModel
+	if d := (tfsdk.State{Schema: schema, Raw: val}).Get(ctx, &out); d.HasError() {
+		t.Fatal(d)
+	}
+	return out
+}
+
+// currentSchema returns the current resource schema.
+func currentSchema(t *testing.T, ctx context.Context) schema.Schema {
 	t.Helper()
 	resp := &resource.SchemaResponse{}
 	NewClusterResource().Schema(ctx, resource.SchemaRequest{}, resp)
@@ -116,7 +238,7 @@ func v2Schema(t *testing.T, ctx context.Context) schema.Schema {
 	return resp.Schema
 }
 
-func TestUpgradeState_V1ToV2_DecodesAgainstSchema(t *testing.T) {
+func TestUpgradeState_V1ToV3_DecodesAgainstSchema(t *testing.T) {
 	ctx := context.Background()
 	r := &ClusterResource{}
 	up := r.UpgradeState(ctx)[1]
@@ -125,25 +247,17 @@ func TestUpgradeState_V1ToV2_DecodesAgainstSchema(t *testing.T) {
 	if resp.Diagnostics.HasError() {
 		t.Fatal(resp.Diagnostics)
 	}
-	if resp.DynamicValue == nil {
-		t.Fatal("v1 upgrader must set DynamicValue")
-	}
-	schema := v2Schema(t, ctx)
-	val, err := resp.DynamicValue.Unmarshal(schema.Type().TerraformType(ctx))
-	if err != nil {
-		t.Fatalf("upgraded state does not decode against the v2 schema: %v", err)
-	}
-	var out ClusterResourceModel
-	if d := (tfsdk.State{Schema: schema, Raw: val}).Get(ctx, &out); d.HasError() {
-		t.Fatal(d)
-	}
+	out := decodeUpgraded(t, ctx, resp)
 	infra, _ := extractProviders(ctx, out.Infrastructure)
 	if infra["tinkerbell"].Version.ValueString() != "v0.5.4" {
 		t.Errorf("infrastructure = %v", out.Infrastructure)
 	}
 	cp, mds, _ := extractTopology(ctx, &out)
-	if cp == nil || *cp != 1 || len(mds) != 1 || *mds[0].Replicas != 2 {
-		t.Errorf("topology = %v %+v", cp, mds)
+	if cp.Replicas == nil || *cp.Replicas != 1 || len(mds) != 1 || *mds[0].Replicas != 2 {
+		t.Errorf("topology = %+v %+v", cp, mds)
+	}
+	if out.ClusterClass.ValueBool() || !out.Network.IsNull() {
+		t.Error("v1 state must upgrade with cluster_class=false and no network")
 	}
 	addons, _ := extractProviders(ctx, out.Addon)
 	if addons["helm"].Version.ValueString() != "v0.2.12" {
@@ -151,7 +265,7 @@ func TestUpgradeState_V1ToV2_DecodesAgainstSchema(t *testing.T) {
 	}
 }
 
-func TestUpgradeState_V0ToV2(t *testing.T) {
+func TestUpgradeState_V0ToV3(t *testing.T) {
 	ctx := context.Background()
 	r := &ClusterResource{}
 	up := r.UpgradeState(ctx)[0]
@@ -170,7 +284,7 @@ func TestUpgradeState_V0ToV2(t *testing.T) {
 		t.Fatalf("fixture does not match the v0 schema: %v", err)
 	}
 
-	schema := v2Schema(t, ctx)
+	schema := currentSchema(t, ctx)
 	resp := &resource.UpgradeStateResponse{State: tfsdk.State{Schema: schema, Raw: tftypes.NewValue(schema.Type().TerraformType(ctx), nil)}}
 	up.StateUpgrader(ctx, resource.UpgradeStateRequest{State: &tfsdk.State{Schema: *up.PriorSchema, Raw: v0Val}}, resp)
 	if resp.Diagnostics.HasError() {
@@ -197,7 +311,10 @@ func TestUpgradeState_V0ToV2(t *testing.T) {
 		t.Error("ipam and addon must be null after a v0 upgrade")
 	}
 	cp, mds, _ := extractTopology(ctx, &out)
-	if cp == nil || *cp != 3 || len(mds) != 1 || mds[0].Name != "md-0" || *mds[0].Replicas != 2 {
-		t.Errorf("topology = %v %+v", cp, mds)
+	if cp.Replicas == nil || *cp.Replicas != 3 || len(mds) != 1 || mds[0].Name != "md-0" || *mds[0].Replicas != 2 {
+		t.Errorf("topology = %+v %+v", cp, mds)
+	}
+	if out.ClusterClass.ValueBool() || !out.Network.IsNull() {
+		t.Error("v0 state must upgrade with cluster_class=false and no network")
 	}
 }

@@ -39,13 +39,13 @@ func TestAccClusterResource(t *testing.T) {
 				ImportState:       true,
 				ImportStateVerify: true,
 				ImportStateVerifyIgnore: []string{
-					// flavor, kubernetes_version, and infrastructure are
+					// kubernetes_version and infrastructure are
 					// creation-time-only template parameters: the management
 					// cluster used to create the workload cluster is an
 					// ephemeral bootstrap cluster torn down after apply, so
 					// there is no live source to recover them from on import.
 					"management", "wait", "output",
-					"status", "flavor", "kubernetes_version",
+					"status", "kubernetes_version",
 					"infrastructure", "infrastructure.provider", "infrastructure.%",
 				},
 			},
@@ -57,7 +57,6 @@ func testAccClusterResourceConfig(name string) string {
 	return `
 resource "capi_cluster" "test" {
   name               = "` + name + `"
-  flavor             = "development"
   kubernetes_version = "v1.31.0"
 
   infrastructure = { docker = {} }

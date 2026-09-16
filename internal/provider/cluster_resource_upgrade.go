@@ -8,20 +8,130 @@ import (
 	"fmt"
 )
 
-// providerAttrNames lists every attribute of the v2 provider object. The JSON
+// providerAttrNames lists every attribute of the provider object. The JSON
 // handed back to Terraform must carry all of them (null when unset) or it
 // will not decode against the schema.
 var providerAttrNames = []string{
 	"version", "fetch_config", "config_variables", "secret_config_variables",
 	"deployment", "manager", "additional_manifests", "manifest_patches", "patches",
+	"resource_config",
 }
+
+// providerMapAttrs are the six provider maps.
+var providerMapAttrs = []string{"core", "infrastructure", "bootstrap", "control_plane", "ipam", "addon"}
 
 var nullJSON = json.RawMessage("null")
 
 // upgradeV1JSON rewrites raw v1 state (objects holding a "name:version"
-// provider string plus an addons list) into v2 state (provider maps and
-// topology). Attributes that did not change shape pass through untouched.
+// provider string plus an addons list) into v3 state: first the v2 shape
+// (provider maps and topology), then the v3 rewrite. Attributes that did not
+// change shape pass through untouched.
 func upgradeV1JSON(raw []byte) ([]byte, error) {
+	v2, err := upgradeV1ToV2JSON(raw)
+	if err != nil {
+		return nil, err
+	}
+	return upgradeV2JSON(v2)
+}
+
+// upgradeV2JSON rewrites raw v2 state into v3: template and flavor go away,
+// cluster_class and network appear, every provider entry gains resource_config,
+// and the topology entries gain their machine template specs.
+func upgradeV2JSON(raw []byte) ([]byte, error) {
+	var state map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &state); err != nil {
+		return nil, fmt.Errorf("decoding v2 state: %w", err)
+	}
+	delete(state, "template")
+	delete(state, "flavor")
+	state["cluster_class"] = json.RawMessage("false")
+	state["network"] = nullJSON
+
+	for _, attr := range providerMapAttrs {
+		entries, err := rawObject(state[attr])
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", attr, err)
+		}
+		if entries == nil {
+			state[attr] = nullJSON
+			continue
+		}
+		for name, raw := range entries {
+			entry, err := rawObject(raw)
+			if err != nil {
+				return nil, fmt.Errorf("%s[%s]: %w", attr, name, err)
+			}
+			if entry == nil {
+				continue
+			}
+			for _, a := range providerAttrNames {
+				if _, ok := entry[a]; !ok {
+					entry[a] = nullJSON
+				}
+			}
+			b, err := json.Marshal(entry)
+			if err != nil {
+				return nil, err
+			}
+			entries[name] = b
+		}
+		b, err := json.Marshal(entries)
+		if err != nil {
+			return nil, err
+		}
+		state[attr] = b
+	}
+
+	topology, err := rawObject(state["topology"])
+	if err != nil {
+		return nil, fmt.Errorf("topology: %w", err)
+	}
+	if topology != nil {
+		cp, err := rawObject(topology["control_plane"])
+		if err != nil {
+			return nil, fmt.Errorf("topology.control_plane: %w", err)
+		}
+		if cp != nil {
+			if _, ok := cp["infrastructure"]; !ok {
+				cp["infrastructure"] = nullJSON
+			}
+			if topology["control_plane"], err = json.Marshal(cp); err != nil {
+				return nil, err
+			}
+		}
+		workers, err := rawObject(topology["workers"])
+		if err != nil {
+			return nil, fmt.Errorf("topology.workers: %w", err)
+		}
+		if workers != nil && len(workers["machine_deployments"]) > 0 && string(workers["machine_deployments"]) != "null" {
+			var mds []map[string]json.RawMessage
+			if err := json.Unmarshal(workers["machine_deployments"], &mds); err != nil {
+				return nil, fmt.Errorf("topology.workers.machine_deployments: %w", err)
+			}
+			for _, md := range mds {
+				for _, a := range []string{"infrastructure", "bootstrap"} {
+					if _, ok := md[a]; !ok {
+						md[a] = nullJSON
+					}
+				}
+			}
+			if workers["machine_deployments"], err = json.Marshal(mds); err != nil {
+				return nil, err
+			}
+			if topology["workers"], err = json.Marshal(workers); err != nil {
+				return nil, err
+			}
+		}
+		if state["topology"], err = json.Marshal(topology); err != nil {
+			return nil, err
+		}
+	}
+
+	return json.Marshal(state)
+}
+
+// upgradeV1ToV2JSON is the v1 -> v2 rewrite (provider maps and topology).
+func upgradeV1ToV2JSON(raw []byte) ([]byte, error) {
 	var state map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &state); err != nil {
 		return nil, fmt.Errorf("decoding v1 state: %w", err)
