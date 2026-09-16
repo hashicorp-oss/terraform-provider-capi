@@ -5,6 +5,7 @@ package talos
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -80,6 +81,14 @@ type ConfigInput struct {
 	NodeIP            string
 	InstallDisk       string
 	InstallerImage    string
+	// Hostname and the network fields pin the node's identity so a single-node,
+	// no-pivot cluster keeps the IP its certs/etcd/kubeconfig are generated
+	// against. Empty Netmask leaves the node on DHCP (hostname still pinned).
+	Hostname    string
+	Netmask     string
+	Gateway     string
+	MAC         string
+	Nameservers []string
 	// Patches are strategic-merge or RFC6902 patches applied in order after
 	// the built-in wipe patch.
 	Patches []string
@@ -160,7 +169,17 @@ func GenerateConfig(in ConfigInput, bundle *secrets.Bundle) (*GeneratedConfig, e
 		return nil, fmt.Errorf("encoding config: %w", err)
 	}
 
-	patches, err := configpatcher.LoadPatches(append([]string{wipePatch}, in.Patches...))
+	netPatch, err := networkConfigPatch(in.Hostname, in.NodeIP, in.Netmask, in.Gateway, in.MAC, in.Nameservers)
+	if err != nil {
+		return nil, fmt.Errorf("building network patch: %w", err)
+	}
+	// Order: wipe, then our network patch (pin hostname + static addressing),
+	// then user patches last so they can override.
+	base := []string{wipePatch}
+	if netPatch != "" {
+		base = append(base, netPatch)
+	}
+	patches, err := configpatcher.LoadPatches(append(base, in.Patches...))
 	if err != nil {
 		return nil, fmt.Errorf("loading config patches: %w", err)
 	}
@@ -179,4 +198,59 @@ func GenerateConfig(in ConfigInput, bundle *secrets.Bundle) (*GeneratedConfig, e
 	}
 
 	return &GeneratedConfig{MachineConfig: patched, Talosconfig: tc}, nil
+}
+
+// netmaskToPrefix converts a dotted-quad IPv4 netmask (e.g. 255.255.0.0) to a
+// prefix length (e.g. 16).
+func netmaskToPrefix(netmask string) (int, error) {
+	ip := net.ParseIP(strings.TrimSpace(netmask))
+	if ip == nil || ip.To4() == nil {
+		return 0, fmt.Errorf("invalid IPv4 netmask %q", netmask)
+	}
+	ones, bits := net.IPMask(ip.To4()).Size()
+	if bits == 0 {
+		return 0, fmt.Errorf("non-contiguous netmask %q", netmask)
+	}
+	return ones, nil
+}
+
+// networkConfigPatch renders a Talos strategic-merge patch that pins the node's
+// hostname and, when a netmask is given, static addressing on the primary
+// interface (address + default route + nameservers). The interface is selected
+// by MAC when provided, else the first physical device. An empty result means
+// there was nothing to pin (no hostname and no address).
+func networkConfigPatch(hostname, ip, netmask, gateway, mac string, nameservers []string) (string, error) {
+	network := map[string]any{}
+	if hostname != "" {
+		network["hostname"] = hostname
+	}
+	if len(nameservers) > 0 {
+		network["nameservers"] = nameservers
+	}
+	if ip != "" && netmask != "" {
+		prefix, err := netmaskToPrefix(netmask)
+		if err != nil {
+			return "", err
+		}
+		selector := map[string]any{"physical": true}
+		if mac != "" {
+			selector = map[string]any{"hardwareAddr": mac}
+		}
+		iface := map[string]any{
+			"deviceSelector": selector,
+			"addresses":      []string{fmt.Sprintf("%s/%d", ip, prefix)},
+		}
+		if gateway != "" {
+			iface["routes"] = []map[string]any{{"network": "0.0.0.0/0", "gateway": gateway}}
+		}
+		network["interfaces"] = []map[string]any{iface}
+	}
+	if len(network) == 0 {
+		return "", nil
+	}
+	patch, err := yaml.Marshal(map[string]any{"machine": map[string]any{"network": network}})
+	if err != nil {
+		return "", fmt.Errorf("marshaling network patch: %w", err)
+	}
+	return string(patch), nil
 }

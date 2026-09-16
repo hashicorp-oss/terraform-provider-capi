@@ -485,6 +485,8 @@ func (r *reconciler) configInput() ConfigInput {
 		ClusterName: r.name, Endpoint: r.cfg.Talos.Endpoint, KubernetesVersion: r.k8sVersion,
 		TalosVersion: r.cfg.Talos.Version, NodeIP: r.cfg.Machine.IP, InstallDisk: r.cfg.Machine.Disk,
 		InstallerImage: r.sess.images.Installer, Patches: r.cfg.Talos.ConfigPatches,
+		Hostname: r.cfg.Machine.Hostname, Netmask: r.cfg.Machine.Netmask,
+		Gateway: r.cfg.Machine.Gateway, MAC: r.cfg.Machine.MAC, Nameservers: r.cfg.Machine.Nameservers,
 	}
 }
 

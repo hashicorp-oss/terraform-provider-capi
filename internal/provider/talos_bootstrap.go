@@ -50,11 +50,18 @@ func buildTalosBootstrapConfig(ctx context.Context, data *ClusterResourceModel) 
 		return nil, diags
 	}
 
+	nameservers, d := stringList(ctx, network.Nameservers)
+	diags.Append(d...)
+
 	cfg := &talos.Config{
 		Machine: talos.MachineConfig{
-			Hostname: m.Hostname.ValueString(),
-			IP:       network.IPAddress.ValueString(),
-			Disk:     disk.Device.ValueString(),
+			Hostname:    m.Hostname.ValueString(),
+			IP:          network.IPAddress.ValueString(),
+			Netmask:     network.Netmask.ValueString(),
+			Gateway:     network.Gateway.ValueString(),
+			MAC:         network.MACAddress.ValueString(),
+			Nameservers: nameservers,
+			Disk:        disk.Device.ValueString(),
 			BMC: talos.BMCCredentials{
 				Address:  bmc.Address.ValueString(),
 				Username: bmc.Username.ValueString(),

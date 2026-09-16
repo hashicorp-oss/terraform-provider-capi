@@ -9,7 +9,28 @@ import (
 	"testing"
 
 	"github.com/siderolabs/talos/pkg/machinery/config/configloader"
+	yaml "gopkg.in/yaml.v3"
 )
+
+// asMap is a checked map assertion for navigating decoded YAML in tests.
+func asMap(t *testing.T, v any) map[string]any {
+	t.Helper()
+	m, ok := v.(map[string]any)
+	if !ok {
+		t.Fatalf("expected map, got %T: %v", v, v)
+	}
+	return m
+}
+
+// asSlice is a checked slice assertion for navigating decoded YAML in tests.
+func asSlice(t *testing.T, v any) []any {
+	t.Helper()
+	s, ok := v.([]any)
+	if !ok {
+		t.Fatalf("expected slice, got %T: %v", v, v)
+	}
+	return s
+}
 
 func testConfigInput() ConfigInput {
 	return ConfigInput{
@@ -170,5 +191,98 @@ func TestSecretsCache(t *testing.T) {
 	}
 	if _, ok := readSecretsCache(""); ok {
 		t.Fatal("read of empty path must be a miss")
+	}
+}
+
+func TestNetmaskToPrefix(t *testing.T) {
+	cases := map[string]int{"255.255.0.0": 16, "255.255.255.0": 24, "255.0.0.0": 8, "255.255.255.128": 25}
+	for mask, want := range cases {
+		got, err := netmaskToPrefix(mask)
+		if err != nil || got != want {
+			t.Errorf("netmaskToPrefix(%q) = %d, %v; want %d", mask, got, err, want)
+		}
+	}
+	if _, err := netmaskToPrefix("not-a-mask"); err == nil {
+		t.Error("invalid netmask must error")
+	}
+}
+
+func TestNetworkConfigPatch(t *testing.T) {
+	patch, err := networkConfigPatch("host1", "10.1.40.35", "255.255.0.0", "10.0.0.1", "b8:ae:ed:76:79:61", []string{"10.0.0.1", "8.8.8.8"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := yaml.Unmarshal([]byte(patch), &m); err != nil {
+		t.Fatalf("patch is not valid YAML: %v\n%s", err, patch)
+	}
+	net := asMap(t, asMap(t, m["machine"])["network"])
+	if net["hostname"] != "host1" {
+		t.Errorf("hostname = %v", net["hostname"])
+	}
+	if ns, _ := net["nameservers"].([]any); len(ns) != 2 || ns[0] != "10.0.0.1" {
+		t.Errorf("nameservers = %v", net["nameservers"])
+	}
+	dev := asMap(t, asSlice(t, net["interfaces"])[0])
+	if addrs, _ := dev["addresses"].([]any); len(addrs) != 1 || addrs[0] != "10.1.40.35/16" {
+		t.Errorf("addresses = %v", dev["addresses"])
+	}
+	if sel, _ := dev["deviceSelector"].(map[string]any); sel["hardwareAddr"] != "b8:ae:ed:76:79:61" {
+		t.Errorf("deviceSelector = %v", dev["deviceSelector"])
+	}
+	route := asMap(t, asSlice(t, dev["routes"])[0])
+	if route["network"] != "0.0.0.0/0" || route["gateway"] != "10.0.0.1" {
+		t.Errorf("route = %v", route)
+	}
+}
+
+func TestNetworkConfigPatch_NoMACUsesPhysicalSelector(t *testing.T) {
+	patch, err := networkConfigPatch("host1", "10.1.40.35", "255.255.255.0", "10.0.0.1", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(patch, "physical: true") || strings.Contains(patch, "hardwareAddr") {
+		t.Errorf("empty MAC must select the physical interface, got:\n%s", patch)
+	}
+}
+
+func TestNetworkConfigPatch_EmptyWhenNoNetwork(t *testing.T) {
+	patch, err := networkConfigPatch("", "", "", "", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if patch != "" {
+		t.Errorf("no network inputs should yield an empty patch, got:\n%s", patch)
+	}
+}
+
+func TestGenerateConfig_PinsHostnameAndStaticNetwork(t *testing.T) {
+	bundle, err := NewSecretsBundle("v1.13.6")
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := testConfigInput()
+	in.Hostname = "talos-b8-ae-ed-76-79-61"
+	in.NodeIP = "10.1.40.35"
+	in.Netmask = "255.255.0.0"
+	in.Gateway = "10.0.0.1"
+	in.MAC = "b8:ae:ed:76:79:61"
+	in.Nameservers = []string{"10.0.0.1"}
+
+	gen, err := GenerateConfig(in, bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	if err := yaml.Unmarshal(gen.MachineConfig, &doc); err != nil {
+		t.Fatalf("generated config not YAML: %v", err)
+	}
+	net := asMap(t, asMap(t, doc["machine"])["network"])
+	if net["hostname"] != "talos-b8-ae-ed-76-79-61" {
+		t.Fatalf("machine.network.hostname not pinned: %v", net)
+	}
+	dev := asMap(t, asSlice(t, net["interfaces"])[0])
+	if addrs, _ := dev["addresses"].([]any); len(addrs) == 0 || addrs[0] != "10.1.40.35/16" {
+		t.Errorf("static address not set: %v", dev["addresses"])
 	}
 }

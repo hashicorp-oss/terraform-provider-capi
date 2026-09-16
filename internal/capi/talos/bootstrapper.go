@@ -38,8 +38,15 @@ const (
 type MachineConfig struct {
 	Hostname string
 	IP       string
-	Disk     string
-	BMC      BMCCredentials
+	// Netmask, Gateway, MAC, and Nameservers pin static addressing on the node
+	// so its IP does not drift off the certs/etcd/kubeconfig generated against
+	// it. Empty Netmask leaves the node on DHCP.
+	Netmask     string
+	Gateway     string
+	MAC         string
+	Nameservers []string
+	Disk        string
+	BMC         BMCCredentials
 }
 
 // BootConfig controls installer boot.
