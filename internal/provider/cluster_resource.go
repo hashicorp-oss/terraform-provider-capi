@@ -362,8 +362,8 @@ func (r *ClusterResource) Schema(ctx context.Context, req resource.SchemaRequest
 								MarkdownDescription: "Number of control plane machines. Use an odd number for HA (1, 3, 5).",
 								Optional:            true,
 							},
-							"infrastructure": schema.DynamicAttribute{
-								MarkdownDescription: "Spec of the control plane's `<Infra>MachineTemplate` (e.g. Tinkerbell `hardwareAffinity`), as an object with the CRD's camelCase keys. A change creates a new template and rolls the control plane.",
+							"infrastructure": schema.StringAttribute{
+								MarkdownDescription: "Spec of the control plane's `<Infra>MachineTemplate` (e.g. Tinkerbell `hardwareAffinity`) as YAML or JSON with the CRD's camelCase keys, typically `yamlencode({ ... })`. A change creates a new template and rolls the control plane.",
 								Optional:            true,
 							},
 						},
@@ -385,12 +385,12 @@ func (r *ClusterResource) Schema(ctx context.Context, req resource.SchemaRequest
 											MarkdownDescription: "Worker class name, used with `cluster_class`: deployments sharing a class share templates and must agree on `infrastructure` and `bootstrap`. Defaults to `name`.",
 											Optional:            true,
 										},
-										"infrastructure": schema.DynamicAttribute{
-											MarkdownDescription: "Spec of this deployment's `<Infra>MachineTemplate`, as an object with the CRD's camelCase keys. A change creates a new template and rolls the deployment.",
+										"infrastructure": schema.StringAttribute{
+											MarkdownDescription: "Spec of this deployment's `<Infra>MachineTemplate` as YAML or JSON with the CRD's camelCase keys, typically `yamlencode({ ... })`. A change creates a new template and rolls the deployment.",
 											Optional:            true,
 										},
-										"bootstrap": schema.DynamicAttribute{
-											MarkdownDescription: "Spec of this deployment's `<Bootstrap>ConfigTemplate`. Omit to use `bootstrap.<name>.resource_config`.",
+										"bootstrap": schema.StringAttribute{
+											MarkdownDescription: "Spec of this deployment's `<Bootstrap>ConfigTemplate` as YAML or JSON. Omit to use `bootstrap.<name>.resource_config`.",
 											Optional:            true,
 										},
 										"replicas": schema.Int64Attribute{
@@ -601,7 +601,7 @@ func withoutResourceConfig(ctx context.Context, m types.Map) types.Map {
 			continue
 		}
 		attrs := maps.Clone(obj.Attributes())
-		attrs["resource_config"] = types.DynamicNull()
+		attrs["resource_config"] = types.StringNull()
 		stripped, d := types.ObjectValue(obj.AttributeTypes(ctx), attrs)
 		if d.HasError() {
 			elems[name] = el
@@ -620,8 +620,8 @@ func withoutResourceConfig(ctx context.Context, m types.Map) types.Map {
 func providerNestedObject() schema.NestedAttributeObject {
 	return schema.NestedAttributeObject{
 		Attributes: map[string]schema.Attribute{
-			"resource_config": schema.DynamicAttribute{
-				MarkdownDescription: "Provider-specific settings deep-merged into the spec of the provider's generated cluster object (RFC 7396: nested maps merge, lists and scalars replace, `null` deletes): `infrastructure` → the `<Infra>Cluster` (or `<Infra>ClusterTemplate` with `cluster_class`), `control_plane` → the `<CP>ControlPlane` (or its template), `bootstrap` → the default worker `<Bootstrap>ConfigTemplate`. Use the CRD's camelCase field names. Not valid on `core`, `ipam` or `addon`. Changes apply in place.",
+			"resource_config": schema.StringAttribute{
+				MarkdownDescription: "Provider-specific settings as a YAML or JSON object (typically `yamlencode({ ... })`), deep-merged into the spec of the provider's generated cluster object (RFC 7396: nested maps merge, lists and scalars replace, `null` deletes): `infrastructure` → the `<Infra>Cluster` (or `<Infra>ClusterTemplate` with `cluster_class`), `control_plane` → the `<CP>ControlPlane` (or its template), `bootstrap` → the default worker `<Bootstrap>ConfigTemplate`. Use the CRD's camelCase field names. Not valid on `core`, `ipam` or `addon`. Changes apply in place.",
 				Optional:            true,
 			},
 			"version": schema.StringAttribute{

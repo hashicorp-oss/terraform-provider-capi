@@ -25,6 +25,7 @@ Any attribute name composed of two or more words where the first word is a *doma
 ✗  management_kubeconfig      →  ✓  management { kubeconfig }
 ✗  worker_machine_count       →  ✓  topology { workers { machine_deployments } }
 ✗  kubeconfig_path            →  ✓  output { kubeconfig_path }
+✗  control_plane_endpoint →  ✓  network { control_plane_endpoint { host, port } }
 ```
 
 **Rule 2 — Single-subject compound words stay as ONE nested object:**
@@ -44,7 +45,7 @@ Only truly atomic, cluster-level identity properties remain flat at the top leve
 ```
 ✓  name                ← cluster identity (single word)
 ✓  kubernetes_version   ← cluster-wide version (single property, no domain grouping)
-✓  flavor              ← template flavor (single word)
+✓  cluster_class       ← generation mode switch (single subject)
 ✓  id                  ← standard Terraform computed identifier
 ```
 
@@ -100,13 +101,21 @@ resource "capi_cluster" "dev" {
 Providers are maps keyed by provider name, matching the cluster-api-operator
 Helm values layout. `fetch_config.owner` alone is enough to point at a fork of
 a provider clusterctl already knows; the repository name and components file
-are inferred and the pinned `version` is embedded in the release URL.
+are inferred and the pinned `version` is embedded in the release URL. The
+provider generates the CAPI objects itself (§3.6); each entry's
+`resource_config` (a YAML/JSON object, typically `yamlencode({...})`) is merged
+into the spec of that provider's object.
 
 ```hcl
 resource "capi_cluster" "production" {
   name               = "prod-cluster"
   kubernetes_version = "v1.31.0"
-  flavor             = "default"
+
+  network = {
+    control_plane_endpoint = { host = "192.168.1.100", port = 6443 }
+    pods                   = { cidr_blocks = ["10.244.0.0/16"] }
+    services               = { cidr_blocks = ["10.96.0.0/12"] }
+  }
 
   management = {
     self_managed = true
@@ -123,16 +132,18 @@ resource "capi_cluster" "production" {
 
   infrastructure = {
     tinkerbell = {
-      version      = "v0.7.9"
-      fetch_config = { owner = "tinkerbell-community" }
-      manager      = { feature_gates = { ClusterTopology = true } }
+      version         = "v0.7.9"
+      fetch_config    = { owner = "tinkerbell-community" }
+      manager         = { feature_gates = { ClusterTopology = true } }
+      resource_config = yamlencode({ templateInline = file("${path.module}/talos-workflow.yaml") }) # TinkerbellCluster.spec
     }
   }
 
   bootstrap = {
     talos = {
-      version      = "v0.8.2"
-      fetch_config = { owner = "sidero-community" }
+      version         = "v0.8.2"
+      fetch_config    = { owner = "sidero-community" }
+      resource_config = yamlencode({ talosVersion = "v1.13" }) # default worker TalosConfigTemplate.spec
     }
   }
 
@@ -140,6 +151,9 @@ resource "capi_cluster" "production" {
     talos = {
       version      = "v0.7.1"
       fetch_config = { owner = "sidero-community" }
+      resource_config = yamlencode({ # TalosControlPlane.spec
+        controlPlaneConfig = { controlplane = { talosVersion = "v1.13", strategicPatches = [local.vip_patch] } }
+      })
     }
   }
 
@@ -153,10 +167,18 @@ resource "capi_cluster" "production" {
   addon = { helm = {} }
 
   topology = {
-    control_plane = { replicas = 3 }
+    control_plane = {
+      replicas       = 3
+      infrastructure = yamlencode({ hardwareAffinity = { required = [{ labelSelector = { matchLabels = { type = "cp" } } }] } })
+    }
     workers = {
       machine_deployments = [
-        { name = "md-0", replicas = 5, metadata = { labels = { tier = "worker" } } }
+        {
+          name           = "md-0"
+          replicas       = 5
+          metadata       = { labels = { tier = "worker" } }
+          infrastructure = yamlencode({ hardwareAffinity = { required = [{ labelSelector = { matchLabels = { type = "worker" } } }] } })
+        }
       ]
     }
   }
@@ -266,9 +288,12 @@ resource "capi_cluster" "bare_metal" {
     MarkdownDescription: "Kubernetes version for the workload cluster (e.g., `v1.31.0`).",
     Optional:            true,
 },
-"flavor": schema.StringAttribute{
-    MarkdownDescription: "Cluster template flavor to use. Maps to clusterctl template flavors.",
+"cluster_class": schema.BoolAttribute{
+    MarkdownDescription: "Generate a ClusterClass and a topology Cluster instead of direct objects.",
     Optional:            true,
+    Computed:            true,
+    Default:             booldefault.StaticBool(false),
+    PlanModifiers:       []planmodifier.Bool{boolplanmodifier.RequiresReplace()},
 },
 "id": schema.StringAttribute{
     Computed:            true,
@@ -374,15 +399,27 @@ The shared provider object (modeled after the cluster-api-operator provider CRDs
 | `additional_manifests` | String Optional | Extra YAML applied with the components |
 | `manifest_patches` | List(String) Optional | RFC 7396 merge patches (exclusive with `patches`) |
 | `patches` | ListNested Optional | Strategic merge / RFC 6902 patches with `target` selectors |
+| `resource_config` | String Optional | YAML/JSON object (`yamlencode({...})`) merged into the spec of the provider's generated cluster object (§3.6); only on `infrastructure`, `control_plane`, `bootstrap` |
 
 An empty object (`helm = {}`) installs clusterctl's default release.
 
-**Mutability:** every provider map carries `mapplanmodifier.RequiresReplace()`.
-Providers are installed once by `clusterctl init`; Update runs with `SkipInit`.
+**Mutability:** every provider map carries `providerMapRequiresReplace()`, a
+`mapplanmodifier.RequiresReplaceIf` that compares state and plan with each
+entry's `resource_config` blanked: providers are installed once by
+`clusterctl init`, so any other change replaces the cluster, while a
+`resource_config` change re-applies the generated objects in place (Update
+runs with `SkipInit`).
 
 **Cardinality:** `infrastructure` is Required and must contain exactly one
-entry (it selects the cluster template). The other five are Optional and may
-hold several entries.
+entry. The other five are Optional and may hold several entries; a missing
+`control_plane` or `bootstrap` entry defaults to `kubeadm` for generation,
+exactly as `clusterctl init` installs the kubeadm providers by default.
+
+`resource_config` and the topology `infrastructure`/`bootstrap` specs are
+strings, not objects: terraform-plugin-framework does not support dynamic
+attributes inside collection nested attributes (the provider maps and the
+machine-deployment list), so these take YAML or JSON text and the provider
+decodes it (`yamlObject`; integral numbers → `int64`).
 
 **Backend:** entries become `capi.ProviderConfig{Name, Type, Version, FetchConfig, ...}`
 grouped in a `capi.ProviderSet` (`internal/capi/types.go`). Customizations are
@@ -427,7 +464,8 @@ user's `clusterctl.yaml` and environment.
         "control_plane": schema.SingleNestedAttribute{
             Optional: true,
             Attributes: map[string]schema.Attribute{
-                "replicas": schema.Int64Attribute{Optional: true},
+                "replicas":       schema.Int64Attribute{Optional: true},
+                "infrastructure": schema.StringAttribute{Optional: true}, // YAML/JSON control plane <Infra>MachineTemplate spec
             },
         },
         "workers": schema.SingleNestedAttribute{
@@ -442,6 +480,8 @@ user's `clusterctl.yaml` and environment.
                             "replicas":       schema.Int64Attribute{Optional: true},
                             "failure_domain": schema.StringAttribute{Optional: true},
                             "metadata":       // { labels, annotations } Map(String)
+                            "infrastructure": schema.StringAttribute{Optional: true}, // YAML/JSON <Infra>MachineTemplate spec
+                            "bootstrap":      schema.StringAttribute{Optional: true}, // YAML/JSON <Bootstrap>ConfigTemplate spec
                         },
                     },
                 },
@@ -453,10 +493,12 @@ user's `clusterctl.yaml` and environment.
 
 **Mutability:** everything under `topology` is mutable (in-place scale).
 
-**Backend:** `control_plane.replicas` → `CreateClusterOptions.ControlPlaneMachineCount`;
-the list → `CreateClusterOptions.MachineDeployments []capi.MachineDeploymentTopology`.
-clusterctl flavor templates expose a single `WORKER_MACHINE_COUNT`, filled from
-the **first** machine deployment's `replicas` (`CreateClusterOptions.WorkerMachineCount()`).
+**Backend:** `control_plane` → `CreateClusterOptions.ControlPlane capi.ControlPlaneTopology`
+(`Replicas`, `Infrastructure`); the list → `CreateClusterOptions.MachineDeployments
+[]capi.MachineDeploymentTopology` (with `Infrastructure` and `Bootstrap`). Each entry
+becomes one MachineDeployment with its own machine template and bootstrap config
+template (or, with `cluster_class`, a worker class named `class` — default `name` —
+plus a topology entry; deployments sharing a class must agree on both specs).
 Inventory validation counts workers as the sum of all replicas; names must be unique.
 
 ### 3.6 `cni` — Container Network Interface (Talos bootstrap only)
@@ -489,9 +531,8 @@ Kubernetes IPAM, `cgroup.autoMount.enabled=false` + `cgroup.hostRoot`, and the
 restricted `securityContext.capabilities` lists (`ciliumAgent`,
 `cleanCiliumState`). Environment-specific values (BGP, native routing, Gateway
 API, Hubble, resource limits) go in `values`; see
-`examples/resources/capi_cluster/cilium-values.yaml`. `cni` is a new Optional
-attribute in schema version 2, so no version bump; the upgraders emit
-`cni: null`.
+`examples/resources/capi_cluster/cilium-values.yaml`. `cni` was added in schema version 2 without a version bump; the upgraders
+emit `cni: null`.
 
 `cni.version` must be a tag that exists on `oci://quay.io/cilium/charts/cilium`.
 quay retains only recent patch releases and has no floating `latest`, so an old
@@ -524,37 +565,76 @@ so the CRDs exist when Cilium's GatewayClass is rendered. Do not set
 For a pivoted CAPT workload cluster (not the Talos bootstrap path), CNI is a
 HelmChartProxy concern and out of scope here.
 
-### 3.6 `template` — Cluster Template Source and Variables
+### 3.6 `network`, `cluster_class` and generated manifests
+
+There is no cluster template. `internal/capi/generate.go` builds the CAPI
+objects from the provider set (`ManifestGenerator`, default
+`NewManifestGenerator(NewCRDKindResolver())`), and `Manager.CreateCluster`
+server-side-applies them where it used to apply the clusterctl template.
 
 ```go
-"template": schema.SingleNestedAttribute{
+"network": schema.SingleNestedAttribute{ // Cluster.spec.clusterNetwork + controlPlaneEndpoint; mutable
     Optional: true,
     Attributes: map[string]schema.Attribute{
-        "source":    schema.StringAttribute{Optional: true}, // local path, file:// or https:// URL
-        "variables": schema.MapAttribute{ElementType: types.StringType, Optional: true},
+        "control_plane_endpoint": // { host (Required), port (Optional; the generator defaults 6443) }
+        "pods":                   // { cidr_blocks List(String) }
+        "services":               // { cidr_blocks List(String) }
+        "service_domain":         schema.StringAttribute{Optional: true},
     },
 },
 ```
 
-- `source` overrides the cluster template. Empty means the infrastructure
-  provider's release template selected by `flavor`. A bare path is made
-  absolute (`capi.templateURL`) and handed to clusterctl as a `URLSource`.
-  Provider releases usually ship a kubeadm template only, so Tinkerbell +
-  Talos needs one (see `examples/resources/capi_cluster/cluster-template-talos.yaml`).
-- `variables` become clusterctl variables on the shared config client
-  (`newClusterctlClient`), so they apply to provider component YAML and the
-  template alike and win over `clusterctl.yaml` and the environment. clusterctl
-  sets `CLUSTER_NAME`, `NAMESPACE`, `KUBERNETES_VERSION`,
-  `CONTROL_PLANE_MACHINE_COUNT` and `WORKER_MACHINE_COUNT` itself.
+**Kinds and versions are discovered, never hardcoded** (`internal/capi/kinds.go`).
+`KindCatalog` lists the CRDs labelled `cluster.x-k8s.io/provider=<label>`
+(clusterctl's manifest label: `cluster-api`, `infrastructure-tinkerbell`,
+`control-plane-talos`, ...) and resolves a kind by suffix (`Cluster`,
+`ClusterTemplate`, `MachineTemplate`, `ControlPlane`, `ControlPlaneTemplate`,
+`ConfigTemplate`; shortest match wins, ties are an error). The API version is
+the newest served version named by the CRD's contract label for the core
+contract in use (`cluster.x-k8s.io/v1beta2: v1beta1` on Talos CRDs), else the
+storage version. The control-plane CRD's OpenAPI schema decides the
+machine-template ref shape (`machineTemplate.spec.infrastructureRef{apiGroup}`
+vs the legacy `machineTemplate.infrastructureRef{apiVersion}`); core refs
+follow the core version. Missing kinds fail with `ErrKindNotFound` naming the
+label and suffix.
 
-**Backend:** `CreateClusterOptions.TemplateSource` / `.Variables` →
-`TemplateOptions.Source` / `.Variables` and `InitOptions.Variables`.
+**Direct mode** (`cluster_class = false`): `Cluster` `<name>` (network settings
++ refs), `<Infra>Cluster` `<name>`, `<CP>ControlPlane` `<name>-control-plane`
+(`version`, `replicas`, machine template ref), and per machine deployment a
+`MachineDeployment` `<name>-<md>` with `<Infra>MachineTemplate` and
+`<Bootstrap>ConfigTemplate`. **ClusterClass mode** (`cluster_class = true`):
+`<Infra>ClusterTemplate`, `<CP>ControlPlaneTemplate`, per-class machine and
+config templates, a `ClusterClass` `<name>` and a `Cluster` whose
+`spec.topology` comes from `topology`; init gets `CLUSTER_TOPOLOGY=true` (the
+gate is Alpha/off in cluster-api v1.14), `kubernetes_version` is required and
+the v1beta2 core contract is required.
+
+**Spec assembly** for every provider object: `providerDefaults` (required-field
+minimums: Talos `generateType` per role, kubeadm `kubeadmConfigSpec: {}`) ←
+`resource_config` (RFC 7396: nested maps merge, lists/scalars replace, `null`
+deletes) ← generator-owned wiring set last (refs, names, `version`,
+`replicas`, `clusterName`, labels). Immutable templates are named
+`<base>-<8 hex of sha256(spec JSON)>`, so a spec change is a new object plus a
+moved ref (CAPI rolls it out); stale templates stay until cluster deletion.
+An existing template-created cluster therefore sees one control-plane rollout
+on its first apply after upgrading, because its machine template is renamed.
+
+The waiter (`internal/capi/waiter.go`) watches the core `Cluster`'s
+`ControlPlaneInitialized` and `Available`/`Ready` conditions at the discovered
+core version, so `wait.enabled` works for any control-plane provider.
+
+Golden manifests live in `internal/capi/testdata/golden/`; CRD fixtures in
+`internal/capi/testdata/crds/` (real CAPT/CACPPT/CABPT CRDs trimmed to kinds,
+labels, versions and the `machineTemplate` schema slice, plus synthetic
+core/docker/kubeadm sets and a v1beta1-contract set).
 
 ### 3.7 Removed Attributes
 
 `infrastructure.provider`, `bootstrap.provider`, `control_plane.provider`,
 `control_plane.machine_count`, `core.provider`, `workers`, and the `addons`
 list were replaced by the provider maps and `topology` in schema version 2.
+`template` (`source`, `variables`) and `flavor` were removed in schema
+version 3 when manifest generation replaced clusterctl templates.
 
 ### 3.8 `inventory` — Hardware Inventory
 
@@ -744,7 +824,7 @@ Every nested attribute has a corresponding Go model struct. Struct names follow 
 type ClusterResourceModel struct {
     Name              types.String `tfsdk:"name"`
     KubernetesVersion types.String `tfsdk:"kubernetes_version"`
-    Flavor            types.String `tfsdk:"flavor"`
+    ClusterClass      types.Bool   `tfsdk:"cluster_class"`
     Id                types.String `tfsdk:"id"`
 
     Management     types.Object `tfsdk:"management"`
@@ -755,8 +835,8 @@ type ClusterResourceModel struct {
     IPAM           types.Map    `tfsdk:"ipam"`
     Addon          types.Map    `tfsdk:"addon"`
     Topology       types.Object `tfsdk:"topology"`
+    Network        types.Object `tfsdk:"network"`   // ClusterNetworkModel {control_plane_endpoint, pods, services, service_domain}
     CNI            types.Object `tfsdk:"cni"`       // CNIModel {provider, version, values}
-    Template       types.Object `tfsdk:"template"`   // TemplateModel {source, variables}
     Inventory      types.Object `tfsdk:"inventory"`
     Wait           types.Object `tfsdk:"wait"`
     Output         types.Object `tfsdk:"output"`
@@ -785,6 +865,7 @@ type ProviderModel struct {
     AdditionalManifests   types.String `tfsdk:"additional_manifests"`
     ManifestPatches       types.List   `tfsdk:"manifest_patches"`
     Patches               types.List   `tfsdk:"patches"` // []PatchModel
+    ResourceConfig        types.String `tfsdk:"resource_config"` // YAML/JSON → capi.ProviderConfig.ResourceConfig
 }
 
 type FetchConfigModel struct {
@@ -800,7 +881,8 @@ type TopologyModel struct {
 }
 
 type ControlPlaneTopologyModel struct {
-    Replicas types.Int64 `tfsdk:"replicas"`
+    Replicas       types.Int64  `tfsdk:"replicas"`
+    Infrastructure types.String `tfsdk:"infrastructure"` // YAML/JSON
 }
 
 type WorkersTopologyModel struct {
@@ -808,11 +890,20 @@ type WorkersTopologyModel struct {
 }
 
 type MachineDeploymentModel struct {
-    Name          types.String `tfsdk:"name"`
-    Class         types.String `tfsdk:"class"`
-    Replicas      types.Int64  `tfsdk:"replicas"`
-    FailureDomain types.String `tfsdk:"failure_domain"`
-    Metadata      types.Object `tfsdk:"metadata"` // TopologyMetadataModel {labels, annotations}
+    Name           types.String `tfsdk:"name"`
+    Class          types.String `tfsdk:"class"`
+    Replicas       types.Int64  `tfsdk:"replicas"`
+    FailureDomain  types.String `tfsdk:"failure_domain"`
+    Metadata       types.Object `tfsdk:"metadata"` // TopologyMetadataModel {labels, annotations}
+    Infrastructure types.String `tfsdk:"infrastructure"` // YAML/JSON
+    Bootstrap      types.String `tfsdk:"bootstrap"`      // YAML/JSON
+}
+
+type ClusterNetworkModel struct {
+    ControlPlaneEndpoint types.Object `tfsdk:"control_plane_endpoint"` // EndpointModel {host, port}
+    Pods                 types.Object `tfsdk:"pods"`                   // NetworkRangesModel {cidr_blocks}
+    Services             types.Object `tfsdk:"services"`               // NetworkRangesModel
+    ServiceDomain        types.String `tfsdk:"service_domain"`
 }
 
 type InventoryModel struct {
@@ -1310,11 +1401,15 @@ func (r *ClusterResource) Schema(ctx context.Context, req resource.SchemaRequest
 |---------|-------------|-----------------|
 | 0 | Flat attributes | N/A (initial) |
 | 1 | Nested objects + inventory | All provider/count fields moved into nested objects |
-| 2 | Provider maps, `fetch_config` owner/repository, `topology`, `ipam` (current) | `provider = "name:version"` strings become map keys + `version`; `workers` and `addons` removed; counts move to `topology` (`replicas`) |
+| 2 | Provider maps, `fetch_config` owner/repository, `topology`, `ipam` | `provider = "name:version"` strings become map keys + `version`; `workers` and `addons` removed; counts move to `topology` (`replicas`) |
+| 3 | Generated manifests: `resource_config`, `network`, `cluster_class`, topology specs (current) | `template` and `flavor` removed |
 
-Both the v0 and v1 upgraders emit v2 directly (Terraform does not chain them).
-The v1→v2 upgrader rewrites the raw state JSON (`cluster_resource_upgrade.go`);
-a legacy worker count becomes one machine deployment named `md-0`.
+Every upgrader emits v3 directly (Terraform does not chain them). The v1 and
+v2 upgraders rewrite the raw state JSON (`cluster_resource_upgrade.go`,
+`upgradeV1JSON` = v1→v2→v3, `upgradeV2JSON` = v2→v3); a legacy worker count
+becomes one machine deployment named `md-0`, and v3 adds `cluster_class: false`,
+`network: null`, `resource_config: null` on every provider entry and null
+`infrastructure`/`bootstrap` on the topology entries.
 
 ---
 
@@ -1398,7 +1493,9 @@ Quick reference for where every attribute lives in the schema:
 |---|---|---|---|
 | `name` | `name` | `StringAttribute` Required | Immutable (RequiresReplace) |
 | `kubernetes_version` | `kubernetes_version` | `StringAttribute` Optional | **Mutable** |
-| `flavor` | `flavor` | `StringAttribute` Optional | **Mutable** |
+| `flavor` | *(removed in v3)* | — | — |
+| *(new)* | `cluster_class` | `BoolAttribute` Optional | Immutable |
+| *(new)* | `network.control_plane_endpoint.{host,port}` / `network.{pods,services}.cidr_blocks` / `network.service_domain` | `SingleNestedAttribute` Optional | **Mutable** |
 | `id` | `id` | `StringAttribute` Computed | Computed |
 | `management_kubeconfig` | `management.kubeconfig` | `StringAttribute` Optional | Immutable |
 | `skip_init` | `management.skip_init` | `BoolAttribute` Optional | **Mutable** |
@@ -1411,11 +1508,12 @@ Quick reference for where every attribute lives in the schema:
 | *(new)* | `ipam.<name>` | `MapNestedAttribute` Optional | Immutable |
 | *(was `addons[]`)* | `addon.<name>` | `MapNestedAttribute` Optional | Immutable |
 | *(new)* | `<map>.<name>.fetch_config.{owner,repository,url,oci}` | `SingleNestedAttribute` Optional | Immutable |
+| *(new)* | `<map>.<name>.resource_config` | `StringAttribute` (YAML/JSON) Optional | **Mutable** (in-place re-apply) |
 | *(new)* | `cni.provider` / `cni.version` / `cni.values` | `SingleNestedAttribute` Optional | **Mutable** (Talos bootstrap only) |
-| *(new)* | `template.source` | `StringAttribute` Optional | **Mutable** |
-| *(new)* | `template.variables` | `MapAttribute` Optional | **Mutable** |
 | `control_plane_machine_count` | `topology.control_plane.replicas` | `Int64Attribute` Optional | **Mutable** |
+| *(new)* | `topology.control_plane.infrastructure` | `StringAttribute` (YAML/JSON) Optional | **Mutable** (template rotation) |
 | `worker_machine_count` | `topology.workers.machine_deployments[].replicas` | `ListNestedAttribute` Optional | **Mutable** |
+| *(new)* | `topology.workers.machine_deployments[].{infrastructure,bootstrap}` | `StringAttribute` (YAML/JSON) Optional | **Mutable** (template rotation) |
 | *(new)* | `inventory.source` | `StringAttribute` Optional | **Mutable** |
 | *(new)* | `inventory.machine[]` | `ListNestedAttribute` Optional | **Mutable** |
 | `wait_for_ready` | `wait.enabled` | `BoolAttribute` Optional | **Mutable** |

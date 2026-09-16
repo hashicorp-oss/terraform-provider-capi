@@ -46,23 +46,23 @@ resource "capi_cluster" "example" {
 
 ### Required
 
-- `infrastructure` (Attributes Map) Infrastructure provider, keyed by name (e.g. `docker`, `tinkerbell`). Exactly one entry is required; it also selects the cluster template. Each value is a provider object modeled after the cluster-api-operator provider CRDs (`operator.cluster.x-k8s.io/v1alpha2`); customizations are applied natively by wrapping the clusterctl repository factory, so the operator itself is not required. (see [below for nested schema](#nestedatt--infrastructure))
+- `infrastructure` (Attributes Map) Infrastructure provider, keyed by name (e.g. `docker`, `tinkerbell`). Exactly one entry is required; with `control_plane` and `bootstrap` (default `kubeadm`) it selects the kinds of the generated cluster objects. Each value is a provider object modeled after the cluster-api-operator provider CRDs (`operator.cluster.x-k8s.io/v1alpha2`); customizations are applied natively by wrapping the clusterctl repository factory, so the operator itself is not required. Changing anything but `resource_config` recreates the cluster. (see [below for nested schema](#nestedatt--infrastructure))
 - `name` (String) The name of the cluster. Must be a valid DNS-1123 subdomain.
 
 ### Optional
 
-- `addon` (Attributes Map) Addon providers, keyed by name (e.g. `helm`). An empty object installs the default release. Each value is a provider object modeled after the cluster-api-operator provider CRDs (`operator.cluster.x-k8s.io/v1alpha2`); customizations are applied natively by wrapping the clusterctl repository factory, so the operator itself is not required. (see [below for nested schema](#nestedatt--addon))
-- `bootstrap` (Attributes Map) Bootstrap providers, keyed by name (e.g. `kubeadm`, `talos`). Each value is a provider object modeled after the cluster-api-operator provider CRDs (`operator.cluster.x-k8s.io/v1alpha2`); customizations are applied natively by wrapping the clusterctl repository factory, so the operator itself is not required. (see [below for nested schema](#nestedatt--bootstrap))
+- `addon` (Attributes Map) Addon providers, keyed by name (e.g. `helm`). An empty object installs the default release. Each value is a provider object modeled after the cluster-api-operator provider CRDs (`operator.cluster.x-k8s.io/v1alpha2`); customizations are applied natively by wrapping the clusterctl repository factory, so the operator itself is not required. Changing anything but `resource_config` recreates the cluster. (see [below for nested schema](#nestedatt--addon))
+- `bootstrap` (Attributes Map) Bootstrap providers, keyed by name (e.g. `kubeadm`, `talos`). Each value is a provider object modeled after the cluster-api-operator provider CRDs (`operator.cluster.x-k8s.io/v1alpha2`); customizations are applied natively by wrapping the clusterctl repository factory, so the operator itself is not required. Changing anything but `resource_config` recreates the cluster. (see [below for nested schema](#nestedatt--bootstrap))
+- `cluster_class` (Boolean) Generate a `ClusterClass` and a `Cluster` with `spec.topology` instead of direct objects. Every provider must ship `*Template` kinds; the `ClusterTopology` feature gate is enabled at init. Default `false`.
 - `cni` (Attributes) Container Network Interface for the workload cluster, replacing Talos's built-in flannel. Only valid with a `talos` management bootstrap; it disables the built-in CNI and kube-proxy (KubePrism handles the API server) and installs the CNI as a Helm release. (see [below for nested schema](#nestedatt--cni))
-- `control_plane` (Attributes Map) Control plane providers, keyed by name (e.g. `kubeadm`, `talos`). Each value is a provider object modeled after the cluster-api-operator provider CRDs (`operator.cluster.x-k8s.io/v1alpha2`); customizations are applied natively by wrapping the clusterctl repository factory, so the operator itself is not required. (see [below for nested schema](#nestedatt--control_plane))
-- `core` (Attributes Map) Core CAPI provider, keyed by name (`cluster-api`). Omit to let clusterctl install the default. Each value is a provider object modeled after the cluster-api-operator provider CRDs (`operator.cluster.x-k8s.io/v1alpha2`); customizations are applied natively by wrapping the clusterctl repository factory, so the operator itself is not required. (see [below for nested schema](#nestedatt--core))
-- `flavor` (String) Cluster template flavor to use. Maps to clusterctl template flavors.
+- `control_plane` (Attributes Map) Control plane providers, keyed by name (e.g. `kubeadm`, `talos`). Each value is a provider object modeled after the cluster-api-operator provider CRDs (`operator.cluster.x-k8s.io/v1alpha2`); customizations are applied natively by wrapping the clusterctl repository factory, so the operator itself is not required. Changing anything but `resource_config` recreates the cluster. (see [below for nested schema](#nestedatt--control_plane))
+- `core` (Attributes Map) Core CAPI provider, keyed by name (`cluster-api`). Omit to let clusterctl install the default. Each value is a provider object modeled after the cluster-api-operator provider CRDs (`operator.cluster.x-k8s.io/v1alpha2`); customizations are applied natively by wrapping the clusterctl repository factory, so the operator itself is not required. Changing anything but `resource_config` recreates the cluster. (see [below for nested schema](#nestedatt--core))
 - `inventory` (Attributes) Hardware inventory for bare-metal provisioning. (see [below for nested schema](#nestedatt--inventory))
-- `ipam` (Attributes Map) IPAM providers, keyed by name (e.g. `in-cluster`, `unifi`). Each value is a provider object modeled after the cluster-api-operator provider CRDs (`operator.cluster.x-k8s.io/v1alpha2`); customizations are applied natively by wrapping the clusterctl repository factory, so the operator itself is not required. (see [below for nested schema](#nestedatt--ipam))
+- `ipam` (Attributes Map) IPAM providers, keyed by name (e.g. `in-cluster`, `unifi`). Each value is a provider object modeled after the cluster-api-operator provider CRDs (`operator.cluster.x-k8s.io/v1alpha2`); customizations are applied natively by wrapping the clusterctl repository factory, so the operator itself is not required. Changing anything but `resource_config` recreates the cluster. (see [below for nested schema](#nestedatt--ipam))
 - `kubernetes_version` (String) Kubernetes version for the workload cluster (e.g., `v1.31.0`).
 - `management` (Attributes) Management cluster configuration. Controls how the CAPI lifecycle is managed. (see [below for nested schema](#nestedatt--management))
+- `network` (Attributes) Cluster networking, as in `Cluster.spec.clusterNetwork` and `Cluster.spec.controlPlaneEndpoint`. Omit for providers that fill the endpoint themselves (e.g. Docker). (see [below for nested schema](#nestedatt--network))
 - `output` (Attributes) Output configuration. (see [below for nested schema](#nestedatt--output))
-- `template` (Attributes) Cluster template configuration: where the workload cluster template comes from and the clusterctl variables substituted into it. (see [below for nested schema](#nestedatt--template))
 - `topology` (Attributes) Workload cluster topology. Mirrors `Cluster.spec.topology`. (see [below for nested schema](#nestedatt--topology))
 - `wait` (Attributes) Readiness wait configuration. (see [below for nested schema](#nestedatt--wait))
 
@@ -84,6 +84,7 @@ Optional:
 - `manager` (Attributes) Controller manager configuration for the provider. (see [below for nested schema](#nestedatt--infrastructure--manager))
 - `manifest_patches` (List of String) JSON merge patches applied to rendered provider manifests. Each entry is an inline YAML/JSON blob string (RFC 7396). Cannot be used together with `patches`.
 - `patches` (Attributes List) Strategic merge patches or RFC 6902 JSON patches applied to rendered provider manifests. Cannot be used together with `manifest_patches`. (see [below for nested schema](#nestedatt--infrastructure--patches))
+- `resource_config` (String) Provider-specific settings as a YAML or JSON object (typically `yamlencode({ ... })`), deep-merged into the spec of the provider's generated cluster object (RFC 7396: nested maps merge, lists and scalars replace, `null` deletes): `infrastructure` → the `<Infra>Cluster` (or `<Infra>ClusterTemplate` with `cluster_class`), `control_plane` → the `<CP>ControlPlane` (or its template), `bootstrap` → the default worker `<Bootstrap>ConfigTemplate`. Use the CRD's camelCase field names. Not valid on `core`, `ipam` or `addon`. Changes apply in place.
 - `secret_config_variables` (Map of String, Sensitive) Sensitive template variables injected into the provider's component YAML. Same mechanism as `config_variables` but for secret values.
 - `version` (String) Release tag to install (e.g. `v0.7.9`). Omit for clusterctl's latest release.
 
@@ -170,6 +171,7 @@ Optional:
 - `manager` (Attributes) Controller manager configuration for the provider. (see [below for nested schema](#nestedatt--addon--manager))
 - `manifest_patches` (List of String) JSON merge patches applied to rendered provider manifests. Each entry is an inline YAML/JSON blob string (RFC 7396). Cannot be used together with `patches`.
 - `patches` (Attributes List) Strategic merge patches or RFC 6902 JSON patches applied to rendered provider manifests. Cannot be used together with `manifest_patches`. (see [below for nested schema](#nestedatt--addon--patches))
+- `resource_config` (String) Provider-specific settings as a YAML or JSON object (typically `yamlencode({ ... })`), deep-merged into the spec of the provider's generated cluster object (RFC 7396: nested maps merge, lists and scalars replace, `null` deletes): `infrastructure` → the `<Infra>Cluster` (or `<Infra>ClusterTemplate` with `cluster_class`), `control_plane` → the `<CP>ControlPlane` (or its template), `bootstrap` → the default worker `<Bootstrap>ConfigTemplate`. Use the CRD's camelCase field names. Not valid on `core`, `ipam` or `addon`. Changes apply in place.
 - `secret_config_variables` (Map of String, Sensitive) Sensitive template variables injected into the provider's component YAML. Same mechanism as `config_variables` but for secret values.
 - `version` (String) Release tag to install (e.g. `v0.7.9`). Omit for clusterctl's latest release.
 
@@ -256,6 +258,7 @@ Optional:
 - `manager` (Attributes) Controller manager configuration for the provider. (see [below for nested schema](#nestedatt--bootstrap--manager))
 - `manifest_patches` (List of String) JSON merge patches applied to rendered provider manifests. Each entry is an inline YAML/JSON blob string (RFC 7396). Cannot be used together with `patches`.
 - `patches` (Attributes List) Strategic merge patches or RFC 6902 JSON patches applied to rendered provider manifests. Cannot be used together with `manifest_patches`. (see [below for nested schema](#nestedatt--bootstrap--patches))
+- `resource_config` (String) Provider-specific settings as a YAML or JSON object (typically `yamlencode({ ... })`), deep-merged into the spec of the provider's generated cluster object (RFC 7396: nested maps merge, lists and scalars replace, `null` deletes): `infrastructure` → the `<Infra>Cluster` (or `<Infra>ClusterTemplate` with `cluster_class`), `control_plane` → the `<CP>ControlPlane` (or its template), `bootstrap` → the default worker `<Bootstrap>ConfigTemplate`. Use the CRD's camelCase field names. Not valid on `core`, `ipam` or `addon`. Changes apply in place.
 - `secret_config_variables` (Map of String, Sensitive) Sensitive template variables injected into the provider's component YAML. Same mechanism as `config_variables` but for secret values.
 - `version` (String) Release tag to install (e.g. `v0.7.9`). Omit for clusterctl's latest release.
 
@@ -365,6 +368,7 @@ Optional:
 - `manager` (Attributes) Controller manager configuration for the provider. (see [below for nested schema](#nestedatt--control_plane--manager))
 - `manifest_patches` (List of String) JSON merge patches applied to rendered provider manifests. Each entry is an inline YAML/JSON blob string (RFC 7396). Cannot be used together with `patches`.
 - `patches` (Attributes List) Strategic merge patches or RFC 6902 JSON patches applied to rendered provider manifests. Cannot be used together with `manifest_patches`. (see [below for nested schema](#nestedatt--control_plane--patches))
+- `resource_config` (String) Provider-specific settings as a YAML or JSON object (typically `yamlencode({ ... })`), deep-merged into the spec of the provider's generated cluster object (RFC 7396: nested maps merge, lists and scalars replace, `null` deletes): `infrastructure` → the `<Infra>Cluster` (or `<Infra>ClusterTemplate` with `cluster_class`), `control_plane` → the `<CP>ControlPlane` (or its template), `bootstrap` → the default worker `<Bootstrap>ConfigTemplate`. Use the CRD's camelCase field names. Not valid on `core`, `ipam` or `addon`. Changes apply in place.
 - `secret_config_variables` (Map of String, Sensitive) Sensitive template variables injected into the provider's component YAML. Same mechanism as `config_variables` but for secret values.
 - `version` (String) Release tag to install (e.g. `v0.7.9`). Omit for clusterctl's latest release.
 
@@ -451,6 +455,7 @@ Optional:
 - `manager` (Attributes) Controller manager configuration for the provider. (see [below for nested schema](#nestedatt--core--manager))
 - `manifest_patches` (List of String) JSON merge patches applied to rendered provider manifests. Each entry is an inline YAML/JSON blob string (RFC 7396). Cannot be used together with `patches`.
 - `patches` (Attributes List) Strategic merge patches or RFC 6902 JSON patches applied to rendered provider manifests. Cannot be used together with `manifest_patches`. (see [below for nested schema](#nestedatt--core--patches))
+- `resource_config` (String) Provider-specific settings as a YAML or JSON object (typically `yamlencode({ ... })`), deep-merged into the spec of the provider's generated cluster object (RFC 7396: nested maps merge, lists and scalars replace, `null` deletes): `infrastructure` → the `<Infra>Cluster` (or `<Infra>ClusterTemplate` with `cluster_class`), `control_plane` → the `<CP>ControlPlane` (or its template), `bootstrap` → the default worker `<Bootstrap>ConfigTemplate`. Use the CRD's camelCase field names. Not valid on `core`, `ipam` or `addon`. Changes apply in place.
 - `secret_config_variables` (Map of String, Sensitive) Sensitive template variables injected into the provider's component YAML. Same mechanism as `config_variables` but for secret values.
 - `version` (String) Release tag to install (e.g. `v0.7.9`). Omit for clusterctl's latest release.
 
@@ -595,6 +600,7 @@ Optional:
 - `manager` (Attributes) Controller manager configuration for the provider. (see [below for nested schema](#nestedatt--ipam--manager))
 - `manifest_patches` (List of String) JSON merge patches applied to rendered provider manifests. Each entry is an inline YAML/JSON blob string (RFC 7396). Cannot be used together with `patches`.
 - `patches` (Attributes List) Strategic merge patches or RFC 6902 JSON patches applied to rendered provider manifests. Cannot be used together with `manifest_patches`. (see [below for nested schema](#nestedatt--ipam--patches))
+- `resource_config` (String) Provider-specific settings as a YAML or JSON object (typically `yamlencode({ ... })`), deep-merged into the spec of the provider's generated cluster object (RFC 7396: nested maps merge, lists and scalars replace, `null` deletes): `infrastructure` → the `<Infra>Cluster` (or `<Infra>ClusterTemplate` with `cluster_class`), `control_plane` → the `<CP>ControlPlane` (or its template), `bootstrap` → the default worker `<Bootstrap>ConfigTemplate`. Use the CRD's camelCase field names. Not valid on `core`, `ipam` or `addon`. Changes apply in place.
 - `secret_config_variables` (Map of String, Sensitive) Sensitive template variables injected into the provider's component YAML. Same mechanism as `config_variables` but for secret values.
 - `version` (String) Release tag to install (e.g. `v0.7.9`). Omit for clusterctl's latest release.
 
@@ -757,21 +763,51 @@ Optional:
 
 
 
+<a id="nestedatt--network"></a>
+### Nested Schema for `network`
+
+Optional:
+
+- `control_plane_endpoint` (Attributes) API server endpoint (`Cluster.spec.controlPlaneEndpoint`); on bare metal, the control plane VIP. (see [below for nested schema](#nestedatt--network--control_plane_endpoint))
+- `pods` (Attributes) Pod network ranges (`clusterNetwork.pods`). (see [below for nested schema](#nestedatt--network--pods))
+- `service_domain` (String) Cluster DNS domain (`clusterNetwork.serviceDomain`), e.g. `cluster.local`.
+- `services` (Attributes) Service network ranges (`clusterNetwork.services`). (see [below for nested schema](#nestedatt--network--services))
+
+<a id="nestedatt--network--control_plane_endpoint"></a>
+### Nested Schema for `network.control_plane_endpoint`
+
+Required:
+
+- `host` (String) Endpoint host or IP.
+
+Optional:
+
+- `port` (Number) Endpoint port. Defaults to 6443.
+
+
+<a id="nestedatt--network--pods"></a>
+### Nested Schema for `network.pods`
+
+Optional:
+
+- `cidr_blocks` (List of String) Pod CIDR blocks.
+
+
+<a id="nestedatt--network--services"></a>
+### Nested Schema for `network.services`
+
+Optional:
+
+- `cidr_blocks` (List of String) Service CIDR blocks.
+
+
+
 <a id="nestedatt--output"></a>
 ### Nested Schema for `output`
 
 Optional:
 
 - `kubeconfig_path` (String) File path for the workload cluster kubeconfig.
-
-
-<a id="nestedatt--template"></a>
-### Nested Schema for `template`
-
-Optional:
-
-- `source` (String) Custom cluster template: a local path, a `file://` URL, or an `https://` URL (GitHub blob or raw URLs work). Omit to use the infrastructure provider's release template selected by `flavor`. Required for combinations the provider release does not ship, such as Tinkerbell with Talos.
-- `variables` (Map of String) clusterctl variables substituted into the template and provider components as `${VAR}` (e.g. `CONTROL_PLANE_VIP`, `POD_CIDR`). They take precedence over the clusterctl config file and environment. `CLUSTER_NAME`, `NAMESPACE`, `KUBERNETES_VERSION`, `CONTROL_PLANE_MACHINE_COUNT` and `WORKER_MACHINE_COUNT` are set from the resource.
 
 
 <a id="nestedatt--topology"></a>
@@ -787,6 +823,7 @@ Optional:
 
 Optional:
 
+- `infrastructure` (String) Spec of the control plane's `<Infra>MachineTemplate` (e.g. Tinkerbell `hardwareAffinity`) as YAML or JSON with the CRD's camelCase keys, typically `yamlencode({ ... })`. A change creates a new template and rolls the control plane.
 - `replicas` (Number) Number of control plane machines. Use an odd number for HA (1, 3, 5).
 
 
@@ -795,7 +832,7 @@ Optional:
 
 Optional:
 
-- `machine_deployments` (Attributes List) Worker MachineDeployments, as in `Cluster.spec.topology.workers.machineDeployments`. clusterctl flavor templates expose a single `WORKER_MACHINE_COUNT`, which is taken from the first entry's `replicas`. (see [below for nested schema](#nestedatt--topology--workers--machine_deployments))
+- `machine_deployments` (Attributes List) Worker MachineDeployments, as in `Cluster.spec.topology.workers.machineDeployments`. Each entry becomes a MachineDeployment with its own machine and bootstrap config templates (or, with `cluster_class`, a worker class and a topology entry). (see [below for nested schema](#nestedatt--topology--workers--machine_deployments))
 
 <a id="nestedatt--topology--workers--machine_deployments"></a>
 ### Nested Schema for `topology.workers.machine_deployments`
@@ -806,8 +843,10 @@ Required:
 
 Optional:
 
-- `class` (String) ClusterClass worker class (`machineDeploymentClass` name). Unused by flavor templates.
+- `bootstrap` (String) Spec of this deployment's `<Bootstrap>ConfigTemplate` as YAML or JSON. Omit to use `bootstrap.<name>.resource_config`.
+- `class` (String) Worker class name, used with `cluster_class`: deployments sharing a class share templates and must agree on `infrastructure` and `bootstrap`. Defaults to `name`.
 - `failure_domain` (String) Failure domain the machines are placed in.
+- `infrastructure` (String) Spec of this deployment's `<Infra>MachineTemplate` as YAML or JSON with the CRD's camelCase keys, typically `yamlencode({ ... })`. A change creates a new template and rolls the deployment.
 - `metadata` (Attributes) Labels and annotations applied to the machines. (see [below for nested schema](#nestedatt--topology--workers--machine_deployments--metadata))
 - `replicas` (Number) Number of machines.
 

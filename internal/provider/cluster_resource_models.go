@@ -4,8 +4,9 @@
 package provider
 
 import (
+	"bytes"
 	"context"
-	"errors"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -15,6 +16,8 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-framework/types/basetypes"
+
+	"sigs.k8s.io/yaml"
 
 	"github.com/tinkerbell-community/terraform-provider-capi/internal/capi"
 )
@@ -143,16 +146,16 @@ type HelmReleaseModel struct {
 // cluster-api-operator provider CRDs. Customizations are applied natively by
 // wrapping the clusterctl client's repository factory.
 type ProviderModel struct {
-	Version               types.String  `tfsdk:"version"`
-	FetchConfig           types.Object  `tfsdk:"fetch_config"`
-	ConfigVariables       types.Map     `tfsdk:"config_variables"`
-	SecretConfigVariables types.Map     `tfsdk:"secret_config_variables"`
-	Deployment            types.Object  `tfsdk:"deployment"`
-	Manager               types.Object  `tfsdk:"manager"`
-	AdditionalManifests   types.String  `tfsdk:"additional_manifests"`
-	ManifestPatches       types.List    `tfsdk:"manifest_patches"`
-	Patches               types.List    `tfsdk:"patches"`
-	ResourceConfig        types.Dynamic `tfsdk:"resource_config"` // merged into the provider's cluster object spec
+	Version               types.String `tfsdk:"version"`
+	FetchConfig           types.Object `tfsdk:"fetch_config"`
+	ConfigVariables       types.Map    `tfsdk:"config_variables"`
+	SecretConfigVariables types.Map    `tfsdk:"secret_config_variables"`
+	Deployment            types.Object `tfsdk:"deployment"`
+	Manager               types.Object `tfsdk:"manager"`
+	AdditionalManifests   types.String `tfsdk:"additional_manifests"`
+	ManifestPatches       types.List   `tfsdk:"manifest_patches"`
+	Patches               types.List   `tfsdk:"patches"`
+	ResourceConfig        types.String `tfsdk:"resource_config"` // YAML/JSON object merged into the provider's cluster object spec
 }
 
 // CNIModel configures the workload cluster CNI, replacing Talos's default.
@@ -228,8 +231,8 @@ type TopologyModel struct {
 // ControlPlaneTopologyModel mirrors Cluster.spec.topology.controlPlane plus
 // the control plane's machine template spec.
 type ControlPlaneTopologyModel struct {
-	Replicas       types.Int64   `tfsdk:"replicas"`
-	Infrastructure types.Dynamic `tfsdk:"infrastructure"`
+	Replicas       types.Int64  `tfsdk:"replicas"`
+	Infrastructure types.String `tfsdk:"infrastructure"` // YAML/JSON <Infra>MachineTemplate spec
 }
 
 // WorkersTopologyModel mirrors Cluster.spec.topology.workers.
@@ -239,13 +242,13 @@ type WorkersTopologyModel struct {
 
 // MachineDeploymentModel mirrors Cluster.spec.topology.workers.machineDeployments[].
 type MachineDeploymentModel struct {
-	Name           types.String  `tfsdk:"name"`
-	Class          types.String  `tfsdk:"class"`
-	Replicas       types.Int64   `tfsdk:"replicas"`
-	FailureDomain  types.String  `tfsdk:"failure_domain"`
-	Metadata       types.Object  `tfsdk:"metadata"`       // TopologyMetadataModel
-	Infrastructure types.Dynamic `tfsdk:"infrastructure"` // <Infra>MachineTemplate spec
-	Bootstrap      types.Dynamic `tfsdk:"bootstrap"`      // <Bootstrap>ConfigTemplate spec
+	Name           types.String `tfsdk:"name"`
+	Class          types.String `tfsdk:"class"`
+	Replicas       types.Int64  `tfsdk:"replicas"`
+	FailureDomain  types.String `tfsdk:"failure_domain"`
+	Metadata       types.Object `tfsdk:"metadata"`       // TopologyMetadataModel
+	Infrastructure types.String `tfsdk:"infrastructure"` // YAML/JSON <Infra>MachineTemplate spec
+	Bootstrap      types.String `tfsdk:"bootstrap"`      // YAML/JSON <Bootstrap>ConfigTemplate spec
 }
 
 // ClusterNetworkModel mirrors Cluster.spec.clusterNetwork and controlPlaneEndpoint.
@@ -415,7 +418,7 @@ func providerAttrTypes() map[string]attr.Type {
 		"additional_manifests":    types.StringType,
 		"manifest_patches":        types.ListType{ElemType: types.StringType},
 		"patches":                 types.ListType{ElemType: types.ObjectType{AttrTypes: patchAttrTypes()}},
-		"resource_config":         types.DynamicType,
+		"resource_config":         types.StringType,
 	}
 }
 
@@ -457,7 +460,7 @@ func topologyAttrTypes() map[string]attr.Type {
 }
 
 func controlPlaneTopologyAttrTypes() map[string]attr.Type {
-	return map[string]attr.Type{"replicas": types.Int64Type, "infrastructure": types.DynamicType}
+	return map[string]attr.Type{"replicas": types.Int64Type, "infrastructure": types.StringType}
 }
 
 func workersTopologyAttrTypes() map[string]attr.Type {
@@ -473,8 +476,8 @@ func machineDeploymentAttrTypes() map[string]attr.Type {
 		"replicas":       types.Int64Type,
 		"failure_domain": types.StringType,
 		"metadata":       types.ObjectType{AttrTypes: topologyMetadataAttrTypes()},
-		"infrastructure": types.DynamicType,
-		"bootstrap":      types.DynamicType,
+		"infrastructure": types.StringType,
+		"bootstrap":      types.StringType,
 	}
 }
 
@@ -771,7 +774,7 @@ func extractTopology(ctx context.Context, data *ClusterResourceModel) (cp capi.C
 			v := c.Replicas.ValueInt64()
 			cp.Replicas = &v
 		}
-		infra, d := dynamicObject(ctx, c.Infrastructure, "topology.control_plane.infrastructure")
+		infra, d := yamlObject(c.Infrastructure, "topology.control_plane.infrastructure")
 		diags.Append(d...)
 		cp.Infrastructure = infra
 	}
@@ -784,9 +787,9 @@ func extractTopology(ctx context.Context, data *ClusterResourceModel) (cp capi.C
 			for i, m := range models {
 				md := capi.MachineDeploymentTopology{Name: m.Name.ValueString()}
 				var d diag.Diagnostics
-				md.Infrastructure, d = dynamicObject(ctx, m.Infrastructure, fmt.Sprintf("topology.workers.machine_deployments[%d].infrastructure", i))
+				md.Infrastructure, d = yamlObject(m.Infrastructure, fmt.Sprintf("topology.workers.machine_deployments[%d].infrastructure", i))
 				diags.Append(d...)
-				md.Bootstrap, d = dynamicObject(ctx, m.Bootstrap, fmt.Sprintf("topology.workers.machine_deployments[%d].bootstrap", i))
+				md.Bootstrap, d = yamlObject(m.Bootstrap, fmt.Sprintf("topology.workers.machine_deployments[%d].bootstrap", i))
 				diags.Append(d...)
 				if !m.Class.IsNull() {
 					md.Class = m.Class.ValueString()
@@ -872,92 +875,57 @@ func extractNetwork(ctx context.Context, data *ClusterResourceModel) (capi.Netwo
 	return out, diags
 }
 
-// dynamicObject converts a dynamic attribute holding an object or map into
-// plain Go values for the backend (int64 for integral numbers, float64
-// otherwise, []any for tuples/lists/sets, map[string]any for objects/maps,
-// nil for null). Null and unknown yield nil; anything but an object is an
-// error naming the attribute.
-func dynamicObject(ctx context.Context, d types.Dynamic, where string) (map[string]any, diag.Diagnostics) {
+// yamlObject decodes a YAML or JSON object attribute (e.g. yamlencode({...}))
+// into plain Go values for the backend: integral numbers become int64, other
+// numbers float64, sequences []any, mappings map[string]any, null nil. Null,
+// unknown and blank yield nil; anything but an object is an error naming the
+// attribute.
+func yamlObject(s types.String, where string) (map[string]any, diag.Diagnostics) {
 	var diags diag.Diagnostics
-	if d.IsNull() || d.IsUnknown() || d.IsUnderlyingValueNull() || d.IsUnderlyingValueUnknown() {
+	if s.IsNull() || s.IsUnknown() || strings.TrimSpace(s.ValueString()) == "" {
 		return nil, diags
 	}
-	v, err := dynamicToNative(ctx, d.UnderlyingValue())
+	jsonBytes, err := yaml.YAMLToJSON([]byte(s.ValueString()))
 	if err != nil {
-		diags.AddError("Invalid "+where, fmt.Sprintf("%s: %s.", where, err))
+		diags.AddError("Invalid "+where, fmt.Sprintf("%s is not valid YAML or JSON: %s.", where, err))
 		return nil, diags
 	}
-	m, ok := v.(map[string]any)
+	dec := json.NewDecoder(bytes.NewReader(jsonBytes))
+	dec.UseNumber()
+	var v any
+	if err := dec.Decode(&v); err != nil {
+		diags.AddError("Invalid "+where, fmt.Sprintf("%s is not valid YAML or JSON: %s.", where, err))
+		return nil, diags
+	}
+	m, ok := normalizeJSON(v).(map[string]any)
 	if !ok {
-		diags.AddError("Invalid "+where, fmt.Sprintf("%s must be an object (got %s).", where, d.UnderlyingValue().Type(ctx)))
+		diags.AddError("Invalid "+where, fmt.Sprintf("%s must be a YAML/JSON object with the CRD's camelCase keys, e.g. yamlencode({ ... }).", where))
 		return nil, diags
 	}
 	return m, diags
 }
 
-// dynamicToNative converts any known framework value into plain Go values.
-func dynamicToNative(ctx context.Context, v attr.Value) (any, error) {
-	if v == nil || v.IsNull() {
-		return nil, nil
-	}
-	if v.IsUnknown() {
-		return nil, errors.New("contains a value that is not yet known")
-	}
-	switch tv := v.(type) {
-	case types.Dynamic:
-		return dynamicToNative(ctx, tv.UnderlyingValue())
-	case types.String:
-		return tv.ValueString(), nil
-	case types.Bool:
-		return tv.ValueBool(), nil
-	case types.Int64:
-		return tv.ValueInt64(), nil
-	case types.Float64:
-		return tv.ValueFloat64(), nil
-	case types.Number:
-		if f := tv.ValueBigFloat(); f.IsInt() {
-			i, _ := f.Int64()
-			return i, nil
-		} else {
-			fl, _ := f.Float64()
-			return fl, nil
+// normalizeJSON turns json.Number into int64 (integral) or float64, recursively.
+func normalizeJSON(v any) any {
+	switch t := v.(type) {
+	case json.Number:
+		if i, err := t.Int64(); err == nil {
+			return i
 		}
-	case types.Object:
-		return attrMapToNative(ctx, tv.Attributes())
-	case types.Map:
-		return attrMapToNative(ctx, tv.Elements())
-	case types.Tuple:
-		return attrListToNative(ctx, tv.Elements())
-	case types.List:
-		return attrListToNative(ctx, tv.Elements())
-	case types.Set:
-		return attrListToNative(ctx, tv.Elements())
-	}
-	return nil, fmt.Errorf("unsupported value type %s", v.Type(ctx))
-}
-
-func attrMapToNative(ctx context.Context, in map[string]attr.Value) (map[string]any, error) {
-	out := make(map[string]any, len(in))
-	for k, v := range in {
-		n, err := dynamicToNative(ctx, v)
-		if err != nil {
-			return nil, fmt.Errorf("%s: %w", k, err)
+		f, _ := t.Float64()
+		return f
+	case map[string]any:
+		for k, x := range t {
+			t[k] = normalizeJSON(x)
 		}
-		out[k] = n
-	}
-	return out, nil
-}
-
-func attrListToNative(ctx context.Context, in []attr.Value) ([]any, error) {
-	out := make([]any, len(in))
-	for i, v := range in {
-		n, err := dynamicToNative(ctx, v)
-		if err != nil {
-			return nil, fmt.Errorf("[%d]: %w", i, err)
+		return t
+	case []any:
+		for i, x := range t {
+			t[i] = normalizeJSON(x)
 		}
-		out[i] = n
+		return t
 	}
-	return out, nil
+	return v
 }
 
 // legacyTopologyObject builds a topology from the pre-v2 two counts: the
@@ -967,7 +935,7 @@ func legacyTopologyObject(ctx context.Context, cpCount, workerCount types.Int64)
 	cpObj := types.ObjectNull(controlPlaneTopologyAttrTypes())
 	if !cpCount.IsNull() && !cpCount.IsUnknown() {
 		var d diag.Diagnostics
-		cpObj, d = types.ObjectValueFrom(ctx, controlPlaneTopologyAttrTypes(), ControlPlaneTopologyModel{Replicas: cpCount, Infrastructure: types.DynamicNull()})
+		cpObj, d = types.ObjectValueFrom(ctx, controlPlaneTopologyAttrTypes(), ControlPlaneTopologyModel{Replicas: cpCount, Infrastructure: types.StringNull()})
 		diags.Append(d...)
 	}
 	wObj := types.ObjectNull(workersTopologyAttrTypes())
@@ -975,7 +943,7 @@ func legacyTopologyObject(ctx context.Context, cpCount, workerCount types.Int64)
 		md := MachineDeploymentModel{
 			Name: types.StringValue("md-0"), Class: types.StringNull(), Replicas: workerCount,
 			FailureDomain: types.StringNull(), Metadata: types.ObjectNull(topologyMetadataAttrTypes()),
-			Infrastructure: types.DynamicNull(), Bootstrap: types.DynamicNull(),
+			Infrastructure: types.StringNull(), Bootstrap: types.StringNull(),
 		}
 		list, d := types.ListValueFrom(ctx, types.ObjectType{AttrTypes: machineDeploymentAttrTypes()}, []MachineDeploymentModel{md})
 		diags.Append(d...)
@@ -1012,7 +980,7 @@ func nullProviderModel() ProviderModel {
 		AdditionalManifests:   types.StringNull(),
 		ManifestPatches:       types.ListNull(types.StringType),
 		Patches:               types.ListNull(types.ObjectType{AttrTypes: patchAttrTypes()}),
-		ResourceConfig:        types.DynamicNull(),
+		ResourceConfig:        types.StringNull(),
 	}
 }
 
@@ -1237,7 +1205,7 @@ func buildProviderConfig(ctx context.Context, name string, typ capi.ProviderType
 	}
 
 	// ResourceConfig
-	rc, d := dynamicObject(ctx, pm.ResourceConfig, fmt.Sprintf("%s[%q].resource_config", providerAttrName(typ), name))
+	rc, d := yamlObject(pm.ResourceConfig, fmt.Sprintf("%s[%q].resource_config", providerAttrName(typ), name))
 	diags.Append(d...)
 	ac.ResourceConfig = rc
 
@@ -1494,7 +1462,7 @@ func validateProviderEntry(ctx context.Context, typ capi.ProviderType, name stri
 	if !pm.ResourceConfig.IsNull() && !pm.ResourceConfig.IsUnknown() {
 		switch typ {
 		case capi.ProviderTypeInfrastructure, capi.ProviderTypeControlPlane, capi.ProviderTypeBootstrap:
-			_, d := dynamicObject(ctx, pm.ResourceConfig, where+".resource_config")
+			_, d := yamlObject(pm.ResourceConfig, where+".resource_config")
 			diags.Append(d...)
 		default:
 			diags.AddError("Invalid resource_config", where+".resource_config: only infrastructure, control_plane and bootstrap providers own a cluster object; remove it here.")

@@ -5,7 +5,7 @@ This repository contains a [Terraform](https://www.terraform.io) provider for ma
 ## Features
 
 - **Full CAPI Management Workflow**: Automated bootstrap cluster creation, CAPI initialization, workload cluster provisioning, and management pivot
-- **clusterctl Integration**: Uses the official clusterctl client library for init, template generation, move, describe, and kubeconfig operations
+- **clusterctl Integration**: Uses the official clusterctl client library for init, move, describe, and kubeconfig operations; cluster manifests are generated from the installed provider CRDs
 - **Bootstrap Cluster Lifecycle**: Automatically creates and manages kind-based bootstrap clusters when no management cluster is provided
 - **Self-Managed Clusters**: Support for pivoting CAPI management from bootstrap to workload cluster (mirrors EKS Anywhere's `moveClusterManagementTask`)
 - **Flexible Configuration**: Support for multiple infrastructure providers (Docker, AWS, Azure, etc.)
@@ -31,7 +31,7 @@ This provider implements the CAPI management workflow inspired by EKS Anywhere's
 │     └─ clusterctl init (install CAPI + infra providers)          │
 │                                                                  │
 │  3. createWorkloadClusterTask                                    │
-│     ├─ clusterctl generate cluster (template YAML)               │
+│     ├─ generate cluster manifest from provider CRDs                 │
 │     └─ kubectl apply (create cluster resources)                  │
 │                                                                  │
 │  4. waitForClusterReady                                          │
@@ -61,7 +61,7 @@ internal/
 │   ├── manager.go                  # Orchestrator (mirrors EKS Anywhere's Create workflow)
 │   ├── bootstrap.go                # kind-based bootstrap cluster lifecycle
 │   ├── installer.go                # clusterctl init wrapper
-│   ├── template.go                 # clusterctl generate cluster wrapper
+│   ├── generate.go                 # manifest generator (direct + ClusterClass)
 │   ├── applier.go                  # kubectl apply/delete wrapper
 │   ├── mover.go                    # clusterctl move wrapper (mirrors MoveCAPI)
 │   ├── waiter.go                   # Cluster readiness waiter (kubectl wait)
@@ -79,7 +79,7 @@ internal/
 |-----------|------------------------|-------------|
 | `Bootstrapper` | `interfaces.Bootstrapper` | Creates/deletes kind bootstrap clusters |
 | `Installer` | `CAPIClient.InitInfrastructure` | Installs CAPI providers via clusterctl init |
-| `TemplateGenerator` | `clusterctl.GetClusterTemplate` | Generates cluster YAML templates |
+| `ManifestGenerator` | `KindCatalog` of installed CRDs | Generates the cluster manifest from the configured providers |
 | `Applier` | `ClusterClient.ApplyKubeSpecFromBytes` | Applies/deletes Kubernetes manifests |
 | `Mover` | `ClusterManager.MoveCAPI` | Moves CAPI resources between clusters |
 | `Waiter` | `ClusterManager.waitForCAPI` | Waits for cluster readiness conditions |
@@ -223,7 +223,7 @@ resource "capi_cluster" "workload" {
 | `kubernetes_version` | string | no | Kubernetes version for the workload cluster |
 | `control_plane_machine_count` | number | no | Number of control plane machines |
 | `worker_machine_count` | number | no | Number of worker machines |
-| `flavor` | string | no | Cluster template flavor |
+| `cluster_class` | bool | no | Generate a ClusterClass + topology Cluster (default false) |
 | `kubeconfig_path` | string | no | Path to write the workload cluster kubeconfig |
 
 #### Computed Attributes

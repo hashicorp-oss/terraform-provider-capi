@@ -55,8 +55,13 @@ network = {                      # SingleNested, Optional, mutable
 
 ### 3.3 Provider object: `resource_config`
 
-`schema.DynamicAttribute`, Optional, on the shared provider object. The value must be an object
-or map; keys are the CRD's camelCase field names.
+`schema.StringAttribute`, Optional, on the shared provider object, holding a YAML or JSON object
+(typically `yamlencode({ ... })`); keys are the CRD's camelCase field names. It is a string, not
+a `DynamicAttribute`: terraform-plugin-framework rejects dynamic attributes inside collection
+nested attributes (the provider maps and the machine-deployment list) at provider start
+("Dynamic types inside of collections are not currently supported"), which the first `.test`
+validate surfaced. The provider decodes the text (`yamlObject`: integral numbers → `int64`,
+others → `float64`, sequences → `[]any`, `null` → nil) and rejects anything but an object.
 
 | Map | Direct mode target | ClusterClass mode target |
 | --- | --- | --- |
@@ -82,8 +87,8 @@ topology = {
       name           = "md-0"
       class          = "worker"           # cluster_class mode only; defaults to name
       replicas       = 2
-      infrastructure = { hardwareAffinity = { required = [{ labelSelector = { matchLabels = { type = "worker" } } }] } }
-      bootstrap      = { generateType = "worker", talosVersion = "v1.13" }   # overrides bootstrap.<name>.resource_config
+      infrastructure = yamlencode({ hardwareAffinity = { required = [{ labelSelector = { matchLabels = { type = "worker" } } }] } })
+      bootstrap      = yamlencode({ generateType = "worker", talosVersion = "v1.13" })   # overrides bootstrap.<name>.resource_config
     }]
   }
 }
@@ -92,8 +97,10 @@ topology = {
 `control_plane.infrastructure` → the control plane's `<Infra>MachineTemplate.spec.template.spec`.
 `machine_deployments[].infrastructure` → that deployment's `<Infra>MachineTemplate.spec.template.spec`.
 `machine_deployments[].bootstrap` → that deployment's `<Bootstrap>ConfigTemplate.spec.template.spec`;
-when unset, `bootstrap.<name>.resource_config` is used. All three are `schema.DynamicAttribute`.
-`topology` has no plan modifier, so these update in place.
+when unset, `bootstrap.<name>.resource_config` is used. All three are YAML/JSON
+`schema.StringAttribute`s for the same framework reason as `resource_config` (and for consistency
+with it, although `topology.control_plane` alone could have been dynamic). `topology` has no plan
+modifier, so these update in place.
 
 ### 3.5 State upgrader v2→v3
 
@@ -153,15 +160,15 @@ component variables). `WorkerMachineCount()` is removed with the template.
 ## 5. CRD discovery (`internal/capi/kinds.go`)
 
 ```go
+// KindResolver lists the CRDs of a management cluster once per generation.
 type KindResolver interface {
-    // Resolve returns the GVK of the provider's CRD whose kind ends in suffix.
-    Resolve(ctx context.Context, mgmt *Cluster, p ProviderKey, suffix string) (schema.GroupVersionKind, error)
-    // CoreVersion returns the storage version of clusters.cluster.x-k8s.io.
-    CoreVersion(ctx context.Context, mgmt *Cluster) (string, error)
-    // ControlPlaneRefShape reports how the control-plane kind references its
-    // machine template (see below).
-    ControlPlaneRefShape(ctx context.Context, mgmt *Cluster, gvk schema.GroupVersionKind) (RefShape, error)
+    Kinds(ctx context.Context, mgmt *Cluster) (*KindCatalog, error)
 }
+
+// KindCatalog answers every kind question from that CRD list.
+func (c *KindCatalog) Resolve(p ProviderKey, suffix string) (schema.GroupVersionKind, error)
+func (c *KindCatalog) CoreVersion() (string, error) // storage version of clusters.cluster.x-k8s.io
+func (c *KindCatalog) ControlPlaneRefShape(gvk schema.GroupVersionKind) (RefShape, error)
 ```
 
 Algorithm for `Resolve`:
@@ -175,8 +182,9 @@ Algorithm for `Resolve`:
 3. One match → done. Several → the shortest kind wins if it is unique; otherwise an error listing
    the candidates.
 4. Version: read the CRD label `cluster.x-k8s.io/<coreContract>` (e.g. `cluster.x-k8s.io/v1beta2: v1beta1`).
-   The label value may list several versions separated by `_`; the first served one wins.
-   Without the label fall back to the storage version.
+   The label value may list several versions separated by `_`; the newest served one
+   (Kubernetes version ordering) wins. Without the label fall back to the storage version.
+   Core CRDs are the contract, so they always use their storage version.
 5. Result is cached per (provider key, suffix) for the run.
 
 `RefShape` is derived from the control-plane CRD's OpenAPI schema for the resolved version:
@@ -249,9 +257,10 @@ Objects, in apply order:
    `infrastructureRef` and `controlPlaneRef` in the core version's ref shape.
 
 Every object carries `metadata.namespace` and the label `cluster.x-k8s.io/cluster-name: <cluster>`.
-The infrastructure provider is required; a missing `control_plane` entry is an error in this mode
-(direct objects need a control-plane kind). A missing `bootstrap` entry is an error only when a
-machine deployment exists.
+The infrastructure provider is required. A missing `control_plane` or `bootstrap` entry defaults
+to `kubeadm`, exactly as `clusterctl init` installs the kubeadm providers when none are named, so
+`infrastructure = { docker = {} }` keeps working. Objects are rendered `Cluster` first (as flavor
+templates do); the order above is the rest.
 
 ### 6.4 ClusterClass mode
 
@@ -271,7 +280,9 @@ machine deployment exists.
 
 `clusterctl init` receives `CLUSTER_TOPOLOGY=true` as a variable when `ClusterClass` is set (the
 gate is Alpha and off by default in cluster-api v1.14). A provider without the needed `*Template`
-kind fails `Resolve`, and the error names the kind suffix and provider label.
+kind fails `Resolve`, and the error names the kind suffix and provider label. ClusterClass mode
+needs the v1beta2 core contract (`classRef`, `templateRef`); a v1beta1 core is an error.
+`kubernetes_version` is required (`Cluster.spec.topology.version`).
 
 ### 6.5 Rendering
 
@@ -304,12 +315,12 @@ valid for Talos control planes.
 - Schema: §3. `providerNestedObject` gains `resource_config`; `providerMapAttribute` uses the
   `RequiresReplaceIf` modifier; `topology` gains the dynamic attributes; `network` and
   `cluster_class` are added; `template` and `flavor` are removed; `Version: 3`.
-- Models: `ProviderModel.ResourceConfig types.Dynamic`; `providerAttrTypes()["resource_config"] = types.DynamicType`;
+- Models: `ProviderModel.ResourceConfig types.String`; `providerAttrTypes()["resource_config"] = types.StringType`;
   `ControlPlaneTopologyModel.Infrastructure`, `MachineDeploymentModel.Infrastructure/Bootstrap`;
   `NetworkModel` and children; `ClusterResourceModel.ClusterClass`, `.Network`.
-- `dynamicToNative(attr.Value) (any, error)` converts a known, non-null dynamic value (object,
-  map, tuple, list, set, string, number, bool) into plain Go values for the backend; unknown or
-  non-object top-level values are validation errors.
+- `yamlObject(types.String, where) (map[string]any, diag.Diagnostics)` decodes the YAML/JSON text
+  into plain Go values for the backend; null, unknown and blank yield nil, invalid text or a
+  non-object top-level value is a validation error naming the attribute.
 - `buildCreateOptions` fills `Network`, `ControlPlane`, `MachineDeployments`, `ClusterClass` and
   each `ProviderConfig.ResourceConfig`.
 - `validateLifecycleConfig`: `resource_config` only on infrastructure / control_plane / bootstrap;
@@ -319,8 +330,8 @@ valid for Talos control planes.
 
 ## 10. Examples, docs, `.test`
 
-- `examples/resources/capi_cluster/cluster-template-talos.yaml` is deleted and replaced by
-  `examples/resources/capi_cluster/talos-tinkerbell.tf`, which expresses the same content:
+- `examples/resources/capi_cluster/cluster-template-talos.yaml` is deleted; its content moves into
+  `examples/resources/capi_cluster/talos-bootstrap.tf`:
   `network.control_plane_endpoint.host`, `infrastructure.tinkerbell.resource_config.templateInline`,
   `control_plane.talos.resource_config.controlPlaneConfig` (talosVersion, strategicPatches: install
   disk, `provider-id: PROVIDER_ID`, VIP), `bootstrap.talos.resource_config` (worker patches) and
@@ -342,7 +353,7 @@ valid for Talos control planes.
   `CLUSTER_TOPOLOGY` reaches init in ClusterClass mode; existing cleanup-on-failure tests keep
   passing with the mock generator.
 - `waiter_test.go`: fake dynamic client with `Cluster` conditions.
-- Provider: schema shape, `dynamicToNative`, validation rules, `RequiresReplaceIf` (version change
+- Provider: schema shape, `yamlObject`, validation rules, `RequiresReplaceIf` (version change
   → replace; `resource_config` change → no replace), v0/v1/v2 upgraders emit v3.
 - `.test`: `terraform validate` and `plan`, then apply on the hardware node.
 
