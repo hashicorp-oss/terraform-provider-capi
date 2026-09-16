@@ -53,13 +53,17 @@ bgpControlPlane:
   enabled: true
 
 # --- Gateway API ---
-# Off by default: Cilium does not bundle the Gateway API CRDs, and enabling this
-# renders a GatewayClass that fails to apply until those CRDs exist ("no matches
-# for kind GatewayClass"). Install the upstream Gateway API CRDs first, then set
-# enabled: true:
-#   kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.2.1/standard-install.yaml
+# Do NOT set gatewayAPI.enabled here. Turn it on with the cni.gateway_api block
+# instead, which installs the Gateway API CRDs before Cilium and flips
+# gatewayAPI.enabled=true for you (Cilium does not bundle the CRDs, so enabling
+# it without them fails with "no matches for kind GatewayClass"):
+#   cni = {
+#     provider    = "cilium"
+#     gateway_api = { enabled = true, version = "v1.3.0" }
+#     values      = file("cilium-values.yaml")
+#   }
+# These extra Gateway API settings still deep-merge on top:
 gatewayAPI:
-  enabled: false
   enableAlpn: true
   gatewayClass:
     create: "true"

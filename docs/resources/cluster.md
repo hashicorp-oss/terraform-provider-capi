@@ -339,8 +339,18 @@ Required:
 
 Optional:
 
+- `gateway_api` (Attributes) Install the Gateway API CRDs before Cilium and enable `gatewayAPI` in the Cilium values. Cilium does not bundle the CRDs; without them the chart's GatewayClass fails to apply. (see [below for nested schema](#nestedatt--cni--gateway_api))
 - `values` (String) Extra Helm values (YAML), deep-merged over the defaults (`kubeProxyReplacement`, KubePrism host/port, Kubernetes IPAM).
 - `version` (String) CNI Helm chart version. Omit to use the chart's latest release.
+
+<a id="nestedatt--cni--gateway_api"></a>
+### Nested Schema for `cni.gateway_api`
+
+Optional:
+
+- `enabled` (Boolean) Fetch the upstream Gateway API `standard-install.yaml` and apply it before Cilium, and set `gatewayAPI.enabled=true` in the Cilium values.
+- `version` (String) Gateway API release tag for the CRDs (e.g. `v1.3.0`). Defaults to a known-good release.
+
 
 
 <a id="nestedatt--control_plane"></a>

@@ -16,6 +16,7 @@ type fakeHelm struct {
 	existing map[string]bool
 	calls    []string
 	failOn   string
+	order    *[]string
 }
 
 func (f *fakeHelm) key(rel HelmRelease) string { return rel.Namespace + "/" + rel.Name }
@@ -26,6 +27,9 @@ func (f *fakeHelm) Exists(_ context.Context, _ string, rel HelmRelease) (bool, e
 
 func (f *fakeHelm) Install(_ context.Context, _ string, rel HelmRelease) error {
 	f.calls = append(f.calls, "install:"+f.key(rel))
+	if f.order != nil {
+		*f.order = append(*f.order, "install:"+f.key(rel))
+	}
 	if f.failOn == rel.Name {
 		return errors.New("chart pull failed")
 	}
@@ -40,10 +44,14 @@ func (f *fakeHelm) Upgrade(_ context.Context, _ string, rel HelmRelease) error {
 type fakeApplier struct {
 	manifests []string
 	err       error
+	order     *[]string
 }
 
 func (f *fakeApplier) Apply(_ context.Context, _ *capi.Cluster, manifest []byte) error {
 	f.manifests = append(f.manifests, string(manifest))
+	if f.order != nil {
+		*f.order = append(*f.order, "apply:"+string(manifest))
+	}
 	return f.err
 }
 
@@ -98,5 +106,40 @@ func TestAddons_Empty(t *testing.T) {
 	}
 	if (Addons{Manifests: []string{"x"}}).Empty() {
 		t.Fatal("Addons with manifests should not be empty")
+	}
+}
+
+func TestAddonInstaller_PreHelmManifestsAppliedBeforeHelm(t *testing.T) {
+	order := []string{}
+	helm := &fakeHelm{existing: map[string]bool{}, order: &order}
+	applier := &fakeApplier{order: &order}
+	inst := NewAddonInstaller(helm, applier, nil)
+	fetched := ""
+	inst.httpGet = func(_ context.Context, url string) ([]byte, error) {
+		fetched = url
+		return []byte("apiVersion: apiextensions.k8s.io/v1\nkind: CustomResourceDefinition\nmetadata:\n  name: gatewayclasses.gateway.networking.k8s.io\n"), nil
+	}
+
+	err := inst.Install(context.Background(), "/tmp/kc", Addons{
+		PreHelmManifestURLs: []string{"https://example.test/standard-install.yaml"},
+		Helm:                []HelmRelease{{Name: "cilium", Namespace: "kube-system", Chart: "oci://quay.io/cilium/charts/cilium"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fetched != "https://example.test/standard-install.yaml" {
+		t.Errorf("pre-helm URL not fetched: %q", fetched)
+	}
+	if len(order) != 2 || order[0][:6] != "apply:" || order[1] != "install:kube-system/cilium" {
+		t.Fatalf("order = %v; CRDs must apply before the cilium helm install", order)
+	}
+}
+
+func TestAddonInstaller_PreHelmFetchErrorWrapsErrAddons(t *testing.T) {
+	inst := NewAddonInstaller(&fakeHelm{existing: map[string]bool{}}, &fakeApplier{}, nil)
+	inst.httpGet = func(_ context.Context, _ string) ([]byte, error) { return nil, errors.New("boom") }
+	err := inst.Install(context.Background(), "/tmp/kc", Addons{PreHelmManifestURLs: []string{"https://x/y.yaml"}})
+	if !errors.Is(err, ErrAddons) {
+		t.Fatalf("error = %v, want ErrAddons", err)
 	}
 }

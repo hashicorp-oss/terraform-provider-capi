@@ -499,6 +499,28 @@ or omitted version fails at apply with a `FetchReference ... not found` error
 (the cluster provisions first, then the addon install fails). List tags with
 `curl -s https://quay.io/v2/cilium/charts/cilium/tags/list`.
 
+**`cni.gateway_api`** installs the Gateway API CRDs before Cilium (Cilium does
+not bundle them; enabling `gatewayAPI` without them fails the chart with "no
+matches for kind GatewayClass"):
+
+```go
+"gateway_api": schema.SingleNestedAttribute{
+    Optional: true,
+    Attributes: map[string]schema.Attribute{
+        "enabled": schema.BoolAttribute{Optional: true},
+        "version": schema.StringAttribute{Optional: true}, // Gateway API release; default defaultGatewayAPIVersion
+    },
+},
+```
+
+When `enabled`, `applyCNI` appends the upstream `standard-install.yaml` URL for
+the release to `talos.Addons.PreHelmManifestURLs` and sets `gatewayAPI.enabled=true`
+in the Cilium values. The Talos addon installer fetches and applies every
+`PreHelmManifestURLs` entry BEFORE the Helm releases (`internal/capi/talos/addons.go`),
+so the CRDs exist when Cilium's GatewayClass is rendered. Do not set
+`gatewayAPI.enabled` in `cni.values` yourself; the block owns it (extra
+`gatewayAPI.*` keys still deep-merge).
+
 For a pivoted CAPT workload cluster (not the Talos bootstrap path), CNI is a
 HelmChartProxy concern and out of scope here.
 

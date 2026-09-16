@@ -106,6 +106,13 @@ resource "capi_cluster" "bare_metal" {
     provider = "cilium"
     version  = "1.20.1"
 
+    # Install the Gateway API CRDs before Cilium and enable gatewayAPI in the
+    # Cilium values. Omit this block to keep Gateway API off.
+    gateway_api = {
+      enabled = true
+      version = "v1.3.0"
+    }
+
     # The provider already sets the Talos-required defaults (KubePrism
     # kube-proxy replacement, Kubernetes IPAM, cgroup and securityContext).
     # Add anything beyond that here; it is deep-merged over the defaults.

@@ -103,9 +103,10 @@ func TestBuildTalosBootstrapConfig_CNICilium(t *testing.T) {
 	ctx := context.Background()
 	data := talosTestData(ctx, t, buildTestBootstrap(ctx, t, "talos", "cp-1", nil, testTalosModel(ctx, t, nil, []string{"machine: {}\n"}), nil), goodMachine)
 	cniVal, d := types.ObjectValueFrom(ctx, cniAttrTypes(), CNIModel{
-		Provider: types.StringValue("cilium"),
-		Version:  types.StringValue("1.18.0"),
-		Values:   types.StringValue("kubeProxyReplacement: false\n"),
+		Provider:   types.StringValue("cilium"),
+		Version:    types.StringValue("1.18.0"),
+		Values:     types.StringValue("kubeProxyReplacement: false\n"),
+		GatewayAPI: types.ObjectNull(gatewayAPIAttrTypes()),
 	})
 	if d.HasError() {
 		t.Fatal(d)

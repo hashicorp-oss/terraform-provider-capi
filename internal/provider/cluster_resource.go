@@ -364,6 +364,20 @@ func (r *ClusterResource) Schema(ctx context.Context, req resource.SchemaRequest
 						MarkdownDescription: "Extra Helm values (YAML), deep-merged over the defaults (`kubeProxyReplacement`, KubePrism host/port, Kubernetes IPAM).",
 						Optional:            true,
 					},
+					"gateway_api": schema.SingleNestedAttribute{
+						MarkdownDescription: "Install the Gateway API CRDs before Cilium and enable `gatewayAPI` in the Cilium values. Cilium does not bundle the CRDs; without them the chart's GatewayClass fails to apply.",
+						Optional:            true,
+						Attributes: map[string]schema.Attribute{
+							"enabled": schema.BoolAttribute{
+								MarkdownDescription: "Fetch the upstream Gateway API `standard-install.yaml` and apply it before Cilium, and set `gatewayAPI.enabled=true` in the Cilium values.",
+								Optional:            true,
+							},
+							"version": schema.StringAttribute{
+								MarkdownDescription: "Gateway API release tag for the CRDs (e.g. `v1.3.0`). Defaults to a known-good release.",
+								Optional:            true,
+							},
+						},
+					},
 				},
 			},
 

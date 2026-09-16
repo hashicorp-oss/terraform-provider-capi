@@ -140,7 +140,17 @@ func buildTalosBootstrapConfig(ctx context.Context, data *ClusterResourceModel) 
 	cni, d := extractCNI(ctx, data)
 	diags.Append(d...)
 	if cni != nil && !cni.Provider.IsNull() && cni.Provider.ValueString() != "" {
-		if err := applyCNI(cfg, cni.Provider.ValueString(), cni.Version.ValueString(), cni.Values.ValueString()); err != nil {
+		o := cniOptions{
+			provider: cni.Provider.ValueString(),
+			version:  cni.Version.ValueString(),
+			values:   cni.Values.ValueString(),
+		}
+		if gw, gd := extractGatewayAPI(ctx, cni); gw != nil {
+			diags.Append(gd...)
+			o.gatewayAPIEnabled = gw.Enabled.ValueBool()
+			o.gatewayAPIVersion = gw.Version.ValueString()
+		}
+		if err := applyCNI(cfg, o); err != nil {
 			diags.AddError("Invalid cni configuration", err.Error())
 		}
 	}

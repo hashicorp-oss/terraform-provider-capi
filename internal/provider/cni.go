@@ -23,6 +23,10 @@ const ciliumNamespace = "kube-system"
 // kube-proxy replacement talks to the API server through it.
 const kubePrismPort = 7445
 
+// defaultGatewayAPIVersion is the Gateway API release whose standard-install.yaml
+// CRDs are applied before Cilium when cni.gateway_api.enabled and no version is set.
+const defaultGatewayAPIVersion = "v1.3.0"
+
 // ciliumInstallTimeout bounds the Helm install wait. Helm's install action
 // treats a zero timeout as an already-expired deadline when Wait is set, so
 // this must be non-zero. It allows for image pulls on a fresh node.
@@ -43,14 +47,29 @@ machine:
       port: 7445
 `
 
+// cniOptions configures the CNI injected into a Talos bootstrap config.
+type cniOptions struct {
+	provider string
+	version  string
+	values   string
+	// gatewayAPIEnabled installs the Gateway API CRDs before Cilium and turns
+	// on gatewayAPI in the Cilium values.
+	gatewayAPIEnabled bool
+	// gatewayAPIVersion is the Gateway API release for the CRDs; empty uses
+	// defaultGatewayAPIVersion.
+	gatewayAPIVersion string
+}
+
 // applyCNI injects the chosen CNI into a Talos bootstrap config: a machine
 // config patch disabling the built-in CNI and a Helm release installing the
-// CNI. Only "cilium" is supported today.
-func applyCNI(cfg *talos.Config, provider, version, values string) error {
-	if provider != "cilium" {
-		return fmt.Errorf("unsupported cni.provider %q: only \"cilium\" is supported", provider)
+// CNI. Only "cilium" is supported today. When gateway_api is enabled, the
+// Gateway API CRDs are fetched and applied before Cilium (a pre-helm manifest)
+// so the chart's GatewayClass resolves.
+func applyCNI(cfg *talos.Config, o cniOptions) error {
+	if o.provider != "cilium" {
+		return fmt.Errorf("unsupported cni.provider %q: only \"cilium\" is supported", o.provider)
 	}
-	vals, err := ciliumValues(values)
+	vals, err := ciliumValues(o.values, o.gatewayAPIEnabled)
 	if err != nil {
 		return err
 	}
@@ -59,17 +78,29 @@ func applyCNI(cfg *talos.Config, provider, version, values string) error {
 		Name:      "cilium",
 		Namespace: ciliumNamespace,
 		Chart:     ciliumChart,
-		Version:   version,
+		Version:   o.version,
 		Values:    vals,
 		Timeout:   ciliumInstallTimeout,
 	})
+	if o.gatewayAPIEnabled {
+		v := o.gatewayAPIVersion
+		if v == "" {
+			v = defaultGatewayAPIVersion
+		}
+		cfg.Addons.PreHelmManifestURLs = append(cfg.Addons.PreHelmManifestURLs, gatewayAPICRDURL(v))
+	}
 	return nil
+}
+
+// gatewayAPICRDURL is the upstream standard-install.yaml for a Gateway API release.
+func gatewayAPICRDURL(version string) string {
+	return fmt.Sprintf("https://github.com/kubernetes-sigs/gateway-api/releases/download/%s/standard-install.yaml", version)
 }
 
 // ciliumValues deep-merges the user's Helm values (YAML) over the Cilium
 // defaults that pair with the Talos CNI patch (kube-proxy replacement via
 // KubePrism, Kubernetes IPAM). User keys win; unset defaults survive.
-func ciliumValues(userValues string) (string, error) {
+func ciliumValues(userValues string, gatewayAPI bool) (string, error) {
 	// Defaults required to run Cilium on Talos, per the official Talos guide:
 	// KubePrism kube-proxy replacement, Kubernetes IPAM, no cgroup auto-mount
 	// (Talos already mounts cgroup2), and the restricted capability sets Talos
@@ -90,6 +121,11 @@ func ciliumValues(userValues string) (string, error) {
 				"cleanCiliumState": []any{"NET_ADMIN", "SYS_ADMIN", "SYS_RESOURCE"},
 			},
 		},
+	}
+	if gatewayAPI {
+		// The provider owns gatewayAPI.enabled (paired with the CRD install);
+		// user values may still add gatewayAPI.gatewayClass, enableAlpn, etc.
+		merged["gatewayAPI"] = map[string]any{"enabled": true}
 	}
 	if userValues != "" {
 		var user map[string]any

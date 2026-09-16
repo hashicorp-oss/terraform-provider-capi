@@ -155,9 +155,17 @@ type ProviderModel struct {
 
 // CNIModel configures the workload cluster CNI, replacing Talos's default.
 type CNIModel struct {
-	Provider types.String `tfsdk:"provider"`
-	Version  types.String `tfsdk:"version"`
-	Values   types.String `tfsdk:"values"`
+	Provider   types.String `tfsdk:"provider"`
+	Version    types.String `tfsdk:"version"`
+	Values     types.String `tfsdk:"values"`
+	GatewayAPI types.Object `tfsdk:"gateway_api"` // GatewayAPIModel
+}
+
+// GatewayAPIModel installs the Gateway API CRDs before Cilium and enables
+// gatewayAPI in the Cilium values.
+type GatewayAPIModel struct {
+	Enabled types.Bool   `tfsdk:"enabled"`
+	Version types.String `tfsdk:"version"`
 }
 
 // FetchConfigModel controls where provider components are fetched from.
@@ -399,9 +407,17 @@ func providerMapType() types.MapType {
 
 func cniAttrTypes() map[string]attr.Type {
 	return map[string]attr.Type{
-		"provider": types.StringType,
-		"version":  types.StringType,
-		"values":   types.StringType,
+		"provider":    types.StringType,
+		"version":     types.StringType,
+		"values":      types.StringType,
+		"gateway_api": types.ObjectType{AttrTypes: gatewayAPIAttrTypes()},
+	}
+}
+
+func gatewayAPIAttrTypes() map[string]attr.Type {
+	return map[string]attr.Type{
+		"enabled": types.BoolType,
+		"version": types.StringType,
 	}
 }
 
@@ -770,6 +786,16 @@ func extractCNI(ctx context.Context, data *ClusterResourceModel) (*CNIModel, dia
 	var cni CNIModel
 	diags := data.CNI.As(ctx, &cni, basetypes.ObjectAsOptions{})
 	return &cni, diags
+}
+
+// extractGatewayAPI returns the CNI Gateway API settings, or nil when unset.
+func extractGatewayAPI(ctx context.Context, cni *CNIModel) (*GatewayAPIModel, diag.Diagnostics) {
+	if cni == nil || cni.GatewayAPI.IsNull() || cni.GatewayAPI.IsUnknown() {
+		return nil, nil
+	}
+	var gw GatewayAPIModel
+	diags := cni.GatewayAPI.As(ctx, &gw, basetypes.ObjectAsOptions{})
+	return &gw, diags
 }
 
 // extractTemplate returns the template source and variables (nil when unset).

@@ -17,7 +17,7 @@ import (
 )
 
 func TestCiliumValues_Defaults(t *testing.T) {
-	out, err := ciliumValues("")
+	out, err := ciliumValues("", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,7 +59,7 @@ func TestCiliumValues_Defaults(t *testing.T) {
 
 func TestCiliumValues_UserMergeOverridesAndAdds(t *testing.T) {
 	user := "kubeProxyReplacement: false\nhubble:\n  relay:\n    enabled: true\n"
-	out, err := ciliumValues(user)
+	out, err := ciliumValues(user, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +81,7 @@ func TestCiliumValues_UserMergeOverridesAndAdds(t *testing.T) {
 
 func TestApplyCNI_CiliumPrependsPatchAndAppendsRelease(t *testing.T) {
 	cfg := &talos.Config{Talos: talos.TalosConfig{ConfigPatches: []string{"machine: {}"}}}
-	if err := applyCNI(cfg, "cilium", "1.18.0", ""); err != nil {
+	if err := applyCNI(cfg, cniOptions{provider: "cilium", version: "1.18.0"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -119,8 +119,46 @@ func TestApplyCNI_CiliumPrependsPatchAndAppendsRelease(t *testing.T) {
 
 func TestApplyCNI_UnknownProviderErrors(t *testing.T) {
 	cfg := &talos.Config{}
-	if err := applyCNI(cfg, "calico", "", ""); err == nil {
+	if err := applyCNI(cfg, cniOptions{provider: "calico"}); err == nil {
 		t.Fatal("unknown CNI provider must error")
+	}
+}
+
+func TestApplyCNI_GatewayAPIInstallsCRDsBeforeCiliumAndEnablesInValues(t *testing.T) {
+	cfg := &talos.Config{}
+	if err := applyCNI(cfg, cniOptions{provider: "cilium", version: "1.20.1", gatewayAPIEnabled: true, gatewayAPIVersion: "v1.3.0"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Addons.PreHelmManifestURLs) != 1 ||
+		cfg.Addons.PreHelmManifestURLs[0] != "https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.3.0/standard-install.yaml" {
+		t.Fatalf("gateway API CRD URL = %v", cfg.Addons.PreHelmManifestURLs)
+	}
+	var vals map[string]any
+	if err := yaml.Unmarshal([]byte(cfg.Addons.Helm[0].Values), &vals); err != nil {
+		t.Fatal(err)
+	}
+	if ga, _ := vals["gatewayAPI"].(map[string]any); ga["enabled"] != true {
+		t.Errorf("cilium values must set gatewayAPI.enabled=true, got %v", vals["gatewayAPI"])
+	}
+}
+
+func TestApplyCNI_GatewayAPIDefaultVersion(t *testing.T) {
+	cfg := &talos.Config{}
+	if err := applyCNI(cfg, cniOptions{provider: "cilium", gatewayAPIEnabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Addons.PreHelmManifestURLs) != 1 || !strings.Contains(cfg.Addons.PreHelmManifestURLs[0], defaultGatewayAPIVersion) {
+		t.Errorf("default gateway API version not used: %v", cfg.Addons.PreHelmManifestURLs)
+	}
+}
+
+func TestApplyCNI_NoGatewayAPIByDefault(t *testing.T) {
+	cfg := &talos.Config{}
+	if err := applyCNI(cfg, cniOptions{provider: "cilium"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Addons.PreHelmManifestURLs) != 0 {
+		t.Errorf("no CRDs should be fetched when gateway_api is off: %v", cfg.Addons.PreHelmManifestURLs)
 	}
 }
 
@@ -147,6 +185,7 @@ func TestValidateLifecycleConfig_CNIRequiresTalosBootstrap(t *testing.T) {
 	cniVal := func(t *testing.T) types.Object {
 		v, d := types.ObjectValueFrom(ctx, cniAttrTypes(), CNIModel{
 			Provider: types.StringValue("cilium"), Version: types.StringNull(), Values: types.StringNull(),
+			GatewayAPI: types.ObjectNull(gatewayAPIAttrTypes()),
 		})
 		if d.HasError() {
 			t.Fatal(d)

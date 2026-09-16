@@ -7,7 +7,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"time"
 
 	"helm.sh/helm/v3/pkg/action"
@@ -40,10 +42,16 @@ type HelmRelease struct {
 type Addons struct {
 	Helm      []HelmRelease
 	Manifests []string
+	// PreHelmManifestURLs are URLs of raw manifests (e.g. Gateway API CRDs)
+	// fetched and applied BEFORE the Helm releases, so a chart that renders a
+	// custom resource (Cilium's GatewayClass) finds its CRD already present.
+	PreHelmManifestURLs []string
 }
 
 // Empty reports whether nothing is configured.
-func (a Addons) Empty() bool { return len(a.Helm) == 0 && len(a.Manifests) == 0 }
+func (a Addons) Empty() bool {
+	return len(a.Helm) == 0 && len(a.Manifests) == 0 && len(a.PreHelmManifestURLs) == 0
+}
 
 // HelmClient abstracts the Helm SDK for tests.
 type HelmClient interface {
@@ -63,6 +71,8 @@ type DefaultAddonInstaller struct {
 	helm    HelmClient
 	applier capi.Applier
 	logger  *log.Logger
+	// httpGet fetches a URL's body; overridable in tests.
+	httpGet func(ctx context.Context, url string) ([]byte, error)
 }
 
 // NewAddonInstaller wires a HelmClient and an Applier.
@@ -70,12 +80,24 @@ func NewAddonInstaller(helm HelmClient, applier capi.Applier, logger *log.Logger
 	if logger == nil {
 		logger = log.New(log.Writer(), "[talos-addons] ", log.LstdFlags)
 	}
-	return &DefaultAddonInstaller{helm: helm, applier: applier, logger: logger}
+	return &DefaultAddonInstaller{helm: helm, applier: applier, logger: logger, httpGet: fetchURL}
 }
 
 // Install implements AddonInstaller. A release that already exists is
 // upgraded so retries converge instead of failing on "already exists".
 func (d *DefaultAddonInstaller) Install(ctx context.Context, kubeconfigPath string, addons Addons) error {
+	preCluster := &capi.Cluster{Name: "bootstrap", KubeconfigPath: kubeconfigPath}
+	for _, url := range addons.PreHelmManifestURLs {
+		d.logger.Printf("fetching pre-helm manifest %s", url)
+		body, err := d.httpGet(ctx, url)
+		if err != nil {
+			return fmt.Errorf("%w: fetching pre-helm manifest %s: %v", ErrAddons, url, err)
+		}
+		if err := d.applier.Apply(ctx, preCluster, body); err != nil {
+			return fmt.Errorf("%w: applying pre-helm manifest %s: %v", ErrAddons, url, err)
+		}
+	}
+
 	for _, rel := range addons.Helm {
 		exists, err := d.helm.Exists(ctx, kubeconfigPath, rel)
 		if err != nil {
@@ -203,4 +225,24 @@ func (h *SDKHelmClient) Upgrade(ctx context.Context, kubeconfigPath string, rel 
 	}
 	_, err = up.RunWithContext(ctx, rel.Name, ch, vals)
 	return err
+}
+
+// fetchURL GETs url and returns the body. It bounds the request with a
+// timeout so a hung endpoint cannot stall the install indefinitely.
+func fetchURL(ctx context.Context, url string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("GET %s: status %d", url, resp.StatusCode)
+	}
+	return io.ReadAll(resp.Body)
 }
