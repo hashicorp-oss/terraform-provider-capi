@@ -65,6 +65,33 @@ type InitOptions struct {
 	Variables map[string]string
 }
 
+// UpgradeOptions configures an in-place provider upgrade (clusterctl upgrade
+// apply) on a management cluster.
+type UpgradeOptions struct {
+	// Providers is every configured provider, so URL overrides and
+	// customizations resolve for the whole management cluster, not only for
+	// the entries being upgraded.
+	Providers ProviderSet
+
+	// Targets are the providers to upgrade or re-render. An entry whose
+	// configured Version matches the installed one is reinstalled at that
+	// version, which re-applies its customizations.
+	Targets []ProviderKey
+
+	// Variables are clusterctl variables for component rendering.
+	Variables map[string]string
+}
+
+// UninstallOptions configures provider removal (clusterctl delete). CRDs and
+// namespaces are always kept, so objects of other clusters survive.
+type UninstallOptions struct {
+	// Providers are the providers to delete. Ignored when All is set.
+	Providers ProviderSet
+
+	// All deletes every provider in the management cluster's inventory.
+	All bool
+}
+
 // MoveOptions configures CAPI management move operations.
 type MoveOptions struct {
 	// FromKubeconfig is the source cluster kubeconfig.
@@ -220,6 +247,17 @@ type CreateClusterOptions struct {
 	// control plane is initialized during a pivot, before anything waits for
 	// nodes to be Ready: the CNI.
 	WorkloadAddons AddonSet
+
+	// UpgradeProviders are configured providers whose settings changed since
+	// the last apply: they are upgraded (or re-rendered at the same version)
+	// in place with clusterctl upgrade apply, right after init. Ignored with
+	// SkipInit.
+	UpgradeProviders []ProviderKey
+
+	// RemovedProviders are providers dropped from the configuration since the
+	// last apply: they are deleted from the management cluster with
+	// clusterctl delete, keeping CRDs and namespaces. Ignored with SkipInit.
+	RemovedProviders ProviderSet
 }
 
 // HelmRelease describes one chart release the provider installs itself.
@@ -513,6 +551,45 @@ func (s ProviderSet) All() []ProviderConfig {
 	return out
 }
 
+// Find returns the provider with the given type and name.
+func (s ProviderSet) Find(key ProviderKey) (ProviderConfig, bool) {
+	for _, p := range s[key.Type] {
+		if p.Name == key.Name {
+			return p, true
+		}
+	}
+	return ProviderConfig{}, false
+}
+
+// Subset returns the providers with the given keys, in install order.
+// Unknown keys are skipped.
+func (s ProviderSet) Subset(keys []ProviderKey) ProviderSet {
+	out := ProviderSet{}
+	for _, p := range s.All() {
+		for _, k := range keys {
+			if p.Type == k.Type && p.Name == k.Name {
+				out.Add(p)
+				break
+			}
+		}
+	}
+	return out
+}
+
+// Empty reports whether the set has no providers.
+func (s ProviderSet) Empty() bool {
+	return len(s.All()) == 0
+}
+
+// Keys returns the keys of every provider, in install order.
+func (s ProviderSet) Keys() []ProviderKey {
+	var out []ProviderKey
+	for _, p := range s.All() {
+		out = append(out, ProviderKey{Type: p.Type, Name: p.Name})
+	}
+	return out
+}
+
 // DeploymentConfig customizes a provider controller deployment.
 type DeploymentConfig struct {
 	Replicas           *int64
@@ -584,4 +661,27 @@ type DeleteClusterOptions struct {
 	// teardown; the bootstrap machine is reset last by the bootstrapper.
 	Inventory        []InventoryMachine
 	BootstrapMachine string
+
+	// SelfManaged marks a cluster that manages itself after a pivot. Deleting
+	// its Cluster object from inside would power off the machines running
+	// the controllers, so management is first moved to a fresh bootstrap
+	// cluster (the reverse of the create pivot) and the cluster is deleted
+	// from there. Ignored with InPlace.
+	SelfManaged bool
+
+	// Spec is the configuration the cluster was created with. A self-managed
+	// deletion needs it to rebuild a management cluster: providers, their
+	// variables, management addons and manifests, and the inventory (BMC
+	// Secrets do not move with clusterctl, and rufio needs them to power
+	// machines off).
+	Spec CreateClusterOptions
+
+	// Wait bounds the wait for the Cluster object to disappear after it is
+	// deleted. Zero uses DefaultWaitOptions.
+	Wait WaitOptions
+
+	// UninstallProviders removes every provider from the management cluster
+	// (clusterctl delete --all, keeping CRDs and namespaces) once the cluster
+	// is gone. Meant for a management cluster this resource initialised.
+	UninstallProviders bool
 }

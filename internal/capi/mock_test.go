@@ -3,7 +3,11 @@
 
 package capi
 
-import "context"
+import (
+	"context"
+
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+)
 
 // MockBootstrapper is a test double for the Bootstrapper interface.
 type MockBootstrapper struct {
@@ -44,6 +48,38 @@ type MockInstaller struct {
 		Cluster *Cluster
 		Opts    InitOptions
 	}
+	UpgradeFunc  func(ctx context.Context, cluster *Cluster, opts UpgradeOptions) error
+	UpgradeCalls []struct {
+		Cluster *Cluster
+		Opts    UpgradeOptions
+	}
+	UninstallFunc  func(ctx context.Context, cluster *Cluster, opts UninstallOptions) error
+	UninstallCalls []struct {
+		Cluster *Cluster
+		Opts    UninstallOptions
+	}
+}
+
+func (m *MockInstaller) Upgrade(ctx context.Context, cluster *Cluster, opts UpgradeOptions) error {
+	m.UpgradeCalls = append(m.UpgradeCalls, struct {
+		Cluster *Cluster
+		Opts    UpgradeOptions
+	}{cluster, opts})
+	if m.UpgradeFunc != nil {
+		return m.UpgradeFunc(ctx, cluster, opts)
+	}
+	return nil
+}
+
+func (m *MockInstaller) Uninstall(ctx context.Context, cluster *Cluster, opts UninstallOptions) error {
+	m.UninstallCalls = append(m.UninstallCalls, struct {
+		Cluster *Cluster
+		Opts    UninstallOptions
+	}{cluster, opts})
+	if m.UninstallFunc != nil {
+		return m.UninstallFunc(ctx, cluster, opts)
+	}
+	return nil
 }
 
 func (m *MockInstaller) Init(ctx context.Context, cluster *Cluster, opts InitOptions) error {
@@ -81,6 +117,7 @@ func (m *MockManifestGenerator) Generate(ctx context.Context, cluster *Cluster, 
 type MockApplier struct {
 	ApplyFunc  func(ctx context.Context, cluster *Cluster, manifest []byte) error
 	DeleteFunc func(ctx context.Context, cluster *Cluster, clusterName, namespace string) error
+	GetFunc    func(ctx context.Context, cluster *Cluster, clusterName, namespace string) (*unstructured.Unstructured, error)
 	ApplyCalls []struct {
 		Cluster  *Cluster
 		Manifest []byte
@@ -90,6 +127,29 @@ type MockApplier struct {
 		ClusterName string
 		Namespace   string
 	}
+	GetCalls []struct {
+		Cluster     *Cluster
+		ClusterName string
+		Namespace   string
+	}
+}
+
+// Get returns a minimal Cluster object unless GetFunc is set.
+func (m *MockApplier) Get(ctx context.Context, cluster *Cluster, clusterName, namespace string) (*unstructured.Unstructured, error) {
+	m.GetCalls = append(m.GetCalls, struct {
+		Cluster     *Cluster
+		ClusterName string
+		Namespace   string
+	}{cluster, clusterName, namespace})
+	if m.GetFunc != nil {
+		return m.GetFunc(ctx, cluster, clusterName, namespace)
+	}
+	obj := &unstructured.Unstructured{}
+	obj.SetAPIVersion("cluster.x-k8s.io/v1beta2")
+	obj.SetKind("Cluster")
+	obj.SetName(clusterName)
+	obj.SetNamespace(namespace)
+	return obj, nil
 }
 
 func (m *MockApplier) Apply(ctx context.Context, cluster *Cluster, manifest []byte) error {
@@ -139,12 +199,22 @@ func (m *MockMover) Move(ctx context.Context, from, to *Cluster, opts MoveOption
 
 // MockWaiter is a test double for the Waiter interface.
 type MockWaiter struct {
-	WaitForControlPlaneFunc func(ctx context.Context, mgmtCluster *Cluster, clusterName, namespace string, opts WaitOptions) error
-	WaitForWorkersFunc      func(ctx context.Context, mgmtCluster *Cluster, clusterName, namespace string, opts WaitOptions) error
-	WaitForClusterReadyFunc func(ctx context.Context, mgmtCluster *Cluster, clusterName, namespace string, opts WaitOptions) error
-	// ControlPlaneCalls and ReadyCalls record which cluster each wait ran against.
+	WaitForControlPlaneFunc   func(ctx context.Context, mgmtCluster *Cluster, clusterName, namespace string, opts WaitOptions) error
+	WaitForWorkersFunc        func(ctx context.Context, mgmtCluster *Cluster, clusterName, namespace string, opts WaitOptions) error
+	WaitForClusterReadyFunc   func(ctx context.Context, mgmtCluster *Cluster, clusterName, namespace string, opts WaitOptions) error
+	WaitForClusterDeletedFunc func(ctx context.Context, mgmtCluster *Cluster, clusterName, namespace string, opts WaitOptions) error
+	// ControlPlaneCalls, ReadyCalls and DeletedCalls record which cluster each wait ran against.
 	ControlPlaneCalls []*Cluster
 	ReadyCalls        []*Cluster
+	DeletedCalls      []*Cluster
+}
+
+func (m *MockWaiter) WaitForClusterDeleted(ctx context.Context, mgmtCluster *Cluster, clusterName, namespace string, opts WaitOptions) error {
+	m.DeletedCalls = append(m.DeletedCalls, mgmtCluster)
+	if m.WaitForClusterDeletedFunc != nil {
+		return m.WaitForClusterDeletedFunc(ctx, mgmtCluster, clusterName, namespace, opts)
+	}
+	return nil
 }
 
 func (m *MockWaiter) WaitForControlPlane(ctx context.Context, mgmtCluster *Cluster, clusterName, namespace string, opts WaitOptions) error {

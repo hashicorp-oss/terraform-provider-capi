@@ -83,6 +83,7 @@ type ManagementModel struct {
 	Kubeconfig  types.String `tfsdk:"kubeconfig"`
 	SkipInit    types.Bool   `tfsdk:"skip_init"`
 	SelfManaged types.Bool   `tfsdk:"self_managed"`
+	Uninstall   types.Bool   `tfsdk:"uninstall"`
 	Namespace   types.String `tfsdk:"namespace"`
 	Bootstrap   types.Object `tfsdk:"bootstrap"` // ManagementBootstrapModel
 	Addons      types.Object `tfsdk:"addons"`    // BootstrapAddonsModel: management-plane addons
@@ -367,6 +368,7 @@ func managementAttrTypes() map[string]attr.Type {
 		"kubeconfig":   types.StringType,
 		"skip_init":    types.BoolType,
 		"self_managed": types.BoolType,
+		"uninstall":    types.BoolType,
 		"namespace":    types.StringType,
 		"bootstrap":    types.ObjectType{AttrTypes: managementBootstrapAttrTypes()},
 	}

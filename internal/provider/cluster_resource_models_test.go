@@ -51,8 +51,15 @@ func TestClusterResource_Schema_ProviderMaps(t *testing.T) {
 		if name != "infrastructure" && !m.Optional {
 			t.Errorf("%s must be optional", name)
 		}
-		if len(m.PlanModifiers) == 0 {
-			t.Errorf("%s must RequiresReplace", name)
+		// The kinds of the generated cluster objects follow the names in
+		// these three maps, so adding or removing a name replaces the
+		// cluster; core, ipam and addon are converged in place.
+		structural := name == "infrastructure" || name == "bootstrap" || name == "control_plane"
+		if structural && len(m.PlanModifiers) == 0 {
+			t.Errorf("%s must RequiresReplace on a name change", name)
+		}
+		if !structural && len(m.PlanModifiers) != 0 {
+			t.Errorf("%s must be fully mutable", name)
 		}
 		if reference == nil {
 			reference = m.NestedObject.Attributes
@@ -539,11 +546,14 @@ func TestProviderMapRequiresReplace_IgnoresResourceConfig(t *testing.T) {
 
 	bumped := rcOnly
 	bumped.Version = types.StringValue("v0.8.0")
-	if got := requiresReplace(t, ctx, state, mustProviderMap(t, ctx, map[string]ProviderModel{"talos": bumped})); !got {
-		t.Error("a version change must still replace")
+	if got := requiresReplace(t, ctx, state, mustProviderMap(t, ctx, map[string]ProviderModel{"talos": bumped})); got {
+		t.Error("a version change is an in-place provider upgrade")
 	}
 	if got := requiresReplace(t, ctx, state, mustProviderMap(t, ctx, map[string]ProviderModel{"kubeadm": base})); !got {
 		t.Error("a provider name change must still replace")
+	}
+	if got := requiresReplace(t, ctx, state, mustProviderMap(t, ctx, map[string]ProviderModel{"talos": base, "kubeadm": base})); !got {
+		t.Error("an added provider name must still replace")
 	}
 }
 

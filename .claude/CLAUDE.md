@@ -321,7 +321,12 @@ Groups all attributes related to HOW the cluster is managed: management cluster 
             },
         },
         "skip_init": schema.BoolAttribute{
-            MarkdownDescription: "Skip running clusterctl init on the management cluster. Use when CAPI providers are already installed.",
+            MarkdownDescription: "Skip running clusterctl init on the management cluster. Use when CAPI providers are already installed and managed elsewhere: the provider maps are then never installed, upgraded or deleted by this resource.",
+            Optional:            true,
+            Computed:            true,
+            Default:             booldefault.StaticBool(false),
+        },
+        "uninstall": schema.BoolAttribute{ // clusterctl delete --all on destroy; only with kubeconfig + skip_init = false
             Optional:            true,
             Computed:            true,
             Default:             booldefault.StaticBool(false),
@@ -351,7 +356,10 @@ Groups all attributes related to HOW the cluster is managed: management cluster 
 - `kubeconfig` — immutable (RequiresReplace)
 - `self_managed` — immutable (RequiresReplace)
 - `namespace` — immutable (RequiresReplace)
-- `skip_init` — mutable (only affects initialization behavior)
+- `skip_init` — mutable; `false` means this resource owns the providers on the
+  management cluster (install, upgrade, delete, see §3.3 and §7.4)
+- `uninstall` — mutable; on destroy, `clusterctl delete --all` (CRDs and
+  namespaces kept) on an external management cluster this resource initialised
 
 **`management.bootstrap` — transient bootstrap cluster:**
 
@@ -491,12 +499,33 @@ The shared provider object (modeled after the cluster-api-operator provider CRDs
 
 An empty object (`helm = {}`) installs clusterctl's default release.
 
-**Mutability:** every provider map carries `providerMapRequiresReplace()`, a
-`mapplanmodifier.RequiresReplaceIf` that compares state and plan with each
-entry's `resource_config` blanked: providers are installed once by
-`clusterctl init`, so any other change replaces the cluster, while a
-`resource_config` change re-applies the generated objects in place (Update
-runs with `SkipInit`).
+**Mutability (the clusterctl provider lifecycle):** `infrastructure`,
+`bootstrap` and `control_plane` carry `providerMapRequiresReplace()`, a
+`mapplanmodifier.RequiresReplaceIf` that compares the *key sets* of state and
+plan: the generated cluster objects follow the provider names, so adding or
+removing a name replaces the cluster. Everything else is applied in place by
+Update (`providerChanges`, `internal/provider/provider_lifecycle.go`):
+
+- a `resource_config` change re-applies the generated objects;
+- any other change inside an entry (version, `fetch_config`, customizations)
+  is `clusterctl upgrade apply` for that entry (`CreateClusterOptions.
+  UpgradeProviders` → `Installer.Upgrade`); an unpinned entry is re-rendered at
+  its installed version, which re-applies its customizations;
+- an added entry in any map is installed by `clusterctl init`
+  (`Installer.Init` converges: clusterctl skips providers at the requested
+  version, the installer upgrades pinned ones installed at another version
+  first, then installs what is missing);
+- an entry removed from `ipam` or `addon` is `clusterctl delete`d, keeping
+  CRDs (`RemovedProviders` → `Installer.Uninstall`); a removed `core` entry
+  only stops pinning.
+
+Update sets `SkipInit` when nothing in the six maps changed, since init
+resolves every release again. With `management.skip_init = true` the
+providers are never touched. `clusterctl upgrade apply` fetches components
+through the *cluster* client, so `newClusterctlClient` injects a
+`ClusterClientFactory` whose repository factory is the customizing one too
+(`customizingClusterFactory`); without it an upgrade would drop every
+customization init applied.
 
 **Cardinality:** `infrastructure` is Required and must contain exactly one
 entry. The other five are Optional and may hold several entries; a missing
@@ -1455,6 +1484,49 @@ data.Status, diags = types.ObjectValueFrom(ctx, statusAttrTypes(), StatusModel{
 })
 ```
 
+### 7.4 Lifecycle Semantics (Read, Update, Delete, Import)
+
+The resource mirrors the clusterctl lifecycle end to end: `init` (§3.3),
+generated manifests (§3.6), `move` (pivot, §3.2), `upgrade apply` and
+`delete` of providers (§3.3), `get kubeconfig` and `describe` (`status`).
+
+- **Read** calls `Manager.GetClusterInfo`, which reads the Cluster object
+  first (`Applier.Get`). `ErrClusterNotFound` means the object is gone from a
+  *reachable* management cluster: Read removes the resource from state. Any
+  other error (unreachable cluster, CAPI not installed) keeps the state and
+  warns. `status.endpoint` and `status.ca_certificate` come from the
+  kubeconfig (`kubeconfigEndpoint`), the endpoint falling back to
+  `Cluster.spec.controlPlaneEndpoint`; `status.description` is the v1beta2
+  object tree rendered by `RenderObjectTree` (`internal/capi/describe.go`),
+  the library's printer being internal to cluster-api.
+- **Update** re-runs `CreateCluster` against the current management cluster
+  (for a self-managed cluster, its own kubeconfig from `output`) with the
+  provider diff from §3.3; `SelfManaged` is always false there.
+- **Delete** (`Manager.DeleteCluster`) deletes the Cluster object and waits
+  for it to disappear (`Waiter.WaitForClusterDeleted`, bounded by
+  `wait.timeout`) before anything that manages the machines goes away; an
+  already-gone cluster is fine. A failure is an error, not a warning, so
+  Terraform never forgets provisioned machines. A self-managed (pivoted)
+  cluster is deleted the way CAPI documents it, reversing the create pivot
+  (`deleteSelfManaged`): a fresh **kind** bootstrap cluster (always
+  `r.manager`, never the Talos/Kairos bootstrapper) gets `clusterctl init`,
+  `management.addons` without prerequisites, the full inventory (BMC Secrets
+  do not move; rufio needs them to power machines off) and
+  `manifests.management`; the workload cluster is quiesced; `clusterctl move`
+  runs workload → bootstrap; the Cluster is deleted and waited for there; the
+  bootstrap cluster is deleted. A failure after the move started leaves the
+  bootstrap cluster in place (it may hold the only management objects); the
+  next destroy finds the Cluster gone from the workload, asks
+  `Bootstrapper.Exists` for `<name>-bootstrap` and resumes the deletion there.
+  `DeleteClusterOptions.Spec` carries the create options for this.
+  In-place Talos clusters still tear down through `TeardownInPlace`; a
+  lingering Kairos node is powered off first (`Manager.DeleteBootstrapCluster`).
+  `management.uninstall` runs `clusterctl delete --all` afterwards, only for
+  an external `management.kubeconfig` with `skip_init = false`.
+- **Import** accepts `[kubeconfig:][namespace/]name` (`parseImportID`): the
+  kubeconfig path and namespace seed `management` so the first Read fetches
+  the status; the configuration must repeat both since they RequiresReplace.
+
 ---
 
 ## 8. Migration Path
@@ -1539,9 +1611,10 @@ v2 upgraders rewrite the raw state JSON (`cluster_resource_upgrade.go`,
 becomes one machine deployment named `md-0`, and v3 adds `cluster_class: false`,
 `network: null`, `resource_config: null` on every provider entry and null
 `infrastructure`/`bootstrap` on the topology entries. `manifests`,
-`inventory.manage`, `management.addons`, `management.bootstrap.addons.prerequisites` and
-`management.bootstrap.kairos` joined v3 without a bump (`upgradeInventoryAndAddonsJSON`
-fills them; a v3 state that predates them decodes with nulls).
+`inventory.manage`, `management.addons`, `management.bootstrap.addons.prerequisites`,
+`management.bootstrap.kairos` and `management.uninstall` joined v3 without a bump
+(`upgradeInventoryAndAddonsJSON` fills them; a v3 state that predates them decodes
+with nulls).
 
 ---
 
@@ -1631,14 +1704,15 @@ Quick reference for where every attribute lives in the schema:
 | `id` | `id` | `StringAttribute` Computed | Computed |
 | `management_kubeconfig` | `management.kubeconfig` | `StringAttribute` Optional | Immutable |
 | `skip_init` | `management.skip_init` | `BoolAttribute` Optional | **Mutable** |
+| *(new)* | `management.uninstall` | `BoolAttribute` Optional, default false | **Mutable** (acts on destroy) |
 | `self_managed` | `management.self_managed` | `BoolAttribute` Optional | Immutable |
 | `target_namespace` | `management.namespace` | `StringAttribute` Optional | Immutable |
-| `infrastructure_provider` | `infrastructure.<name>` (+ `.version`) | `MapNestedAttribute` Required | Immutable |
-| `bootstrap_provider` | `bootstrap.<name>` | `MapNestedAttribute` Optional | Immutable |
-| `control_plane_provider` | `control_plane.<name>` | `MapNestedAttribute` Optional | Immutable |
-| `core_provider` | `core.<name>` | `MapNestedAttribute` Optional | Immutable |
-| *(new)* | `ipam.<name>` | `MapNestedAttribute` Optional | Immutable |
-| *(was `addons[]`)* | `addon.<name>` | `MapNestedAttribute` Optional | Immutable |
+| `infrastructure_provider` | `infrastructure.<name>` (+ `.version`) | `MapNestedAttribute` Required | Name change replaces; entry changes upgrade in place |
+| `bootstrap_provider` | `bootstrap.<name>` | `MapNestedAttribute` Optional | Name change replaces; entry changes upgrade in place |
+| `control_plane_provider` | `control_plane.<name>` | `MapNestedAttribute` Optional | Name change replaces; entry changes upgrade in place |
+| `core_provider` | `core.<name>` | `MapNestedAttribute` Optional | **Mutable** (upgrade in place; never deleted) |
+| *(new)* | `ipam.<name>` | `MapNestedAttribute` Optional | **Mutable** (init / upgrade / delete in place) |
+| *(was `addons[]`)* | `addon.<name>` | `MapNestedAttribute` Optional | **Mutable** (init / upgrade / delete in place) |
 | *(new)* | `<map>.<name>.fetch_config.{owner,repository,url,oci}` | `SingleNestedAttribute` Optional | Immutable |
 | *(new)* | `<map>.<name>.resource_config` | `StringAttribute` (YAML/JSON) Optional | **Mutable** (in-place re-apply) |
 | *(new)* | `cni.provider` / `cni.version` / `cni.values` | `SingleNestedAttribute` Optional | **Mutable** (Talos bootstrap only) |

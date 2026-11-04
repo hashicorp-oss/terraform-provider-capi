@@ -3,7 +3,11 @@
 
 package capi
 
-import "context"
+import (
+	"context"
+
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+)
 
 // Bootstrapper manages the lifecycle of a bootstrap Kubernetes cluster.
 // Modeled after EKS Anywhere's Bootstrapper interface.
@@ -54,11 +58,21 @@ type Quiescer interface {
 	WaitForQuiescence(ctx context.Context, mgmtCluster *Cluster, namespace string, opts WaitOptions) error
 }
 
-// Installer installs and manages CAPI components on a cluster.
+// Installer installs and manages CAPI components on a cluster: the
+// clusterctl init / upgrade apply / delete lifecycle.
 // Modeled after EKS Anywhere's CAPIClient.InitInfrastructure.
 type Installer interface {
-	// Init initializes CAPI providers on a cluster (clusterctl init).
+	// Init converges the cluster on the configured providers (clusterctl
+	// init): missing providers are installed, providers installed at a
+	// different pinned version are upgraded, the rest are left alone.
 	Init(ctx context.Context, cluster *Cluster, opts InitOptions) error
+
+	// Upgrade upgrades or re-renders the target providers in place
+	// (clusterctl upgrade apply).
+	Upgrade(ctx context.Context, cluster *Cluster, opts UpgradeOptions) error
+
+	// Uninstall deletes providers from the cluster (clusterctl delete).
+	Uninstall(ctx context.Context, cluster *Cluster, opts UninstallOptions) error
 }
 
 // ManifestGenerator builds the workload cluster's CAPI objects from the
@@ -68,13 +82,24 @@ type ManifestGenerator interface {
 	Generate(ctx context.Context, mgmt *Cluster, opts GenerateOptions) ([]byte, error)
 }
 
-// Applier applies and deletes Kubernetes manifests on a cluster.
-type Applier interface {
+// ManifestApplier applies Kubernetes manifests to a cluster.
+type ManifestApplier interface {
 	// Apply applies a YAML manifest to the cluster.
 	Apply(ctx context.Context, cluster *Cluster, manifest []byte) error
+}
 
-	// Delete deletes a CAPI cluster by name and namespace.
+// Applier applies manifests and manages the core Cluster object on a
+// management cluster.
+type Applier interface {
+	ManifestApplier
+
+	// Delete deletes a CAPI cluster by name and namespace. A cluster that
+	// does not exist returns an error wrapping ErrClusterNotFound.
 	Delete(ctx context.Context, cluster *Cluster, clusterName, namespace string) error
+
+	// Get reads the core Cluster object by name and namespace. A cluster
+	// that does not exist returns an error wrapping ErrClusterNotFound.
+	Get(ctx context.Context, cluster *Cluster, clusterName, namespace string) (*unstructured.Unstructured, error)
 }
 
 // Mover moves CAPI management resources between clusters.
@@ -95,6 +120,10 @@ type Waiter interface {
 
 	// WaitForClusterReady waits for the full cluster to be ready (control plane + workers).
 	WaitForClusterReady(ctx context.Context, mgmtCluster *Cluster, clusterName, namespace string, opts WaitOptions) error
+
+	// WaitForClusterDeleted waits for a deleted Cluster object to disappear,
+	// which is when every owned object (machines, infrastructure) is gone.
+	WaitForClusterDeleted(ctx context.Context, mgmtCluster *Cluster, clusterName, namespace string, opts WaitOptions) error
 }
 
 // KubeconfigRetriever retrieves kubeconfigs for workload clusters.

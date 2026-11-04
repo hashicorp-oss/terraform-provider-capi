@@ -20,12 +20,16 @@ package capi
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/client-go/tools/clientcmd"
 )
 
 // Manager orchestrates the full CAPI cluster lifecycle.
@@ -185,14 +189,10 @@ func (m *Manager) CreateCluster(ctx context.Context, opts CreateClusterOptions) 
 		namespace = "default"
 	}
 	if !opts.SkipInit {
-		m.logger.Printf("Installing CAPI providers on %s", mgmtCluster.Name)
-		initOpts := InitOptions{Providers: opts.Providers, Variables: initVariables(opts)}
-
-		if err := m.installer.Init(ctx, mgmtCluster, initOpts); err != nil {
+		if err := m.reconcileProviders(ctx, mgmtCluster, opts); err != nil {
 			m.cleanupOnError(ctx, bootstrapCluster)
-			return nil, fmt.Errorf("installing CAPI providers: %w", err)
+			return nil, err
 		}
-		m.logger.Printf("CAPI providers installed on %s", mgmtCluster.Name)
 	}
 
 	pivot := opts.SelfManaged && !opts.InPlace && needsBootstrap
@@ -313,6 +313,7 @@ func (m *Manager) CreateCluster(ctx context.Context, opts CreateClusterOptions) 
 		m.logger.Printf("Warning: could not retrieve kubeconfig: %v", err)
 	} else {
 		result.Kubeconfig = kubeconfig
+		result.Endpoint, result.CACertificate = kubeconfigEndpoint(kubeconfig)
 
 		// Write kubeconfig to disk if requested
 		if opts.KubeconfigOutputPath != "" {
@@ -437,8 +438,41 @@ func (m *Manager) CreateCluster(ctx context.Context, opts CreateClusterOptions) 
 	return result, nil
 }
 
+// reconcileProviders converges a management cluster on the configured
+// providers: clusterctl init for what is missing (and for pinned versions
+// that differ from the installed ones), clusterctl upgrade apply for the
+// entries whose settings changed, clusterctl delete for the entries dropped
+// from the configuration.
+func (m *Manager) reconcileProviders(ctx context.Context, mgmtCluster *Cluster, opts CreateClusterOptions) error {
+	m.logger.Printf("Installing CAPI providers on %s", mgmtCluster.Name)
+	variables := initVariables(opts)
+	if err := m.installer.Init(ctx, mgmtCluster, InitOptions{Providers: opts.Providers, Variables: variables}); err != nil {
+		return fmt.Errorf("installing CAPI providers: %w", err)
+	}
+	m.logger.Printf("CAPI providers installed on %s", mgmtCluster.Name)
+
+	if len(opts.UpgradeProviders) > 0 {
+		m.logger.Printf("Upgrading CAPI providers %v on %s", opts.UpgradeProviders, mgmtCluster.Name)
+		up := UpgradeOptions{Providers: opts.Providers, Targets: opts.UpgradeProviders, Variables: variables}
+		if err := m.installer.Upgrade(ctx, mgmtCluster, up); err != nil {
+			return fmt.Errorf("upgrading CAPI providers: %w", err)
+		}
+	}
+	if !opts.RemovedProviders.Empty() {
+		m.logger.Printf("Deleting CAPI providers %v from %s", opts.RemovedProviders.Keys(), mgmtCluster.Name)
+		if err := m.installer.Uninstall(ctx, mgmtCluster, UninstallOptions{Providers: opts.RemovedProviders}); err != nil {
+			return fmt.Errorf("deleting CAPI providers: %w", err)
+		}
+	}
+	return nil
+}
+
 // DeleteCluster deletes a CAPI cluster and optionally its bootstrap cluster.
-// This mirrors EKS Anywhere's delete workflow.
+// This mirrors EKS Anywhere's delete workflow: the Cluster object is deleted
+// and waited for, so every machine and its infrastructure is released before
+// anything that manages them goes away. A self-managed cluster first hands
+// management to a fresh bootstrap cluster, the reverse of the create pivot,
+// because deleting it from inside would power off its own controllers.
 func (m *Manager) DeleteCluster(ctx context.Context, opts DeleteClusterOptions) error {
 	m.logger.Printf("Deleting cluster %s", opts.Name)
 
@@ -472,20 +506,30 @@ func (m *Manager) DeleteCluster(ctx context.Context, opts DeleteClusterOptions) 
 		return nil
 	}
 
-	// Determine management cluster
-	var mgmtCluster *Cluster
-	if opts.ManagementKubeconfig != "" {
-		mgmtCluster = &Cluster{
-			Name:           "management",
-			KubeconfigPath: opts.ManagementKubeconfig,
-		}
-	} else {
+	if opts.ManagementKubeconfig == "" {
 		return fmt.Errorf("management kubeconfig is required for cluster deletion")
 	}
 
-	// Delete the CAPI cluster resources
-	if err := m.applier.Delete(ctx, mgmtCluster, opts.Name, namespace); err != nil {
-		return fmt.Errorf("deleting cluster %s: %w", opts.Name, err)
+	waitOpts := opts.Wait
+	if waitOpts.Timeout == 0 {
+		waitOpts = DefaultWaitOptions()
+	}
+
+	if opts.SelfManaged {
+		if err := m.deleteSelfManaged(ctx, opts, namespace, waitOpts); err != nil {
+			return err
+		}
+	} else {
+		mgmtCluster := &Cluster{Name: "management", KubeconfigPath: opts.ManagementKubeconfig}
+		if err := m.deleteClusterObject(ctx, mgmtCluster, opts.Name, namespace, waitOpts); err != nil {
+			return err
+		}
+		if opts.UninstallProviders {
+			m.logger.Printf("Deleting every CAPI provider from %s", mgmtCluster.Name)
+			if err := m.installer.Uninstall(ctx, mgmtCluster, UninstallOptions{All: true}); err != nil {
+				return fmt.Errorf("deleting CAPI providers: %w", err)
+			}
+		}
 	}
 
 	// Optionally delete the bootstrap cluster
@@ -500,7 +544,132 @@ func (m *Manager) DeleteCluster(ctx context.Context, opts DeleteClusterOptions) 
 	return nil
 }
 
-// GetClusterInfo retrieves current information about a cluster.
+// deleteClusterObject deletes the Cluster object and waits for it to
+// disappear. A cluster that is already gone is not an error.
+func (m *Manager) deleteClusterObject(ctx context.Context, mgmtCluster *Cluster, name, namespace string, waitOpts WaitOptions) error {
+	err := m.applier.Delete(ctx, mgmtCluster, name, namespace)
+	if errors.Is(err, ErrClusterNotFound) {
+		m.logger.Printf("Cluster %s/%s is already gone", namespace, name)
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("deleting cluster %s: %w", name, err)
+	}
+	m.logger.Printf("Waiting for cluster %s to be deleted", name)
+	if err := m.waiter.WaitForClusterDeleted(ctx, mgmtCluster, name, namespace, waitOpts); err != nil {
+		return fmt.Errorf("waiting for cluster %s to be deleted: %w", name, err)
+	}
+	return nil
+}
+
+// deleteSelfManaged deletes a cluster that manages itself: a bootstrap
+// cluster is created and initialised like at create time (providers,
+// management addons, inventory and management manifests, so rufio can power
+// the machines off), management is moved to it once nothing is mid-provision,
+// the Cluster object is deleted there and waited for, and the bootstrap
+// cluster is torn down. A failure after the move started leaves the
+// bootstrap cluster in place, since it may hold the only copy of the
+// management objects; the next deletion resumes from it.
+func (m *Manager) deleteSelfManaged(ctx context.Context, opts DeleteClusterOptions, namespace string, waitOpts WaitOptions) error {
+	workload := &Cluster{Name: opts.Name, KubeconfigPath: opts.ManagementKubeconfig, Namespace: namespace}
+	bootstrapName := fmt.Sprintf("%s-bootstrap", opts.Name)
+	if _, err := m.applier.Get(ctx, workload, opts.Name, namespace); err != nil {
+		if !errors.Is(err, ErrClusterNotFound) {
+			return fmt.Errorf("reading cluster %s before deletion: %w", opts.Name, err)
+		}
+		// Gone from the workload cluster: deleted out of band, or moved by
+		// an earlier deletion to a bootstrap cluster that outlived a failure.
+		exists, err := m.bootstrapper.Exists(ctx, bootstrapName)
+		if err != nil {
+			return fmt.Errorf("checking for a bootstrap cluster left by an earlier deletion of %s: %w", opts.Name, err)
+		}
+		if !exists {
+			m.logger.Printf("Cluster %s/%s no longer exists on itself; nothing to move", namespace, opts.Name)
+			return nil
+		}
+		m.logger.Printf("Resuming the deletion of %s from bootstrap cluster %s", opts.Name, bootstrapName)
+		bootstrap, err := m.bootstrapper.Create(ctx, BootstrapOptions{Name: bootstrapName, ProviderSecrets: opts.ProviderSecrets})
+		if err != nil {
+			return fmt.Errorf("reconnecting to bootstrap cluster %s: %w", bootstrapName, err)
+		}
+		if err := m.deleteClusterObject(ctx, bootstrap, opts.Name, namespace, waitOpts); err != nil {
+			return fmt.Errorf("%w (bootstrap cluster %s left in place for recovery)", err, bootstrap.Name)
+		}
+		if err := m.bootstrapper.Delete(ctx, bootstrap); err != nil {
+			m.logger.Printf("Warning: failed to delete bootstrap cluster %s: %v", bootstrap.Name, err)
+		}
+		return nil
+	}
+
+	m.logger.Printf("Creating bootstrap cluster to take over management of %s for deletion", opts.Name)
+	bootstrap, err := m.bootstrapper.Create(ctx, BootstrapOptions{
+		Name:              bootstrapName,
+		KubernetesVersion: opts.Spec.KubernetesVersion,
+		ProviderSecrets:   opts.ProviderSecrets,
+	})
+	if err != nil {
+		return fmt.Errorf("creating bootstrap cluster for deletion: %w", err)
+	}
+	spec := opts.Spec
+	spec.Name = opts.Name
+	spec.Namespace = namespace
+	prepare := func() error {
+		if err := m.installer.Init(ctx, bootstrap, InitOptions{Providers: spec.Providers, Variables: initVariables(spec)}); err != nil {
+			return fmt.Errorf("installing CAPI providers on the bootstrap cluster: %w", err)
+		}
+		if err := m.installAddons(ctx, bootstrap, spec.ManagementAddons, false); err != nil {
+			return fmt.Errorf("installing management addons on the bootstrap cluster: %w", err)
+		}
+		var manifests [][]byte
+		if inventory, err := inventoryManifest(spec, namespace, true); err != nil {
+			return fmt.Errorf("rendering inventory: %w", err)
+		} else if inventory != nil {
+			manifests = append(manifests, inventory)
+		}
+		manifests = append(manifests, spec.ManagementManifests...)
+		for i, manifest := range manifests {
+			if len(manifest) == 0 {
+				continue
+			}
+			if err := m.applier.Apply(ctx, bootstrap, manifest); err != nil {
+				return fmt.Errorf("applying management manifest %d to the bootstrap cluster: %w", i, err)
+			}
+		}
+		if err := m.quiescer.WaitForQuiescence(ctx, workload, namespace, waitOpts); err != nil {
+			return fmt.Errorf("waiting for provisioning to go idle before the move: %w", err)
+		}
+		return nil
+	}
+	if err := prepare(); err != nil {
+		m.cleanupOnError(ctx, bootstrap)
+		return err
+	}
+
+	m.logger.Printf("Moving CAPI management of %s to %s", opts.Name, bootstrap.Name)
+	if err := m.moveWithRetry(ctx, workload, bootstrap, MoveOptions{Namespace: namespace}); err != nil {
+		return fmt.Errorf("moving CAPI management to %s (left in place for recovery): %w", bootstrap.Name, err)
+	}
+	if err := m.deleteClusterObject(ctx, bootstrap, opts.Name, namespace, waitOpts); err != nil {
+		return fmt.Errorf("%w (bootstrap cluster %s left in place for recovery)", err, bootstrap.Name)
+	}
+
+	m.logger.Printf("Deleting bootstrap cluster %s", bootstrap.Name)
+	if err := m.bootstrapper.Delete(ctx, bootstrap); err != nil {
+		m.logger.Printf("Warning: failed to delete bootstrap cluster %s: %v", bootstrap.Name, err)
+	}
+	return nil
+}
+
+// DeleteBootstrapCluster deletes a bootstrap cluster by name, for one that
+// outlived its pivot (its deletion failed at create time).
+func (m *Manager) DeleteBootstrapCluster(ctx context.Context, name string, providerSecrets map[string]string) error {
+	return m.bootstrapper.Delete(ctx, &Cluster{Name: name, ProviderSecrets: providerSecrets})
+}
+
+// GetClusterInfo retrieves current information about a cluster. A cluster
+// whose Cluster object is gone returns an error wrapping ErrClusterNotFound;
+// an unreachable management cluster returns its error unchanged, so the
+// caller can tell the two apart.
 func (m *Manager) GetClusterInfo(ctx context.Context, mgmtKubeconfig, clusterName, namespace string) (*ClusterResult, error) {
 	mgmtCluster := &Cluster{
 		Name:           "management",
@@ -509,6 +678,11 @@ func (m *Manager) GetClusterInfo(ctx context.Context, mgmtKubeconfig, clusterNam
 
 	if namespace == "" {
 		namespace = "default"
+	}
+
+	obj, err := m.applier.Get(ctx, mgmtCluster, clusterName, namespace)
+	if err != nil {
+		return nil, fmt.Errorf("reading cluster %s: %w", clusterName, err)
 	}
 
 	result := &ClusterResult{
@@ -524,6 +698,10 @@ func (m *Manager) GetClusterInfo(ctx context.Context, mgmtKubeconfig, clusterNam
 		m.logger.Printf("Warning: could not retrieve kubeconfig: %v", err)
 	} else {
 		result.Kubeconfig = kubeconfig
+		result.Endpoint, result.CACertificate = kubeconfigEndpoint(kubeconfig)
+	}
+	if result.Endpoint == "" {
+		result.Endpoint = controlPlaneEndpoint(obj)
 	}
 
 	// Get description
@@ -535,6 +713,48 @@ func (m *Manager) GetClusterInfo(ctx context.Context, mgmtKubeconfig, clusterNam
 	}
 
 	return result, nil
+}
+
+// kubeconfigEndpoint returns the API server URL and the PEM CA certificate
+// of the kubeconfig's current context, or empty strings.
+func kubeconfigEndpoint(kubeconfig string) (endpoint, caCertificate string) {
+	cfg, err := clientcmd.Load([]byte(kubeconfig))
+	if err != nil {
+		return "", ""
+	}
+	name := cfg.CurrentContext
+	if name == "" {
+		for n := range cfg.Contexts {
+			name = n
+			break
+		}
+	}
+	context, ok := cfg.Contexts[name]
+	if !ok {
+		return "", ""
+	}
+	cluster, ok := cfg.Clusters[context.Cluster]
+	if !ok {
+		return "", ""
+	}
+	return cluster.Server, string(cluster.CertificateAuthorityData)
+}
+
+// controlPlaneEndpoint renders Cluster.spec.controlPlaneEndpoint as a URL,
+// or "" when unset.
+func controlPlaneEndpoint(obj *unstructured.Unstructured) string {
+	if obj == nil {
+		return ""
+	}
+	host, _, _ := unstructured.NestedString(obj.Object, "spec", "controlPlaneEndpoint", "host")
+	if host == "" {
+		return ""
+	}
+	port, _, _ := unstructured.NestedInt64(obj.Object, "spec", "controlPlaneEndpoint", "port")
+	if port == 0 {
+		port = 6443
+	}
+	return fmt.Sprintf("https://%s:%d", host, port)
 }
 
 // inventoryManifest renders the Tinkerbell inventory for the create options,

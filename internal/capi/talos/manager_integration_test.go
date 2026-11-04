@@ -9,6 +9,8 @@ import (
 	"log"
 	"testing"
 
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+
 	"github.com/tinkerbell-community/terraform-provider-capi/internal/capi"
 )
 
@@ -16,6 +18,12 @@ type noopInstaller struct{ inits []string }
 
 func (n *noopInstaller) Init(_ context.Context, c *capi.Cluster, _ capi.InitOptions) error {
 	n.inits = append(n.inits, c.Name)
+	return nil
+}
+func (n *noopInstaller) Upgrade(context.Context, *capi.Cluster, capi.UpgradeOptions) error {
+	return nil
+}
+func (n *noopInstaller) Uninstall(context.Context, *capi.Cluster, capi.UninstallOptions) error {
 	return nil
 }
 
@@ -29,6 +37,9 @@ type noopApplier struct{}
 
 func (noopApplier) Apply(context.Context, *capi.Cluster, []byte) error          { return nil }
 func (noopApplier) Delete(context.Context, *capi.Cluster, string, string) error { return nil }
+func (noopApplier) Get(context.Context, *capi.Cluster, string, string) (*unstructured.Unstructured, error) {
+	return &unstructured.Unstructured{}, nil
+}
 
 type noopMover struct{ moves int }
 
@@ -52,6 +63,9 @@ func (noopWaiter) WaitForWorkers(context.Context, *capi.Cluster, string, string,
 	return nil
 }
 func (noopWaiter) WaitForClusterReady(context.Context, *capi.Cluster, string, string, capi.WaitOptions) error {
+	return nil
+}
+func (noopWaiter) WaitForClusterDeleted(context.Context, *capi.Cluster, string, string, capi.WaitOptions) error {
 	return nil
 }
 

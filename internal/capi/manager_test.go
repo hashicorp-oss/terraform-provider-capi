@@ -377,10 +377,12 @@ func TestManager_CreateCluster_DefaultNamespace(t *testing.T) {
 func TestManager_DeleteCluster(t *testing.T) {
 	bootstrapper := &MockBootstrapper{}
 	applier := &MockApplier{}
+	waiter := &MockWaiter{}
 
 	mgr := NewManager(
 		WithBootstrapper(bootstrapper),
 		WithApplier(applier),
+		WithWaiter(waiter),
 	)
 
 	ctx := context.Background()
@@ -399,6 +401,9 @@ func TestManager_DeleteCluster(t *testing.T) {
 	if applier.DeleteCalls[0].ClusterName != "test-cluster" {
 		t.Errorf("expected cluster name 'test-cluster', got %q", applier.DeleteCalls[0].ClusterName)
 	}
+	if len(waiter.DeletedCalls) != 1 {
+		t.Errorf("the delete must wait for the Cluster object to disappear, got %d waits", len(waiter.DeletedCalls))
+	}
 }
 
 func TestManager_DeleteCluster_WithBootstrap(t *testing.T) {
@@ -408,6 +413,7 @@ func TestManager_DeleteCluster_WithBootstrap(t *testing.T) {
 	mgr := NewManager(
 		WithBootstrapper(bootstrapper),
 		WithApplier(applier),
+		WithWaiter(&MockWaiter{}),
 	)
 
 	ctx := context.Background()
@@ -461,6 +467,7 @@ func TestManager_GetClusterInfo(t *testing.T) {
 	mgr := NewManager(
 		WithInfoRetriever(retriever),
 		WithDescriber(describer),
+		WithApplier(&MockApplier{}),
 	)
 
 	ctx := context.Background()

@@ -35,6 +35,20 @@ var (
 
 	// ErrKubeconfig is returned when kubeconfig retrieval fails.
 	ErrKubeconfig = errors.New("failed to retrieve kubeconfig")
+
+	// ErrCAPIUpgrade is returned when a provider upgrade fails.
+	ErrCAPIUpgrade = errors.New("failed to upgrade CAPI components")
+
+	// ErrCAPIUninstall is returned when provider removal fails.
+	ErrCAPIUninstall = errors.New("failed to delete CAPI components")
+
+	// ErrClusterNotFound is returned when the Cluster object does not exist
+	// on the management cluster.
+	ErrClusterNotFound = errors.New("cluster not found")
+
+	// ErrClusterNotDeleted is returned when a deleted Cluster object does not
+	// disappear in time.
+	ErrClusterNotDeleted = errors.New("cluster was not deleted within timeout")
 )
 
 // BootstrapError wraps bootstrap-related errors with context.

@@ -5,6 +5,7 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"maps"
@@ -160,7 +161,13 @@ func (r *ClusterResource) Schema(ctx context.Context, req resource.SchemaRequest
 						},
 					},
 					"skip_init": schema.BoolAttribute{
-						MarkdownDescription: "Skip running clusterctl init on the management cluster. Use when CAPI providers are already installed.",
+						MarkdownDescription: "Skip running clusterctl init on the management cluster. Use when CAPI providers are already installed and managed elsewhere: the provider maps are then never installed, upgraded or deleted by this resource.",
+						Optional:            true,
+						Computed:            true,
+						Default:             booldefault.StaticBool(false),
+					},
+					"uninstall": schema.BoolAttribute{
+						MarkdownDescription: "On destroy, remove every CAPI provider from the management cluster once the cluster is gone (`clusterctl delete --all`, keeping CRDs and namespaces). Only for a management cluster given by `kubeconfig` that this resource initialised (`skip_init = false`); a bootstrap or self-managed cluster is deleted anyway. Leave unset when the management cluster is shared.",
 						Optional:            true,
 						Computed:            true,
 						Default:             booldefault.StaticBool(false),
@@ -352,12 +359,12 @@ func (r *ClusterResource) Schema(ctx context.Context, req resource.SchemaRequest
 			},
 
 			// --- providers (cluster-api-operator style maps keyed by provider name) ---
-			"core":           providerMapAttribute("Core CAPI provider, keyed by name (`cluster-api`). Omit to let clusterctl install the default.", false),
-			"infrastructure": providerMapAttribute("Infrastructure provider, keyed by name (e.g. `docker`, `tinkerbell`). Exactly one entry is required; with `control_plane` and `bootstrap` (default `kubeadm`) it selects the kinds of the generated cluster objects.", true),
-			"bootstrap":      providerMapAttribute("Bootstrap providers, keyed by name (e.g. `kubeadm`, `talos`).", false),
-			"control_plane":  providerMapAttribute("Control plane providers, keyed by name (e.g. `kubeadm`, `talos`).", false),
-			"ipam":           providerMapAttribute("IPAM providers, keyed by name (e.g. `in-cluster`, `unifi`).", false),
-			"addon":          providerMapAttribute("Addon providers, keyed by name (e.g. `helm`). An empty object installs the default release.", false),
+			"core":           providerMapAttribute("Core CAPI provider, keyed by name (`cluster-api`). Omit to let clusterctl install the default.", false, providerMapPinned),
+			"infrastructure": providerMapAttribute("Infrastructure provider, keyed by name (e.g. `docker`, `tinkerbell`). Exactly one entry is required; with `control_plane` and `bootstrap` (default `kubeadm`) it selects the kinds of the generated cluster objects.", true, providerMapStructural),
+			"bootstrap":      providerMapAttribute("Bootstrap providers, keyed by name (e.g. `kubeadm`, `talos`).", false, providerMapStructural),
+			"control_plane":  providerMapAttribute("Control plane providers, keyed by name (e.g. `kubeadm`, `talos`).", false, providerMapStructural),
+			"ipam":           providerMapAttribute("IPAM providers, keyed by name (e.g. `in-cluster`, `unifi`).", false, providerMapConverged),
+			"addon":          providerMapAttribute("Addon providers, keyed by name (e.g. `helm`). An empty object installs the default release.", false, providerMapConverged),
 
 			// --- topology ---
 			"topology": schema.SingleNestedAttribute{
@@ -590,15 +597,38 @@ func (r *ClusterResource) Schema(ctx context.Context, req resource.SchemaRequest
 // providerMapAttribute builds one of the six provider maps. Every map shares
 // providerNestedObject. Providers are installed once by clusterctl init, so
 // any change other than resource_config recreates the cluster.
-func providerMapAttribute(desc string, required bool) schema.MapNestedAttribute {
+// providerMapLifecycle is how a provider map reacts to entries coming and going.
+type providerMapLifecycle int
+
+const (
+	// providerMapStructural: the generated cluster objects follow the names,
+	// so adding or removing one replaces the cluster.
+	providerMapStructural providerMapLifecycle = iota
+	// providerMapConverged: added entries are installed, removed ones deleted.
+	providerMapConverged
+	// providerMapPinned: there is only one provider; an entry pins its version.
+	providerMapPinned
+)
+
+func providerMapAttribute(desc string, required bool, lifecycle providerMapLifecycle) schema.MapNestedAttribute {
+	const owned = " Entries are owned by this resource unless `management.skip_init` is set: a changed entry (version, fetch config, customizations) is upgraded in place with `clusterctl upgrade apply`"
+	var text string
+	var modifiers []planmodifier.Map
+	switch lifecycle {
+	case providerMapStructural:
+		text = owned + ". Adding or removing an entry changes the kinds of the generated cluster objects and recreates the cluster."
+		modifiers = []planmodifier.Map{providerMapRequiresReplace()}
+	case providerMapConverged:
+		text = owned + ", an added entry is installed, and a removed entry is deleted from the management cluster (`clusterctl delete`, keeping its CRDs)."
+	case providerMapPinned:
+		text = owned + "; removing the entry only stops pinning the version."
+	}
 	return schema.MapNestedAttribute{
-		MarkdownDescription: desc + " Each value is a provider object modeled after the cluster-api-operator provider CRDs (`operator.cluster.x-k8s.io/v1alpha2`); customizations are applied natively by wrapping the clusterctl repository factory, so the operator itself is not required. Changing anything but `resource_config` recreates the cluster.",
+		MarkdownDescription: desc + " Each value is a provider object modeled after the cluster-api-operator provider CRDs (`operator.cluster.x-k8s.io/v1alpha2`); customizations are applied natively by wrapping the clusterctl repository factory, so the operator itself is not required." + text,
 		Required:            required,
 		Optional:            !required,
 		NestedObject:        providerNestedObject(),
-		PlanModifiers: []planmodifier.Map{
-			providerMapRequiresReplace(),
-		},
+		PlanModifiers:       modifiers,
 	}
 }
 
@@ -646,9 +676,11 @@ func addonsAttribute(desc string) schema.SingleNestedAttribute {
 	}
 }
 
-// providerMapRequiresReplace replaces the cluster when a provider map changes
-// in any way other than an entry's resource_config, which is re-applied to the
-// generated cluster objects in place.
+// providerMapRequiresReplace replaces the cluster when the set of provider
+// names in a map changes, since the generated cluster objects depend on
+// which providers exist. Changes inside an entry are applied in place: a
+// resource_config change re-applies the cluster objects, anything else is a
+// provider upgrade.
 func providerMapRequiresReplace() planmodifier.Map {
 	return mapplanmodifier.RequiresReplaceIf(
 		func(ctx context.Context, req planmodifier.MapRequest, resp *mapplanmodifier.RequiresReplaceIfFuncResponse) {
@@ -656,11 +688,25 @@ func providerMapRequiresReplace() planmodifier.Map {
 				resp.RequiresReplace = true
 				return
 			}
-			resp.RequiresReplace = !withoutResourceConfig(ctx, req.StateValue).Equal(withoutResourceConfig(ctx, req.PlanValue))
+			resp.RequiresReplace = !sameKeys(req.StateValue, req.PlanValue)
 		},
-		"Changing anything but resource_config requires replacing the cluster.",
-		"Changing anything but `resource_config` requires replacing the cluster.",
+		"Adding or removing a provider requires replacing the cluster.",
+		"Adding or removing a provider requires replacing the cluster.",
 	)
+}
+
+// sameKeys reports whether two maps have the same keys.
+func sameKeys(a, b types.Map) bool {
+	ea, eb := a.Elements(), b.Elements()
+	if len(ea) != len(eb) {
+		return false
+	}
+	for k := range ea {
+		if _, ok := eb[k]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // withoutResourceConfig returns the provider map with every entry's
@@ -953,7 +999,16 @@ func (r *ClusterResource) Read(ctx context.Context, req resource.ReadRequest, re
 	}
 
 	result, err := r.manager.GetClusterInfo(ctx, mgmtKubeconfig, data.Name.ValueString(), namespace)
+	if errors.Is(err, capi.ErrClusterNotFound) {
+		// The Cluster object is gone from a reachable management cluster:
+		// deleted out of band. Drop it from state so the next apply recreates it.
+		tflog.Warn(ctx, "Cluster no longer exists on the management cluster, removing it from state", map[string]interface{}{"error": err.Error()})
+		resp.State.RemoveResource(ctx)
+		return
+	}
 	if err != nil {
+		// An unreachable management cluster is not a deleted cluster: keep
+		// the state as it is.
 		tflog.Warn(ctx, "Unable to read cluster info", map[string]interface{}{"error": err.Error()})
 		resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 		return
@@ -1001,8 +1056,19 @@ func (r *ClusterResource) Update(ctx context.Context, req resource.UpdateRequest
 	}
 	reconcileOpts.ManagementKubeconfig = managementKubeconfig
 	reconcileOpts.Namespace = namespace
-	reconcileOpts.SkipInit = true
 	reconcileOpts.SelfManaged = false
+
+	// Provider lifecycle. With skip_init the providers are managed elsewhere;
+	// otherwise the management cluster is converged on the provider maps,
+	// but only when they changed, since clusterctl init resolves every
+	// release again.
+	upgrade, removed, added, d := providerChanges(ctx, &state, &plan)
+	resp.Diagnostics.Append(d...)
+	reconcileOpts.UpgradeProviders = upgrade
+	reconcileOpts.RemovedProviders = removed
+	if !added && len(upgrade) == 0 && removed.Empty() {
+		reconcileOpts.SkipInit = true
+	}
 
 	// Seed the secrets persisted from create so the bootstrapper recognizes the
 	// node it owns and can reach it over the Talos API.
@@ -1070,6 +1136,22 @@ func (r *ClusterResource) Delete(ctx context.Context, req resource.DeleteRequest
 		ManagementKubeconfig: mgmtKubeconfig,
 		ProviderSecrets:      deleteSecrets,
 	}
+	// The configuration the cluster was created with: a self-managed cluster
+	// is deleted through a fresh bootstrap cluster initialised the same way.
+	if spec, d := buildCreateOptions(ctx, &data); !d.HasError() {
+		spec.ProviderSecrets = deleteSecrets
+		deleteOpts.Spec = *spec
+		deleteOpts.Wait = spec.Wait
+	} else {
+		resp.Diagnostics.Append(d...)
+		return
+	}
+	if mgmt != nil {
+		externalManagement := !mgmt.Kubeconfig.IsNull() && mgmt.Kubeconfig.ValueString() != ""
+		// A pivot only ever happens from a bootstrap cluster of our own.
+		deleteOpts.SelfManaged = mgmt.SelfManaged.ValueBool() && !externalManagement
+		deleteOpts.UninstallProviders = mgmt.Uninstall.ValueBool() && !mgmt.SkipInit.ValueBool() && externalManagement
+	}
 
 	status, _ := extractStatus(ctx, &data)
 	if status != nil && !status.BootstrapCluster.IsNull() {
@@ -1077,6 +1159,10 @@ func (r *ClusterResource) Delete(ctx context.Context, req resource.DeleteRequest
 		deleteOpts.BootstrapName = status.BootstrapCluster.ValueString()
 	}
 
+	// The default manager runs kind bootstrap clusters: it deletes a plain
+	// cluster and reverse-pivots a self-managed one. A physical bootstrap
+	// node needs its own bootstrapper.
+	mgr := r.manager
 	switch bootstrapType(ctx, &data) {
 	case "talos":
 		// A pivoted Talos bootstrap node was reset and released right after
@@ -1085,7 +1171,14 @@ func (r *ClusterResource) Delete(ctx context.Context, req resource.DeleteRequest
 		// the whole cluster is torn down node by node through the bootstrapper.
 		deleteOpts.DeleteBootstrap = false
 		if bs, _ := extractManagementBootstrap(ctx, mgmt); bs != nil && bs.Mode.ValueString() == "in_place" {
+			typed, d := r.managerFor(ctx, &data)
+			resp.Diagnostics.Append(d...)
+			if d.HasError() {
+				return
+			}
+			mgr = typed
 			deleteOpts.InPlace = true
+			deleteOpts.SelfManaged = false
 			deleteOpts.BootstrapMachine = bootstrapMachineHostname(ctx, &data)
 			if inv, _ := extractInventory(ctx, &data); inv != nil {
 				machines, d := extractInventoryMachines(ctx, inv)
@@ -1095,30 +1188,60 @@ func (r *ClusterResource) Delete(ctx context.Context, req resource.DeleteRequest
 		}
 	case "kairos":
 		// A disposable node is powered off right after the pivot. When that
-		// failed, status.bootstrap_cluster is still set and DeleteBootstrap
-		// powers it off now through the Kairos bootstrapper.
-	}
-	mgr, d := r.managerFor(ctx, &data)
-	resp.Diagnostics.Append(d...)
-	if d.HasError() {
-		mgr = r.manager
+		// failed, status.bootstrap_cluster is still set: power it off now
+		// through the Kairos bootstrapper, before the reverse pivot.
+		deleteOpts.DeleteBootstrap = false
+		if status != nil && !status.BootstrapCluster.IsNull() {
+			if typed, d := r.managerFor(ctx, &data); !d.HasError() {
+				if err := typed.DeleteBootstrapCluster(ctx, status.BootstrapCluster.ValueString(), deleteSecrets); err != nil {
+					resp.Diagnostics.AddWarning("Bootstrap Node Warning", fmt.Sprintf("Could not power off the Kairos bootstrap node: %s", err))
+				}
+			} else {
+				resp.Diagnostics.Append(d...)
+			}
+		}
 	}
 
-	if mgmtKubeconfig != "" || deleteOpts.InPlace {
-		if err := mgr.DeleteCluster(ctx, deleteOpts); err != nil {
-			resp.Diagnostics.AddWarning("Cluster Deletion Warning",
-				fmt.Sprintf("Error deleting cluster (may already be removed): %s", err))
-		}
-	} else {
+	if mgmtKubeconfig == "" && !deleteOpts.InPlace {
 		tflog.Warn(ctx, "No management kubeconfig for deletion - manual cleanup may be needed")
+		return
+	}
+	if err := mgr.DeleteCluster(ctx, deleteOpts); err != nil {
+		// A deletion that did not finish keeps the resource: the user fixes
+		// the cause and destroys again. A plain error, not a warning, or
+		// Terraform would forget machines that are still provisioned.
+		resp.Diagnostics.AddError("Cluster Deletion Error", fmt.Sprintf("Failed to delete cluster: %s", err))
 	}
 }
 
+// ImportState imports a cluster by `[kubeconfig:][namespace/]name`: the
+// name alone, `namespace/name`, or the management cluster's kubeconfig path
+// in front, which lets Read fetch the cluster's status right away. The
+// configuration must then set `management.kubeconfig` and `namespace` to
+// the same values, since both require replacement when changed.
 func (r *ClusterResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
-	resource.ImportStatePassthroughID(ctx, path.Root("id"), req, resp)
+	kubeconfig, namespace, name := parseImportID(req.ID)
+	if name == "" {
+		resp.Diagnostics.AddError("Invalid import ID", fmt.Sprintf("Expected [kubeconfig:][namespace/]name, got %q.", req.ID))
+		return
+	}
 	// The id is always the cluster name (see Create), and Read/Update rely on
 	// the name attribute being populated, so seed it here too.
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("name"), req.ID)...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), name)...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("name"), name)...)
+	if kubeconfig == "" && namespace == "" {
+		return
+	}
+	mgmt, d := types.ObjectValueFrom(ctx, managementAttrTypes(), ManagementModel{
+		Kubeconfig: stringOrNull(kubeconfig), Namespace: stringOrNull(namespace),
+		SkipInit: types.BoolNull(), SelfManaged: types.BoolNull(), Uninstall: types.BoolNull(),
+		Bootstrap: types.ObjectNull(managementBootstrapAttrTypes()), Addons: types.ObjectNull(bootstrapAddonsAttrTypes()),
+	})
+	resp.Diagnostics.Append(d...)
+	if d.HasError() {
+		return
+	}
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("management"), mgmt)...)
 }
 
 // UpgradeState migrates v0 (flat), v1 (nested objects with provider strings)
@@ -1430,6 +1553,7 @@ func (r *ClusterResource) ensureManagementComputed(ctx context.Context, data *Cl
 			Kubeconfig:  types.StringNull(),
 			SkipInit:    types.BoolValue(opts.SkipInit),
 			SelfManaged: types.BoolValue(opts.SelfManaged),
+			Uninstall:   types.BoolValue(false),
 			Namespace:   types.StringValue(namespace),
 			Bootstrap:   types.ObjectNull(managementBootstrapAttrTypes()),
 			Addons:      types.ObjectNull(bootstrapAddonsAttrTypes()),
@@ -1437,6 +1561,9 @@ func (r *ClusterResource) ensureManagementComputed(ctx context.Context, data *Cl
 	} else {
 		if mgmt.Namespace.IsNull() || mgmt.Namespace.ValueString() == "" {
 			mgmt.Namespace = types.StringValue(namespace)
+		}
+		if mgmt.Uninstall.IsNull() || mgmt.Uninstall.IsUnknown() {
+			mgmt.Uninstall = types.BoolValue(false)
 		}
 		if mgmt.Bootstrap.IsUnknown() {
 			mgmt.Bootstrap = types.ObjectNull(managementBootstrapAttrTypes())

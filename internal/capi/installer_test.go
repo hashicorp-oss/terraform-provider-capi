@@ -109,7 +109,7 @@ func TestNewClusterctlClient_ResolvesTemplateProvider(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	providers := ProviderSet{}
 	providers.Add(ProviderConfig{Type: ProviderTypeInfrastructure, Name: "tinkerbell", Version: "v0.7.9", FetchConfig: &FetchConfig{Owner: "tinkerbell-community"}})
-	client, err := newClusterctlClient(context.Background(), "", providers, map[string]string{"CONTROL_PLANE_VIP": "10.0.0.160"})
+	client, _, err := newClusterctlClient(context.Background(), "", providers, map[string]string{"CONTROL_PLANE_VIP": "10.0.0.160"})
 	if err != nil {
 		t.Fatal(err)
 	}

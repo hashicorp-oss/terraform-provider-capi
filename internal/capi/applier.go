@@ -10,10 +10,10 @@ import (
 	"fmt"
 	"io"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 	k8syaml "k8s.io/apimachinery/pkg/util/yaml"
 	"k8s.io/client-go/discovery"
@@ -142,49 +142,63 @@ func (a *DynamicApplier) Apply(ctx context.Context, cluster *Cluster, manifest [
 	return nil
 }
 
-// Delete deletes a CAPI cluster by name and namespace from the management cluster.
-// Uses foreground cascading delete to ensure all owned resources are cleaned up.
+// Delete deletes a CAPI cluster by name and namespace from the management
+// cluster, at the core API version the cluster stores. Uses foreground
+// cascading delete to ensure all owned resources are cleaned up. A cluster
+// that does not exist returns ErrClusterNotFound; callers wait for the
+// object to disappear with Waiter.WaitForClusterDeleted.
 func (a *DynamicApplier) Delete(ctx context.Context, cluster *Cluster, clusterName, namespace string) error {
-	config, err := clientcmd.BuildConfigFromFlags("", cluster.KubeconfigPath)
+	const op = "delete-cluster"
+	clusters, err := a.clusters(ctx, cluster, namespace)
 	if err != nil {
-		return &CAPIError{
-			Operation: "delete-cluster",
-			Cluster:   cluster.Name,
-			Err:       fmt.Errorf("%w: loading kubeconfig: %v", ErrManifestDelete, err),
-		}
-	}
-
-	dynClient, err := dynamic.NewForConfig(config)
-	if err != nil {
-		return &CAPIError{
-			Operation: "delete-cluster",
-			Cluster:   cluster.Name,
-			Err:       fmt.Errorf("%w: creating dynamic client: %v", ErrManifestDelete, err),
-		}
-	}
-
-	if namespace == "" {
-		namespace = "default"
+		return &CAPIError{Operation: op, Cluster: cluster.Name, Err: fmt.Errorf("%w: %v", ErrManifestDelete, err)}
 	}
 
 	// Delete the CAPI Cluster resource - CAPI controllers will cascade delete all owned resources.
-	gvr := schema.GroupVersionResource{
-		Group:    "cluster.x-k8s.io",
-		Version:  "v1beta1",
-		Resource: "clusters",
-	}
-
 	propagationPolicy := meta_v1.DeletePropagationForeground
-	err = dynClient.Resource(gvr).Namespace(namespace).Delete(ctx, clusterName, meta_v1.DeleteOptions{
-		PropagationPolicy: &propagationPolicy,
-	})
-	if err != nil {
-		return &CAPIError{
-			Operation: "delete-cluster",
-			Cluster:   cluster.Name,
-			Err:       fmt.Errorf("%w: %v", ErrManifestDelete, err),
-		}
+	err = clusters.Delete(ctx, clusterName, meta_v1.DeleteOptions{PropagationPolicy: &propagationPolicy})
+	if apierrors.IsNotFound(err) {
+		return &CAPIError{Operation: op, Cluster: cluster.Name, Err: fmt.Errorf("%w: %s/%s", ErrClusterNotFound, namespace, clusterName)}
 	}
-
+	if err != nil {
+		return &CAPIError{Operation: op, Cluster: cluster.Name, Err: fmt.Errorf("%w: %v", ErrManifestDelete, err)}
+	}
 	return nil
+}
+
+// Get reads the core Cluster object. A cluster that does not exist returns
+// ErrClusterNotFound; any other failure (unreachable management cluster,
+// CAPI not installed) is reported as is, so a caller never mistakes an
+// outage for a deleted cluster.
+func (a *DynamicApplier) Get(ctx context.Context, cluster *Cluster, clusterName, namespace string) (*unstructured.Unstructured, error) {
+	const op = "get-cluster"
+	clusters, err := a.clusters(ctx, cluster, namespace)
+	if err != nil {
+		return nil, &CAPIError{Operation: op, Cluster: cluster.Name, Err: err}
+	}
+	obj, err := clusters.Get(ctx, clusterName, meta_v1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil, &CAPIError{Operation: op, Cluster: cluster.Name, Err: fmt.Errorf("%w: %s/%s", ErrClusterNotFound, namespace, clusterName)}
+	}
+	if err != nil {
+		return nil, &CAPIError{Operation: op, Cluster: cluster.Name, Err: err}
+	}
+	return obj, nil
+}
+
+// clusters returns the namespaced client for core Cluster objects at the
+// version the management cluster stores.
+func (a *DynamicApplier) clusters(ctx context.Context, cluster *Cluster, namespace string) (dynamic.ResourceInterface, error) {
+	dynClient, err := buildDynamicClient(cluster.KubeconfigPath)
+	if err != nil {
+		return nil, err
+	}
+	coreVersion, err := coreClusterVersion(ctx, dynClient)
+	if err != nil {
+		return nil, err
+	}
+	if namespace == "" {
+		namespace = "default"
+	}
+	return dynClient.Resource(clustersGVR(coreVersion)).Namespace(namespace), nil
 }

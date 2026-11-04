@@ -8,7 +8,9 @@ import (
 	"fmt"
 
 	clusterctlclient "sigs.k8s.io/cluster-api/cmd/clusterctl/client"
+	"sigs.k8s.io/cluster-api/cmd/clusterctl/client/cluster"
 	"sigs.k8s.io/cluster-api/cmd/clusterctl/client/config"
+	"sigs.k8s.io/cluster-api/cmd/clusterctl/client/repository"
 )
 
 // newClusterctlClient builds a clusterctl client that knows every provider in
@@ -17,20 +19,49 @@ import (
 // config reader, and component customizations are applied through the
 // injected repository factory. variables become clusterctl variables, ahead
 // of the config file and environment. Every clusterctl operation that
-// resolves a provider by name (init, template generation) must go through
-// this so the same names work everywhere.
-func newClusterctlClient(ctx context.Context, configPath string, providers ProviderSet, variables map[string]string) (clusterctlclient.Client, error) {
+// resolves a provider by name (init, upgrade, delete) must go through this so
+// the same names work everywhere. The config client is returned for callers
+// that need to read the cluster's provider inventory.
+func newClusterctlClient(ctx context.Context, configPath string, providers ProviderSet, variables map[string]string) (clusterctlclient.Client, config.Client, error) {
 	configClient, _, err := newProviderConfigClient(ctx, configPath, providers)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	for k, v := range variables {
 		configClient.Variables().Set(k, v)
 	}
-	return clusterctlclient.New(ctx, configPath,
+	repoFactory := NewCustomizingRepoFactory(configClient, providers.Customized())
+	c, err := clusterctlclient.New(ctx, configPath,
 		clusterctlclient.InjectConfig(configClient),
-		clusterctlclient.InjectRepositoryFactory(NewCustomizingRepoFactory(configClient, providers.Customized())),
+		clusterctlclient.InjectRepositoryFactory(repoFactory),
+		clusterctlclient.InjectClusterClientFactory(customizingClusterFactory(configClient, repoFactory)),
 	)
+	if err != nil {
+		return nil, nil, err
+	}
+	return c, configClient, nil
+}
+
+// customizingClusterFactory mirrors clusterctl's default cluster client
+// factory but routes the cluster client's repository access through the
+// customizing factory too. clusterctl only propagates the injected repository
+// factory to init; upgrade apply fetches components through the cluster
+// client, and without this an upgrade would drop every customization init
+// applied.
+func customizingClusterFactory(configClient config.Client, repoFactory clusterctlclient.RepositoryClientFactory) clusterctlclient.ClusterClientFactory {
+	return func(input clusterctlclient.ClusterClientFactoryInput) (cluster.Client, error) {
+		return cluster.New(
+			cluster.Kubeconfig(input.Kubeconfig),
+			configClient,
+			cluster.InjectYamlProcessor(input.Processor),
+			cluster.InjectRepositoryFactory(func(ctx context.Context, provider config.Provider, _ config.Client, _ ...repository.Option) (repository.Client, error) {
+				return repoFactory(ctx, clusterctlclient.RepositoryClientFactoryInput{
+					Provider:  clusterctlclient.Provider(provider),
+					Processor: input.Processor,
+				})
+			}),
+		), nil
+	}
 }
 
 // newProviderConfigClient creates the overlay-backed clusterctl config client

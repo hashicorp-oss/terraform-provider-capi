@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -95,6 +96,33 @@ func (w *DynamicWaiter) WaitForClusterReady(ctx context.Context, mgmtCluster *Cl
 		return &CAPIError{Operation: op, Cluster: clusterName, Err: fmt.Errorf("%w: waiting for cluster readiness: %v", ErrClusterNotReady, err)}
 	}
 	return nil
+}
+
+// WaitForClusterDeleted waits for a deleted Cluster object to disappear. CAPI
+// removes it only once every owned object is gone, so this is when the
+// machines and their infrastructure have been released.
+func (w *DynamicWaiter) WaitForClusterDeleted(ctx context.Context, mgmtCluster *Cluster, clusterName, namespace string, opts WaitOptions) error {
+	const op = "wait-cluster-deleted"
+	namespace, timeout, pollInterval := waitDefaults(namespace, opts)
+
+	dynClient, coreVersion, err := w.connect(ctx, mgmtCluster)
+	if err != nil {
+		return &CAPIError{Operation: op, Cluster: clusterName, Err: fmt.Errorf("%w: %v", ErrClusterNotDeleted, err)}
+	}
+	clusters := dynClient.Resource(clustersGVR(coreVersion)).Namespace(namespace)
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		_, getErr := clusters.Get(ctx, clusterName, meta_v1.GetOptions{})
+		if apierrors.IsNotFound(getErr) {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(pollInterval):
+		}
+	}
+	return &CAPIError{Operation: op, Cluster: clusterName, Err: fmt.Errorf("%w: %s/%s still exists after %v", ErrClusterNotDeleted, namespace, clusterName, timeout)}
 }
 
 // connect builds the dynamic client and discovers the core API version.

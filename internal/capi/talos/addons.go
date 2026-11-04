@@ -69,14 +69,14 @@ type AddonInstaller interface {
 // manifests through a capi.Applier.
 type DefaultAddonInstaller struct {
 	helm    HelmClient
-	applier capi.Applier
+	applier capi.ManifestApplier
 	logger  *log.Logger
 	// httpGet fetches a URL's body; overridable in tests.
 	httpGet func(ctx context.Context, url string) ([]byte, error)
 }
 
 // NewAddonInstaller wires a HelmClient and an Applier.
-func NewAddonInstaller(helm HelmClient, applier capi.Applier, logger *log.Logger) *DefaultAddonInstaller {
+func NewAddonInstaller(helm HelmClient, applier capi.ManifestApplier, logger *log.Logger) *DefaultAddonInstaller {
 	if logger == nil {
 		logger = log.New(log.Writer(), "[talos-addons] ", log.LstdFlags)
 	}

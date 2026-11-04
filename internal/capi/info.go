@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	clusterctlclient "sigs.k8s.io/cluster-api/cmd/clusterctl/client"
 )
@@ -65,14 +66,16 @@ func (r *ClusterctlInfoRetriever) Describe(ctx context.Context, mgmtCluster *Clu
 		}
 	}
 
+	// The v1beta2 object tree: Available/Ready conditions, machines grouped
+	// by state, templates and MachineSets left out, as `clusterctl describe
+	// cluster` shows by default.
 	opts := clusterctlclient.DescribeClusterOptions{
 		Kubeconfig: clusterctlclient.Kubeconfig{
 			Path: mgmtCluster.KubeconfigPath,
 		},
-		Namespace:           namespace,
-		ClusterName:         clusterName,
-		ShowOtherConditions: "all",
-		Grouping:            true,
+		Namespace:   namespace,
+		ClusterName: clusterName,
+		Grouping:    true,
 	}
 
 	tree, err := client.DescribeCluster(ctx, opts)
@@ -92,17 +95,7 @@ func (r *ClusterctlInfoRetriever) Describe(ctx context.Context, mgmtCluster *Clu
 		}
 	}
 
-	root := tree.GetRoot()
-	kind := "Cluster"
-	if objKind := root.GetObjectKind(); objKind != nil {
-		gvk := objKind.GroupVersionKind()
-		if gvk.Kind != "" {
-			kind = gvk.Kind
-		}
-	}
-
-	return fmt.Sprintf("NAME: %s\nNAMESPACE: %s\nKIND: %s",
-		root.GetName(), root.GetNamespace(), kind), nil
+	return RenderObjectTree(tree, time.Now()), nil
 }
 
 // WriteKubeconfig retrieves the workload cluster kubeconfig and writes it to disk.

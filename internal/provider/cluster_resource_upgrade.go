@@ -341,6 +341,9 @@ func upgradeInventoryAndAddonsJSON(state map[string]json.RawMessage) error {
 	if _, ok := mgmt["addons"]; !ok {
 		mgmt["addons"] = nullJSON
 	}
+	if _, ok := mgmt["uninstall"]; !ok {
+		mgmt["uninstall"] = json.RawMessage("false")
+	}
 	bs, err := rawObject(mgmt["bootstrap"])
 	if err != nil {
 		return fmt.Errorf("management.bootstrap: %w", err)
