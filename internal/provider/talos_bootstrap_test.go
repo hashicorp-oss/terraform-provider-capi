@@ -37,8 +37,9 @@ func TestBuildTalosBootstrapConfig_Full(t *testing.T) {
 	tm.Endpoint = types.StringValue("https://10.1.1.100:6443")
 	manifests, _ := types.ListValueFrom(ctx, types.StringType, []string{"kind: Namespace\n"})
 	addons := &BootstrapAddonsModel{
-		Helm:      testHelmList(ctx, t, []HelmReleaseModel{helmRel("cilium", "kube-system", "oci://quay.io/cilium/charts/cilium", "12m", "k: v\n")}),
-		Manifests: manifests,
+		Prerequisites: types.ListNull(types.StringType),
+		Helm:          testHelmList(ctx, t, []HelmReleaseModel{helmRel("cilium", "kube-system", "oci://quay.io/cilium/charts/cilium", "12m", "k: v\n")}),
+		Manifests:     manifests,
 	}
 	data := talosTestData(ctx, t, buildTestBootstrap(ctx, t, "talos", "cp-1", boot, tm, addons), goodMachine)
 
@@ -121,13 +122,13 @@ func TestBuildTalosBootstrapConfig_CNICilium(t *testing.T) {
 		t.Errorf("expected the cilium CNI patch prepended, got %v", cfg.Talos.ConfigPatches)
 	}
 	var cilium *talos.HelmRelease
-	for i := range cfg.Addons.Helm {
-		if cfg.Addons.Helm[i].Name == "cilium" {
-			cilium = &cfg.Addons.Helm[i]
+	for i := range cfg.Addons.CNI {
+		if cfg.Addons.CNI[i].Name == "cilium" {
+			cilium = &cfg.Addons.CNI[i]
 		}
 	}
 	if cilium == nil {
-		t.Fatalf("expected a cilium helm release, got %+v", cfg.Addons.Helm)
+		t.Fatalf("expected a cilium CNI release, got %+v", cfg.Addons.CNI)
 	}
 	if cilium.Version != "1.18.0" || !strings.Contains(cilium.Values, "kubeProxyReplacement: false") {
 		t.Errorf("cilium release = %+v", cilium)

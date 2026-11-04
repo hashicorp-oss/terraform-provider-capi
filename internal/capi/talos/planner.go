@@ -11,6 +11,9 @@ type PlanInput struct {
 	MaxAttempts int
 	// HasAddons is true when at least one Helm release or manifest was configured.
 	HasAddons bool
+	// PinNetwork is true when the node's static identity must be written to
+	// META once it runs (static addressing was configured).
+	PinNetwork bool
 }
 
 // Plan chooses exactly one action from the observation and history. It is a
@@ -61,6 +64,8 @@ func Plan(in PlanInput) Action {
 			return Action{Kind: ActionDetachMedia}
 		case obs.Etcd != EtcdBootstrapped:
 			return Action{Kind: ActionBootstrapEtcd}
+		case in.PinNetwork && !h.NetworkPinned:
+			return Action{Kind: ActionPinNetwork}
 		case obs.Kubernetes == K8sUnreachable:
 			return Action{Kind: ActionWaitKubernetes}
 		case !h.AddonsInstalled:

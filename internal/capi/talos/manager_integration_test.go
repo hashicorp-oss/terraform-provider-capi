@@ -37,6 +37,12 @@ func (m *noopMover) Move(context.Context, *capi.Cluster, *capi.Cluster, capi.Mov
 	return nil
 }
 
+type noopQuiescer struct{}
+
+func (noopQuiescer) WaitForQuiescence(context.Context, *capi.Cluster, string, capi.WaitOptions) error {
+	return nil
+}
+
 type noopWaiter struct{}
 
 func (noopWaiter) WaitForControlPlane(context.Context, *capi.Cluster, string, string, capi.WaitOptions) error {
@@ -73,6 +79,7 @@ func TestManager_UsesTalosBootstrapperForSelfManagedCreate(t *testing.T) {
 		capi.WithWaiter(noopWaiter{}),
 		capi.WithInfoRetriever(noopInfo{}),
 		capi.WithDescriber(noopInfo{}),
+		capi.WithQuiescer(noopQuiescer{}),
 		capi.WithLogger(log.New(io.Discard, "", 0)),
 	)
 

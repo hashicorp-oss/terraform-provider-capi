@@ -1,0 +1,154 @@
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: cp-1-bmc-auth
+  namespace: tinkerbell
+  labels:
+    cluster.x-k8s.io/cluster-name: bm-cluster
+type: kubernetes.io/basic-auth
+data:
+  username: YWRtaW4=
+  password: c2VjcmV0
+---
+apiVersion: bmc.tinkerbell.org/v1alpha1
+kind: Machine
+metadata:
+  name: cp-1
+  namespace: tinkerbell
+  labels:
+    cluster.x-k8s.io/cluster-name: bm-cluster
+spec:
+  connection:
+    host: 10.0.197.82
+    insecureTLS: true
+    authSecretRef:
+      name: cp-1-bmc-auth
+      namespace: tinkerbell
+    providerOptions:
+      preferredOrder: [gofish]
+      redfish:
+        useBasicAuth: true
+---
+apiVersion: tinkerbell.org/v1alpha1
+kind: Hardware
+metadata:
+  name: cp-1
+  namespace: tinkerbell
+  labels:
+    cluster.x-k8s.io/cluster-name: bm-cluster
+    type: cp
+  annotations:
+    v1alpha1.tinkerbell.org/provisioned: "true"
+spec:
+  agentID: aa:bb:cc:dd:ee:01
+  bmcRef:
+    apiGroup: bmc.tinkerbell.org
+    kind: Machine
+    name: cp-1
+  disks:
+    - device: /dev/nvme0n1
+  metadata:
+    instance:
+      id: aa:bb:cc:dd:ee:01
+      hostname: cp-1
+  interfaces:
+    - dhcp:
+        mac: aa:bb:cc:dd:ee:01
+        hostname: cp-1
+        lease_time: 86400
+        ip:
+          address: 10.1.40.35
+          netmask: 255.255.0.0
+          gateway: 10.0.0.1
+        name_servers: [10.0.0.1, 1.1.1.1]
+      netboot:
+        allowPXE: false
+        allowWorkflow: true
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: nuc-15-bmc-auth
+  namespace: tinkerbell
+  labels:
+    cluster.x-k8s.io/cluster-name: bm-cluster
+type: kubernetes.io/basic-auth
+data:
+  username: YWRtaW4=
+  password: YW10LXBhc3M=
+---
+apiVersion: bmc.tinkerbell.org/v1alpha1
+kind: Machine
+metadata:
+  name: nuc-15
+  namespace: tinkerbell
+  labels:
+    cluster.x-k8s.io/cluster-name: bm-cluster
+spec:
+  connection:
+    host: 10.1.40.38
+    port: 16993
+    insecureTLS: true
+    authSecretRef:
+      name: nuc-15-bmc-auth
+      namespace: tinkerbell
+    providerOptions:
+      preferredOrder: [IntelAMT]
+      intelAMT:
+        port: 16993
+        hostScheme: https
+---
+apiVersion: tinkerbell.org/v1alpha1
+kind: Hardware
+metadata:
+  name: nuc-15
+  namespace: tinkerbell
+  labels:
+    cluster.x-k8s.io/cluster-name: bm-cluster
+    type: worker
+spec:
+  agentID: 88:ae:dd:75:3d:a0
+  bmcRef:
+    apiGroup: bmc.tinkerbell.org
+    kind: Machine
+    name: nuc-15
+  disks:
+    - device: /dev/nvme0n1
+  metadata:
+    instance:
+      id: 88:ae:dd:75:3d:a0
+      hostname: nuc-15
+  interfaces:
+    - dhcp:
+        mac: 88:ae:dd:75:3d:a0
+        hostname: nuc-15
+        lease_time: 86400
+        vlan_id: "40"
+      netboot:
+        allowPXE: true
+        allowWorkflow: true
+---
+apiVersion: tinkerbell.org/v1alpha1
+kind: Hardware
+metadata:
+  name: pi-3
+  namespace: tinkerbell
+  labels:
+    cluster.x-k8s.io/cluster-name: bm-cluster
+spec:
+  agentID: dc:a6:32:00:00:03
+  metadata:
+    instance:
+      id: dc:a6:32:00:00:03
+      hostname: pi-3
+  interfaces:
+    - dhcp:
+        mac: dc:a6:32:00:00:03
+        hostname: pi-3
+        lease_time: 86400
+        ip:
+          address: 10.1.40.33
+      netboot:
+        allowPXE: true
+        allowWorkflow: true

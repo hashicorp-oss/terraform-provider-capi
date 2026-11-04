@@ -97,6 +97,7 @@ func buildTestBootstrap(ctx context.Context, t *testing.T, typ, machine string, 
 		Machine: types.StringValue(machine),
 		Boot:    types.ObjectNull(bootAttrTypes()),
 		Talos:   types.ObjectNull(talosAttrTypes()),
+		Kairos:  types.ObjectNull(kairosAttrTypes()),
 		Addons:  types.ObjectNull(bootstrapAddonsAttrTypes()),
 	}
 	if machine == "" {
@@ -138,7 +139,7 @@ func talosTestData(ctx context.Context, t *testing.T, bootstrap types.Object, ma
 	infraVal := mustProviderMap(t, ctx, map[string]ProviderModel{"tinkerbell": tink})
 	mgmtVal, d := types.ObjectValueFrom(ctx, managementAttrTypes(), ManagementModel{
 		Kubeconfig: types.StringNull(), SkipInit: types.BoolValue(false), SelfManaged: types.BoolValue(true),
-		Namespace: types.StringNull(), Bootstrap: bootstrap,
+		Namespace: types.StringNull(), Bootstrap: bootstrap, Addons: types.ObjectNull(bootstrapAddonsAttrTypes()),
 	})
 	if d.HasError() {
 		t.Fatalf("build management: %v", d)
@@ -280,6 +281,7 @@ func TestValidateManagementBootstrap_InvalidPatchYAML(t *testing.T) {
 func TestValidateManagementBootstrap_HelmRules(t *testing.T) {
 	ctx := context.Background()
 	addons := &BootstrapAddonsModel{
+		Prerequisites: types.ListNull(types.StringType),
 		Helm: testHelmList(ctx, t, []HelmReleaseModel{
 			helmRel("cilium", "kube-system", "oci://x", "", ""),
 			helmRel("cilium", "kube-system", "oci://y", "later", "a: [b"),
@@ -299,8 +301,9 @@ func TestValidateManagementBootstrap_Valid(t *testing.T) {
 	img := testImageModel(ctx, t, "", "", "", []string{"iscsi-tools"})
 	tm := testTalosModel(ctx, t, img, []string{"cluster:\n  network:\n    cni:\n      name: none\n"})
 	addons := &BootstrapAddonsModel{
-		Helm:      testHelmList(ctx, t, []HelmReleaseModel{helmRel("cert-manager", "cert-manager", "oci://quay.io/jetstack/charts/cert-manager", "10m", "crds:\n  enabled: true\n")}),
-		Manifests: types.ListNull(types.StringType),
+		Prerequisites: types.ListNull(types.StringType),
+		Helm:          testHelmList(ctx, t, []HelmReleaseModel{helmRel("cert-manager", "cert-manager", "oci://quay.io/jetstack/charts/cert-manager", "10m", "crds:\n  enabled: true\n")}),
+		Manifests:     types.ListNull(types.StringType),
 	}
 	data := talosTestData(ctx, t, buildTestBootstrap(ctx, t, "talos", "cp-1", boot, tm, addons), goodMachine)
 	if diags := runValidate(t, data); diags.HasError() {
@@ -362,7 +365,7 @@ func TestClusterResource_Schema_ManagementBootstrap(t *testing.T) {
 
 func TestExtractManagementBootstrap_Null(t *testing.T) {
 	ctx := context.Background()
-	mgmt := &ManagementModel{Bootstrap: types.ObjectNull(managementBootstrapAttrTypes())}
+	mgmt := &ManagementModel{Bootstrap: types.ObjectNull(managementBootstrapAttrTypes()), Addons: types.ObjectNull(bootstrapAddonsAttrTypes())}
 	bs, diags := extractManagementBootstrap(ctx, mgmt)
 	if bs != nil || diags.HasError() {
 		t.Fatalf("extract null: bs=%v diags=%v", bs, diags)

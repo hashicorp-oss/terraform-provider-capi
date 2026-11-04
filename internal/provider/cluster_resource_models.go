@@ -71,6 +71,7 @@ type ClusterResourceModel struct {
 	Topology       types.Object `tfsdk:"topology"`
 	Network        types.Object `tfsdk:"network"` // ClusterNetworkModel
 	CNI            types.Object `tfsdk:"cni"`
+	Manifests      types.Object `tfsdk:"manifests"` // ManifestsModel
 	Inventory      types.Object `tfsdk:"inventory"`
 	Wait           types.Object `tfsdk:"wait"`
 	Output         types.Object `tfsdk:"output"`
@@ -84,6 +85,7 @@ type ManagementModel struct {
 	SelfManaged types.Bool   `tfsdk:"self_managed"`
 	Namespace   types.String `tfsdk:"namespace"`
 	Bootstrap   types.Object `tfsdk:"bootstrap"` // ManagementBootstrapModel
+	Addons      types.Object `tfsdk:"addons"`    // BootstrapAddonsModel: management-plane addons
 }
 
 // ManagementBootstrapModel configures the transient bootstrap cluster.
@@ -94,6 +96,7 @@ type ManagementBootstrapModel struct {
 	Machine  types.String `tfsdk:"machine"`
 	Boot     types.Object `tfsdk:"boot"`   // BootModel
 	Talos    types.Object `tfsdk:"talos"`  // TalosModel
+	Kairos   types.Object `tfsdk:"kairos"` // KairosModel
 	Addons   types.Object `tfsdk:"addons"` // BootstrapAddonsModel
 }
 
@@ -124,10 +127,26 @@ type TalosImageModel struct {
 	Installer  types.String `tfsdk:"installer"`
 }
 
+// KairosModel configures the disposable Kairos live node (type = "kairos").
+type KairosModel struct {
+	ISO     types.String `tfsdk:"iso"`
+	Address types.String `tfsdk:"address"`
+	SSH     types.Object `tfsdk:"ssh"` // KairosSSHModel
+}
+
+// KairosSSHModel is how the live node is reached.
+type KairosSSHModel struct {
+	User       types.String `tfsdk:"user"`
+	Port       types.Int64  `tfsdk:"port"`
+	PrivateKey types.String `tfsdk:"private_key"`
+	HostKey    types.String `tfsdk:"host_key"`
+}
+
 // BootstrapAddonsModel lists Helm releases and manifests for the bootstrap cluster.
 type BootstrapAddonsModel struct {
-	Helm      types.List `tfsdk:"helm"` // []HelmReleaseModel
-	Manifests types.List `tfsdk:"manifests"`
+	Prerequisites types.List `tfsdk:"prerequisites"`
+	Helm          types.List `tfsdk:"helm"` // []HelmReleaseModel
+	Manifests     types.List `tfsdk:"manifests"`
 }
 
 // HelmReleaseModel describes one Helm release.
@@ -278,8 +297,14 @@ type TopologyMetadataModel struct {
 
 // InventoryModel groups attributes for hardware inventory.
 type InventoryModel struct {
+	Manage  types.Bool   `tfsdk:"manage"`
 	Source  types.String `tfsdk:"source"`
 	Machine types.List   `tfsdk:"machine"`
+}
+
+// ManifestsModel carries raw manifests the provider applies for the user.
+type ManifestsModel struct {
+	Management types.List `tfsdk:"management"`
 }
 
 // MachineModel describes a single machine in the inventory.
@@ -338,6 +363,7 @@ type StatusModel struct {
 
 func managementAttrTypes() map[string]attr.Type {
 	return map[string]attr.Type{
+		"addons":       types.ObjectType{AttrTypes: bootstrapAddonsAttrTypes()},
 		"kubeconfig":   types.StringType,
 		"skip_init":    types.BoolType,
 		"self_managed": types.BoolType,
@@ -354,6 +380,7 @@ func managementBootstrapAttrTypes() map[string]attr.Type {
 		"machine":   types.StringType,
 		"boot":      types.ObjectType{AttrTypes: bootAttrTypes()},
 		"talos":     types.ObjectType{AttrTypes: talosAttrTypes()},
+		"kairos":    types.ObjectType{AttrTypes: kairosAttrTypes()},
 		"addons":    types.ObjectType{AttrTypes: bootstrapAddonsAttrTypes()},
 	}
 }
@@ -388,10 +415,28 @@ func talosImageAttrTypes() map[string]attr.Type {
 	}
 }
 
+func kairosAttrTypes() map[string]attr.Type {
+	return map[string]attr.Type{
+		"iso":     types.StringType,
+		"address": types.StringType,
+		"ssh":     types.ObjectType{AttrTypes: kairosSSHAttrTypes()},
+	}
+}
+
+func kairosSSHAttrTypes() map[string]attr.Type {
+	return map[string]attr.Type{
+		"user":        types.StringType,
+		"port":        types.Int64Type,
+		"private_key": types.StringType,
+		"host_key":    types.StringType,
+	}
+}
+
 func bootstrapAddonsAttrTypes() map[string]attr.Type {
 	return map[string]attr.Type{
-		"helm":      types.ListType{ElemType: types.ObjectType{AttrTypes: helmReleaseAttrTypes()}},
-		"manifests": types.ListType{ElemType: types.StringType},
+		"prerequisites": types.ListType{ElemType: types.StringType},
+		"helm":          types.ListType{ElemType: types.ObjectType{AttrTypes: helmReleaseAttrTypes()}},
+		"manifests":     types.ListType{ElemType: types.StringType},
 	}
 }
 
@@ -553,8 +598,15 @@ func patchSelectorAttrTypes() map[string]attr.Type {
 
 func inventoryAttrTypes() map[string]attr.Type {
 	return map[string]attr.Type{
+		"manage":  types.BoolType,
 		"source":  types.StringType,
 		"machine": types.ListType{ElemType: types.ObjectType{AttrTypes: machineAttrTypes()}},
+	}
+}
+
+func manifestsAttrTypes() map[string]attr.Type {
+	return map[string]attr.Type{
+		"management": types.ListType{ElemType: types.StringType},
 	}
 }
 
@@ -664,6 +716,24 @@ func extractTalosImage(ctx context.Context, tm *TalosModel) (*TalosImageModel, d
 	return &img, diags
 }
 
+func extractKairos(ctx context.Context, bs *ManagementBootstrapModel) (*KairosModel, diag.Diagnostics) {
+	if bs == nil || bs.Kairos.IsNull() || bs.Kairos.IsUnknown() {
+		return nil, nil
+	}
+	var k KairosModel
+	diags := bs.Kairos.As(ctx, &k, basetypes.ObjectAsOptions{})
+	return &k, diags
+}
+
+func extractKairosSSH(ctx context.Context, k *KairosModel) (*KairosSSHModel, diag.Diagnostics) {
+	if k == nil || k.SSH.IsNull() || k.SSH.IsUnknown() {
+		return nil, nil
+	}
+	var s KairosSSHModel
+	diags := k.SSH.As(ctx, &s, basetypes.ObjectAsOptions{})
+	return &s, diags
+}
+
 func extractBootstrapAddons(ctx context.Context, bs *ManagementBootstrapModel) (*BootstrapAddonsModel, diag.Diagnostics) {
 	if bs == nil || bs.Addons.IsNull() || bs.Addons.IsUnknown() {
 		return nil, nil
@@ -671,6 +741,52 @@ func extractBootstrapAddons(ctx context.Context, bs *ManagementBootstrapModel) (
 	var ad BootstrapAddonsModel
 	diags := bs.Addons.As(ctx, &ad, basetypes.ObjectAsOptions{})
 	return &ad, diags
+}
+
+// extractManagementAddons returns management.addons, or nil when unset.
+func extractManagementAddons(ctx context.Context, mgmt *ManagementModel) (*BootstrapAddonsModel, diag.Diagnostics) {
+	if mgmt == nil || mgmt.Addons.IsNull() || mgmt.Addons.IsUnknown() {
+		return nil, nil
+	}
+	var ad BootstrapAddonsModel
+	diags := mgmt.Addons.As(ctx, &ad, basetypes.ObjectAsOptions{})
+	return &ad, diags
+}
+
+// addonSetFromModel converts an addons block to the backend set.
+func addonSetFromModel(ctx context.Context, ad *BootstrapAddonsModel) (capi.AddonSet, diag.Diagnostics) {
+	var set capi.AddonSet
+	var diags diag.Diagnostics
+	if ad == nil {
+		return set, diags
+	}
+	var d diag.Diagnostics
+	set.Prerequisites, d = stringList(ctx, ad.Prerequisites)
+	diags.Append(d...)
+	var rels []HelmReleaseModel
+	if !ad.Helm.IsNull() && !ad.Helm.IsUnknown() {
+		diags.Append(ad.Helm.ElementsAs(ctx, &rels, false)...)
+	}
+	for _, rel := range rels {
+		timeout := defaultHelmTimeout
+		if s := rel.Timeout.ValueString(); s != "" {
+			if dur, err := time.ParseDuration(s); err == nil {
+				timeout = dur
+			}
+		}
+		set.Helm = append(set.Helm, capi.HelmRelease{
+			Name:       rel.Name.ValueString(),
+			Namespace:  rel.Namespace.ValueString(),
+			Chart:      rel.Chart.ValueString(),
+			Repository: rel.Repository.ValueString(),
+			Version:    rel.Version.ValueString(),
+			Values:     rel.Values.ValueString(),
+			Timeout:    timeout,
+		})
+	}
+	set.Manifests, d = stringList(ctx, ad.Manifests)
+	diags.Append(d...)
+	return set, diags
 }
 
 // findInventoryMachine returns the inventory machine with the given hostname, or nil.
@@ -1193,7 +1309,146 @@ func buildCreateOptions(ctx context.Context, data *ClusterResourceModel) (*capi.
 		opts.KubeconfigOutputPath = out.KubeconfigPath.ValueString()
 	}
 
+	// Inventory: the machines CAPT may claim, and which of them hosts the
+	// bootstrap cluster.
+	inv, d := extractInventory(ctx, data)
+	diags.Append(d...)
+	if inv != nil {
+		opts.ManageInventory = inv.Manage.IsNull() || inv.Manage.IsUnknown() || inv.Manage.ValueBool()
+		machines, d := extractInventoryMachines(ctx, inv)
+		diags.Append(d...)
+		opts.Inventory = machines
+	}
+	opts.BootstrapMachine = bootstrapMachineHostname(ctx, data)
+
+	// Raw manifests for the management cluster.
+	manifests, d := extractManifests(ctx, data)
+	diags.Append(d...)
+	opts.ManagementManifests = manifests
+
+	// Management-plane addons (the Tinkerbell stack).
+	if mgmt != nil {
+		ad, d := extractManagementAddons(ctx, mgmt)
+		diags.Append(d...)
+		opts.ManagementAddons, d = addonSetFromModel(ctx, ad)
+		diags.Append(d...)
+	}
+
+	// The cni block's Talos patch must be in what CAPI renders for every
+	// node, not only in the bootstrap node's own config.
+	if cni, d := extractCNI(ctx, data); cni != nil && talosClusterBootstrap(ctx, data) {
+		diags.Append(d...)
+		injectCNIPatch(opts)
+	}
+
 	return opts, diags
+}
+
+// bootstrapType is management.bootstrap.type ("kind" when the block sets
+// none), or "" without a bootstrap block.
+func bootstrapType(ctx context.Context, data *ClusterResourceModel) string {
+	mgmt, _ := extractManagement(ctx, data)
+	bs, _ := extractManagementBootstrap(ctx, mgmt)
+	if bs == nil {
+		return ""
+	}
+	if bs.Type.IsNull() || bs.Type.IsUnknown() || bs.Type.ValueString() == "" {
+		return "kind"
+	}
+	return bs.Type.ValueString()
+}
+
+// talosClusterBootstrap reports whether the cluster's nodes are Talos
+// machines the provider configures the CNI for: a Talos bootstrap node, or
+// a disposable Kairos node that pivots to a Talos control plane.
+func talosClusterBootstrap(ctx context.Context, data *ClusterResourceModel) bool {
+	switch bootstrapType(ctx, data) {
+	case "talos", "kairos":
+		return true
+	}
+	return false
+}
+
+// bootstrapMachineHostname is management.bootstrap.machine when the bootstrap
+// cluster runs on an inventory machine (type "talos" or "kairos"), else "".
+func bootstrapMachineHostname(ctx context.Context, data *ClusterResourceModel) string {
+	mgmt, _ := extractManagement(ctx, data)
+	bs, _ := extractManagementBootstrap(ctx, mgmt)
+	if bs == nil || (bs.Type.ValueString() != "talos" && bs.Type.ValueString() != "kairos") {
+		return ""
+	}
+	if bs.Machine.IsNull() || bs.Machine.IsUnknown() {
+		return ""
+	}
+	return bs.Machine.ValueString()
+}
+
+// extractInventoryMachines converts inventory.machine entries to the backend type.
+func extractInventoryMachines(ctx context.Context, inv *InventoryModel) ([]capi.InventoryMachine, diag.Diagnostics) {
+	var diags diag.Diagnostics
+	if inv == nil || inv.Machine.IsNull() || inv.Machine.IsUnknown() {
+		return nil, diags
+	}
+	var models []MachineModel
+	diags.Append(inv.Machine.ElementsAs(ctx, &models, false)...)
+	if diags.HasError() {
+		return nil, diags
+	}
+	out := make([]capi.InventoryMachine, 0, len(models))
+	for _, m := range models {
+		im := capi.InventoryMachine{Hostname: m.Hostname.ValueString()}
+		if !m.Network.IsNull() && !m.Network.IsUnknown() {
+			var n NetworkModel
+			diags.Append(m.Network.As(ctx, &n, basetypes.ObjectAsOptions{})...)
+			im.IP = n.IPAddress.ValueString()
+			im.Netmask = n.Netmask.ValueString()
+			im.Gateway = n.Gateway.ValueString()
+			im.MAC = n.MACAddress.ValueString()
+			im.VLANID = n.VLANID.ValueString()
+			ns, d := stringList(ctx, n.Nameservers)
+			diags.Append(d...)
+			im.Nameservers = ns
+		}
+		if !m.Disk.IsNull() && !m.Disk.IsUnknown() {
+			var d DiskModel
+			diags.Append(m.Disk.As(ctx, &d, basetypes.ObjectAsOptions{})...)
+			im.Disk = d.Device.ValueString()
+		}
+		if !m.BMC.IsNull() && !m.BMC.IsUnknown() {
+			var b BMCModel
+			diags.Append(m.BMC.As(ctx, &b, basetypes.ObjectAsOptions{})...)
+			im.BMC = &capi.InventoryBMC{Address: b.Address.ValueString(), Username: b.Username.ValueString(), Password: b.Password.ValueString()}
+		}
+		if !m.Labels.IsNull() && !m.Labels.IsUnknown() {
+			im.Labels = map[string]string{}
+			diags.Append(m.Labels.ElementsAs(ctx, &im.Labels, false)...)
+		}
+		out = append(out, im)
+	}
+	return out, diags
+}
+
+// extractManifests returns manifests.management as raw YAML documents.
+func extractManifests(ctx context.Context, data *ClusterResourceModel) ([][]byte, diag.Diagnostics) {
+	var diags diag.Diagnostics
+	if data.Manifests.IsNull() || data.Manifests.IsUnknown() {
+		return nil, diags
+	}
+	var m ManifestsModel
+	diags.Append(data.Manifests.As(ctx, &m, basetypes.ObjectAsOptions{})...)
+	if diags.HasError() {
+		return nil, diags
+	}
+	docs, d := stringList(ctx, m.Management)
+	diags.Append(d...)
+	out := make([][]byte, 0, len(docs))
+	for _, doc := range docs {
+		if strings.TrimSpace(doc) == "" {
+			continue
+		}
+		out = append(out, []byte(doc))
+	}
+	return out, diags
 }
 
 // buildProviderConfig converts one provider map entry into a capi.ProviderConfig.

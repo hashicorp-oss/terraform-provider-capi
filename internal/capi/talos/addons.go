@@ -24,33 +24,33 @@ import (
 	"github.com/tinkerbell-community/terraform-provider-capi/internal/capi"
 )
 
-// HelmRelease describes one chart to install on the bootstrap cluster.
-type HelmRelease struct {
-	Name      string
-	Namespace string
-	// Chart is an oci:// reference or a chart name used with Repository.
-	Chart      string
-	Repository string
-	Version    string
-	// Values is a YAML document of chart values.
-	Values  string
-	Timeout time.Duration
-}
+// HelmRelease describes one chart to install; it is the shared capi type.
+type HelmRelease = capi.HelmRelease
 
-// Addons is everything to install after the cluster comes up, in order:
-// Helm releases first, then raw manifests.
+// Addons is everything to install after the cluster comes up. The install
+// order is fixed: PreHelmManifestURLs, CNI, Prerequisites, Helm, Manifests.
 type Addons struct {
-	Helm      []HelmRelease
-	Manifests []string
 	// PreHelmManifestURLs are URLs of raw manifests (e.g. Gateway API CRDs)
-	// fetched and applied BEFORE the Helm releases, so a chart that renders a
+	// fetched and applied before anything else, so a chart that renders a
 	// custom resource (Cilium's GatewayClass) finds its CRD already present.
 	PreHelmManifestURLs []string
+	// CNI are the network releases, installed before every other release:
+	// nothing else can schedule until the node has a CNI.
+	CNI []HelmRelease
+	// Prerequisites are raw manifests applied after the CNI and before Helm,
+	// for objects the Helm releases depend on that need the CNI's CRDs (a
+	// Cilium load-balancer pool the Tinkerbell Service waits on, say).
+	Prerequisites []string
+	// Helm are the user's releases, in order.
+	Helm []HelmRelease
+	// Manifests are raw manifests applied last.
+	Manifests []string
 }
 
 // Empty reports whether nothing is configured.
 func (a Addons) Empty() bool {
-	return len(a.Helm) == 0 && len(a.Manifests) == 0 && len(a.PreHelmManifestURLs) == 0
+	return len(a.PreHelmManifestURLs) == 0 && len(a.CNI) == 0 && len(a.Prerequisites) == 0 &&
+		len(a.Helm) == 0 && len(a.Manifests) == 0
 }
 
 // HelmClient abstracts the Helm SDK for tests.
@@ -86,19 +86,32 @@ func NewAddonInstaller(helm HelmClient, applier capi.Applier, logger *log.Logger
 // Install implements AddonInstaller. A release that already exists is
 // upgraded so retries converge instead of failing on "already exists".
 func (d *DefaultAddonInstaller) Install(ctx context.Context, kubeconfigPath string, addons Addons) error {
-	preCluster := &capi.Cluster{Name: "bootstrap", KubeconfigPath: kubeconfigPath}
+	cluster := &capi.Cluster{Name: "bootstrap", KubeconfigPath: kubeconfigPath}
 	for _, url := range addons.PreHelmManifestURLs {
 		d.logger.Printf("fetching pre-helm manifest %s", url)
 		body, err := d.httpGet(ctx, url)
 		if err != nil {
 			return fmt.Errorf("%w: fetching pre-helm manifest %s: %v", ErrAddons, url, err)
 		}
-		if err := d.applier.Apply(ctx, preCluster, body); err != nil {
+		if err := d.applier.Apply(ctx, cluster, body); err != nil {
 			return fmt.Errorf("%w: applying pre-helm manifest %s: %v", ErrAddons, url, err)
 		}
 	}
+	if err := d.installReleases(ctx, kubeconfigPath, addons.CNI); err != nil {
+		return err
+	}
+	if err := d.applyManifests(ctx, cluster, "prerequisite", addons.Prerequisites); err != nil {
+		return err
+	}
+	if err := d.installReleases(ctx, kubeconfigPath, addons.Helm); err != nil {
+		return err
+	}
+	return d.applyManifests(ctx, cluster, "manifest", addons.Manifests)
+}
 
-	for _, rel := range addons.Helm {
+// installReleases installs or upgrades each release in order.
+func (d *DefaultAddonInstaller) installReleases(ctx context.Context, kubeconfigPath string, rels []HelmRelease) error {
+	for _, rel := range rels {
 		exists, err := d.helm.Exists(ctx, kubeconfigPath, rel)
 		if err != nil {
 			return fmt.Errorf("%w: checking release %s/%s: %v", ErrAddons, rel.Namespace, rel.Name, err)
@@ -114,12 +127,15 @@ func (d *DefaultAddonInstaller) Install(ctx context.Context, kubeconfigPath stri
 			return fmt.Errorf("%w: helm release %s/%s: %v", ErrAddons, rel.Namespace, rel.Name, err)
 		}
 	}
+	return nil
+}
 
-	cluster := &capi.Cluster{Name: "bootstrap", KubeconfigPath: kubeconfigPath}
-	for i, m := range addons.Manifests {
-		d.logger.Printf("applying manifest %d/%d", i+1, len(addons.Manifests))
+// applyManifests server-side-applies each raw manifest in order.
+func (d *DefaultAddonInstaller) applyManifests(ctx context.Context, cluster *capi.Cluster, what string, manifests []string) error {
+	for i, m := range manifests {
+		d.logger.Printf("applying %s %d/%d", what, i+1, len(manifests))
 		if err := d.applier.Apply(ctx, cluster, []byte(m)); err != nil {
-			return fmt.Errorf("%w: manifest %d: %v", ErrAddons, i+1, err)
+			return fmt.Errorf("%w: %s %d: %v", ErrAddons, what, i+1, err)
 		}
 	}
 	return nil
@@ -245,4 +261,27 @@ func fetchURL(ctx context.Context, url string) ([]byte, error) {
 		return nil, fmt.Errorf("GET %s: status %d", url, resp.StatusCode)
 	}
 	return io.ReadAll(resp.Body)
+}
+
+// ManagementAddonInstaller adapts the Talos addon installer to
+// capi.AddonInstaller, so the manager can install management-plane and
+// workload addons on any cluster it holds a kubeconfig for.
+type ManagementAddonInstaller struct {
+	inner AddonInstaller
+}
+
+// NewManagementAddonInstaller returns an installer using the Helm SDK and the
+// dynamic applier.
+func NewManagementAddonInstaller(logger *log.Logger) *ManagementAddonInstaller {
+	return &ManagementAddonInstaller{inner: NewAddonInstaller(NewSDKHelmClient(logger), capi.NewDynamicApplier(), logger)}
+}
+
+// Install implements capi.AddonInstaller.
+func (m *ManagementAddonInstaller) Install(ctx context.Context, cluster *capi.Cluster, set capi.AddonSet) error {
+	return m.inner.Install(ctx, cluster.KubeconfigPath, Addons{
+		PreHelmManifestURLs: set.PreHelmManifestURLs,
+		Prerequisites:       set.Prerequisites,
+		Helm:                set.Helm,
+		Manifests:           set.Manifests,
+	})
 }

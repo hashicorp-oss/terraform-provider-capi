@@ -16,7 +16,7 @@ import (
 // that connected, and every later operation replaces the metadata with that
 // operation's own (which no longer lists the open connections).
 type fakeSession struct {
-	provider       string // provider name reported by Open; "gofish" when empty
+	provider       string   // provider name reported by Open; "gofish" when empty
 	openConns      []string // providers reported open; defaults to [name()]
 	failed         map[string]string
 	opened, closed bool

@@ -135,6 +135,30 @@ func TestAddonInstaller_PreHelmManifestsAppliedBeforeHelm(t *testing.T) {
 	}
 }
 
+func TestAddonInstaller_CNIThenPrerequisitesThenHelm(t *testing.T) {
+	order := []string{}
+	helm := &fakeHelm{existing: map[string]bool{}, order: &order}
+	applier := &fakeApplier{order: &order}
+	inst := NewAddonInstaller(helm, applier, nil)
+
+	err := inst.Install(context.Background(), "/tmp/kc", Addons{
+		CNI:           []HelmRelease{{Name: "cilium", Namespace: "kube-system", Chart: "oci://quay.io/cilium/charts/cilium"}},
+		Prerequisites: []string{"kind: CiliumLoadBalancerIPPool"},
+		Helm:          []HelmRelease{{Name: "tinkerbell", Namespace: "tinkerbell", Chart: "oci://ghcr.io/tinkerbell/charts/tinkerbell"}},
+		Manifests:     []string{"kind: Namespace"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "install:kube-system/cilium,apply:kind: CiliumLoadBalancerIPPool,install:tinkerbell/tinkerbell,apply:kind: Namespace"
+	if got := strings.Join(order, ","); got != want {
+		t.Fatalf("order = %q\nwant    %q", got, want)
+	}
+	if (Addons{CNI: []HelmRelease{{Name: "cilium"}}}).Empty() || (Addons{Prerequisites: []string{"x"}}).Empty() {
+		t.Fatal("CNI releases and prerequisites count as addons")
+	}
+}
+
 func TestAddonInstaller_PreHelmFetchErrorWrapsErrAddons(t *testing.T) {
 	inst := NewAddonInstaller(&fakeHelm{existing: map[string]bool{}}, &fakeApplier{}, nil)
 	inst.httpGet = func(_ context.Context, _ string) ([]byte, error) { return nil, errors.New("boom") }

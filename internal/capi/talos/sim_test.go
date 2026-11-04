@@ -36,6 +36,8 @@ type simFaults struct {
 	// armsBoot makes InsertMedia/SetHTTPBootURI arm the next boot themselves,
 	// as Intel AMT does; a later SetBootDevice would then replace the armed boot.
 	armsBoot bool
+	// pinErr is returned by PinNetwork.
+	pinErr error
 }
 
 // simMachine is an in-memory bare-metal machine with a BMC, firmware, a
@@ -57,13 +59,24 @@ type simMachine struct {
 	installedByUs bool
 	etcd          bool
 	nodeReady     bool
+	// pinned is the last NetworkPin written to META.
+	pinned *NetworkPin
 
 	calls []string
+	// name and seq, when set, record "<name>:<call>" into a shared sequence
+	// so tests can assert ordering across machines.
+	name string
+	seq  *[]string
 }
 
 func newSim() *simMachine { return &simMachine{power: PowerOff, running: "off"} }
 
-func (s *simMachine) record(c string) { s.calls = append(s.calls, c) }
+func (s *simMachine) record(c string) {
+	s.calls = append(s.calls, c)
+	if s.seq != nil {
+		*s.seq = append(*s.seq, s.name+":"+c)
+	}
+}
 
 func (s *simMachine) count(call string) int {
 	s.mu.Lock()
@@ -326,6 +339,21 @@ func (s *simMachine) Stage(context.Context, *clientconfig.Config) (string, error
 	return "", nil
 }
 
+func (s *simMachine) PinNetwork(_ context.Context, _ *clientconfig.Config, pin NetworkPin) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.record("pin-network")
+	if s.running != "disk" || !s.installedByUs {
+		return errors.New("pin-network: node not ours")
+	}
+	if s.faults.pinErr != nil {
+		return s.faults.pinErr
+	}
+	p := pin
+	s.pinned = &p
+	return nil
+}
+
 func (s *simMachine) ResetToMaintenance(context.Context, *clientconfig.Config) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -378,7 +406,7 @@ func (f *fakeInstaller) Install(_ context.Context, kubeconfigPath string, addons
 		f.failures--
 		return fmt.Errorf("%w: simulated", ErrAddons)
 	}
-	if len(addons.Helm) > 0 {
+	if len(addons.Helm) > 0 || len(addons.CNI) > 0 {
 		f.sim.mu.Lock()
 		f.sim.nodeReady = true
 		f.sim.mu.Unlock()

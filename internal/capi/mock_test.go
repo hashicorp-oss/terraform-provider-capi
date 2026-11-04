@@ -142,9 +142,13 @@ type MockWaiter struct {
 	WaitForControlPlaneFunc func(ctx context.Context, mgmtCluster *Cluster, clusterName, namespace string, opts WaitOptions) error
 	WaitForWorkersFunc      func(ctx context.Context, mgmtCluster *Cluster, clusterName, namespace string, opts WaitOptions) error
 	WaitForClusterReadyFunc func(ctx context.Context, mgmtCluster *Cluster, clusterName, namespace string, opts WaitOptions) error
+	// ControlPlaneCalls and ReadyCalls record which cluster each wait ran against.
+	ControlPlaneCalls []*Cluster
+	ReadyCalls        []*Cluster
 }
 
 func (m *MockWaiter) WaitForControlPlane(ctx context.Context, mgmtCluster *Cluster, clusterName, namespace string, opts WaitOptions) error {
+	m.ControlPlaneCalls = append(m.ControlPlaneCalls, mgmtCluster)
 	if m.WaitForControlPlaneFunc != nil {
 		return m.WaitForControlPlaneFunc(ctx, mgmtCluster, clusterName, namespace, opts)
 	}
@@ -159,6 +163,7 @@ func (m *MockWaiter) WaitForWorkers(ctx context.Context, mgmtCluster *Cluster, c
 }
 
 func (m *MockWaiter) WaitForClusterReady(ctx context.Context, mgmtCluster *Cluster, clusterName, namespace string, opts WaitOptions) error {
+	m.ReadyCalls = append(m.ReadyCalls, mgmtCluster)
 	if m.WaitForClusterReadyFunc != nil {
 		return m.WaitForClusterReadyFunc(ctx, mgmtCluster, clusterName, namespace, opts)
 	}
@@ -187,4 +192,60 @@ func (m *MockClusterDescriber) Describe(ctx context.Context, mgmtCluster *Cluste
 		return m.DescribeFunc(ctx, mgmtCluster, clusterName, namespace)
 	}
 	return "NAME: test\nNAMESPACE: default\nKIND: Cluster", nil
+}
+
+// MockInPlaceBootstrapper is a MockBootstrapper that also implements
+// InPlaceTeardowner.
+type MockInPlaceBootstrapper struct {
+	MockBootstrapper
+	TeardownFunc  func(ctx context.Context, cluster *Cluster, machines []InventoryMachine) error
+	TeardownCalls []struct {
+		Cluster  *Cluster
+		Machines []InventoryMachine
+	}
+}
+
+func (m *MockInPlaceBootstrapper) TeardownInPlace(ctx context.Context, cluster *Cluster, machines []InventoryMachine) error {
+	m.TeardownCalls = append(m.TeardownCalls, struct {
+		Cluster  *Cluster
+		Machines []InventoryMachine
+	}{cluster, machines})
+	if m.TeardownFunc != nil {
+		return m.TeardownFunc(ctx, cluster, machines)
+	}
+	return nil
+}
+
+// MockAddonInstaller is a test double for AddonInstaller.
+type MockAddonInstaller struct {
+	InstallFunc func(ctx context.Context, cluster *Cluster, addons AddonSet) error
+	Calls       []struct {
+		Cluster *Cluster
+		Addons  AddonSet
+	}
+}
+
+func (m *MockAddonInstaller) Install(ctx context.Context, cluster *Cluster, addons AddonSet) error {
+	m.Calls = append(m.Calls, struct {
+		Cluster *Cluster
+		Addons  AddonSet
+	}{cluster, addons})
+	if m.InstallFunc != nil {
+		return m.InstallFunc(ctx, cluster, addons)
+	}
+	return nil
+}
+
+// MockQuiescer is a test double for Quiescer.
+type MockQuiescer struct {
+	WaitFunc func(ctx context.Context, mgmtCluster *Cluster, namespace string, opts WaitOptions) error
+	Calls    []*Cluster
+}
+
+func (m *MockQuiescer) WaitForQuiescence(ctx context.Context, mgmtCluster *Cluster, namespace string, opts WaitOptions) error {
+	m.Calls = append(m.Calls, mgmtCluster)
+	if m.WaitFunc != nil {
+		return m.WaitFunc(ctx, mgmtCluster, namespace, opts)
+	}
+	return nil
 }

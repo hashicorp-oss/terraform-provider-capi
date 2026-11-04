@@ -46,6 +46,12 @@ func upgradeV2JSON(raw []byte) ([]byte, error) {
 	delete(state, "flavor")
 	state["cluster_class"] = json.RawMessage("false")
 	state["network"] = nullJSON
+	if _, ok := state["manifests"]; !ok {
+		state["manifests"] = nullJSON
+	}
+	if err := upgradeInventoryAndAddonsJSON(state); err != nil {
+		return nil, err
+	}
 
 	for _, attr := range providerMapAttrs {
 		entries, err := rawObject(state[attr])
@@ -306,4 +312,61 @@ func workersTopologyJSON(count json.RawMessage) json.RawMessage {
 	}
 	b, _ := json.Marshal(map[string]interface{}{"machine_deployments": []interface{}{md}})
 	return b
+}
+
+// upgradeInventoryAndAddonsJSON adds the attributes that joined the schema
+// without a version bump: inventory.manage (defaults true) and
+// management.bootstrap.addons.prerequisites (null). Absent objects stay absent.
+func upgradeInventoryAndAddonsJSON(state map[string]json.RawMessage) error {
+	inv, err := rawObject(state["inventory"])
+	if err != nil {
+		return fmt.Errorf("inventory: %w", err)
+	}
+	if inv != nil {
+		if _, ok := inv["manage"]; !ok {
+			inv["manage"] = json.RawMessage("true")
+		}
+		if state["inventory"], err = json.Marshal(inv); err != nil {
+			return err
+		}
+	}
+
+	mgmt, err := rawObject(state["management"])
+	if err != nil {
+		return fmt.Errorf("management: %w", err)
+	}
+	if mgmt == nil {
+		return nil
+	}
+	if _, ok := mgmt["addons"]; !ok {
+		mgmt["addons"] = nullJSON
+	}
+	bs, err := rawObject(mgmt["bootstrap"])
+	if err != nil {
+		return fmt.Errorf("management.bootstrap: %w", err)
+	}
+	if bs != nil {
+		if _, ok := bs["kairos"]; !ok {
+			bs["kairos"] = nullJSON
+		}
+		addons, err := rawObject(bs["addons"])
+		if err != nil {
+			return fmt.Errorf("management.bootstrap.addons: %w", err)
+		}
+		if addons != nil {
+			if _, ok := addons["prerequisites"]; !ok {
+				addons["prerequisites"] = nullJSON
+			}
+			if bs["addons"], err = json.Marshal(addons); err != nil {
+				return err
+			}
+		}
+		if mgmt["bootstrap"], err = json.Marshal(bs); err != nil {
+			return err
+		}
+	}
+	if state["management"], err = json.Marshal(mgmt); err != nil {
+		return err
+	}
+	return nil
 }

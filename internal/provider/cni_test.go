@@ -98,10 +98,10 @@ func TestApplyCNI_CiliumPrependsPatchAndAppendsRelease(t *testing.T) {
 		t.Errorf("existing patch must remain after the CNI patch: %v", cfg.Talos.ConfigPatches)
 	}
 
-	if len(cfg.Addons.Helm) != 1 {
-		t.Fatalf("helm releases = %v, want cilium appended", cfg.Addons.Helm)
+	if len(cfg.Addons.CNI) != 1 || len(cfg.Addons.Helm) != 0 {
+		t.Fatalf("cni releases = %v, helm = %v; cilium must be a CNI release", cfg.Addons.CNI, cfg.Addons.Helm)
 	}
-	rel := cfg.Addons.Helm[0]
+	rel := cfg.Addons.CNI[0]
 	if rel.Name != "cilium" || rel.Namespace != "kube-system" || rel.Version != "1.18.0" {
 		t.Errorf("cilium release = %+v", rel)
 	}
@@ -134,7 +134,7 @@ func TestApplyCNI_GatewayAPIInstallsCRDsBeforeCiliumAndEnablesInValues(t *testin
 		t.Fatalf("gateway API CRD URL = %v", cfg.Addons.PreHelmManifestURLs)
 	}
 	var vals map[string]any
-	if err := yaml.Unmarshal([]byte(cfg.Addons.Helm[0].Values), &vals); err != nil {
+	if err := yaml.Unmarshal([]byte(cfg.Addons.CNI[0].Values), &vals); err != nil {
 		t.Fatal(err)
 	}
 	if ga, _ := vals["gatewayAPI"].(map[string]any); ga["enabled"] != true {

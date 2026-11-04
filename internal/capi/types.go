@@ -191,6 +191,70 @@ type CreateClusterOptions struct {
 	// from the bootstrap node's bundle so the cluster shares its PKI and needs no
 	// pivot) already exist and are adopted instead. Empty means none.
 	PreTemplateManifests [][]byte
+
+	// ManageInventory renders Inventory as Tinkerbell Hardware, rufio Machine
+	// and BMC Secret objects and applies them before the cluster manifest.
+	// Only meaningful with the tinkerbell infrastructure provider.
+	ManageInventory bool
+
+	// Inventory is every bare-metal machine the cluster may use.
+	Inventory []InventoryMachine
+
+	// BootstrapMachine is the hostname of the Inventory machine that runs the
+	// bootstrap cluster. In place, its Hardware is marked provisioned so CAPT
+	// adopts it; otherwise it is left out of the inventory while it still hosts
+	// the management cluster.
+	BootstrapMachine string
+
+	// ManagementManifests are raw YAML manifests the caller wants on the
+	// management cluster before the cluster manifest (IPAM pools, Secrets).
+	ManagementManifests [][]byte
+
+	// ManagementAddons are installed on every cluster that takes the
+	// management role, right after clusterctl init there: the bootstrap
+	// cluster, and with a pivot the workload cluster too (where the
+	// Prerequisites are applied as well). The Tinkerbell stack lives here.
+	ManagementAddons AddonSet
+
+	// WorkloadAddons are installed on the workload cluster as soon as its
+	// control plane is initialized during a pivot, before anything waits for
+	// nodes to be Ready: the CNI.
+	WorkloadAddons AddonSet
+}
+
+// HelmRelease describes one chart release the provider installs itself.
+type HelmRelease struct {
+	Name      string
+	Namespace string
+	// Chart is an oci:// reference or a chart name used with Repository.
+	Chart      string
+	Repository string
+	Version    string
+	// Values is a YAML document of chart values.
+	Values  string
+	Timeout time.Duration
+}
+
+// AddonSet is a group of addons the provider installs on a cluster in a fixed
+// order: PreHelmManifestURLs, Prerequisites, Helm, Manifests.
+type AddonSet struct {
+	// PreHelmManifestURLs are raw manifests fetched by URL and applied first
+	// (CRDs a chart renders custom resources against).
+	PreHelmManifestURLs []string
+	// Prerequisites are raw manifests applied before the Helm releases, for
+	// objects the releases depend on. On a bootstrap cluster that is about to
+	// hand over to a workload cluster they are skipped: they are meant for the
+	// final management cluster (a Cilium load-balancer pool, say).
+	Prerequisites []string
+	// Helm are the releases, in order.
+	Helm []HelmRelease
+	// Manifests are raw manifests applied last.
+	Manifests []string
+}
+
+// Empty reports whether nothing is configured.
+func (a AddonSet) Empty() bool {
+	return len(a.PreHelmManifestURLs) == 0 && len(a.Prerequisites) == 0 && len(a.Helm) == 0 && len(a.Manifests) == 0
 }
 
 // MachineDeploymentTopology mirrors Cluster.spec.topology.workers.machineDeployments[].
@@ -510,4 +574,14 @@ type DeleteClusterOptions struct {
 	// ProviderSecrets are provider-specific secrets persisted from create, used
 	// to reach a node we own during teardown (see Cluster.ProviderSecrets).
 	ProviderSecrets map[string]string
+
+	// InPlace marks a self-managed cluster whose bootstrap node is a member of
+	// the cluster. Teardown then goes through the bootstrapper's
+	// InPlaceTeardowner instead of deleting the Cluster object.
+	InPlace bool
+
+	// Inventory and BootstrapMachine are the machines to reset on an in-place
+	// teardown; the bootstrap machine is reset last by the bootstrapper.
+	Inventory        []InventoryMachine
+	BootstrapMachine string
 }

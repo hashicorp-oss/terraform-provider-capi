@@ -31,6 +31,29 @@ type PreTemplateManifester interface {
 	PreTemplateManifests(ctx context.Context, clusterName, namespace string) ([][]byte, error)
 }
 
+// InPlaceTeardowner is an optional Bootstrapper capability for in-place
+// self-managed clusters, where the bootstrap node is a member of the cluster
+// it manages. Deleting the Cluster object from inside such a cluster would
+// power off the node running the controllers, so the manager hands teardown to
+// the bootstrapper instead: it resets and powers off every other machine, then
+// its own node.
+type InPlaceTeardowner interface {
+	TeardownInPlace(ctx context.Context, cluster *Cluster, machines []InventoryMachine) error
+}
+
+// AddonInstaller installs an AddonSet on a cluster through the provider's own
+// Helm and apply clients (no CAPI addon provider involved).
+type AddonInstaller interface {
+	Install(ctx context.Context, cluster *Cluster, addons AddonSet) error
+}
+
+// Quiescer waits until the management cluster's provisioning engine is idle,
+// so a clusterctl move does not strand work that cannot be handed over (a
+// Tinkerbell Workflow mid-flight reports to the tink-server that booted it).
+type Quiescer interface {
+	WaitForQuiescence(ctx context.Context, mgmtCluster *Cluster, namespace string, opts WaitOptions) error
+}
+
 // Installer installs and manages CAPI components on a cluster.
 // Modeled after EKS Anywhere's CAPIClient.InitInfrastructure.
 type Installer interface {

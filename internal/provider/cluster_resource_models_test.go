@@ -246,6 +246,7 @@ func TestExtractManagement_Populated(t *testing.T) {
 		SelfManaged: types.BoolValue(true),
 		Namespace:   types.StringValue("capi-system"),
 		Bootstrap:   types.ObjectNull(managementBootstrapAttrTypes()),
+		Addons:      types.ObjectNull(bootstrapAddonsAttrTypes()),
 	}
 	mgmtVal, diags := types.ObjectValueFrom(ctx, managementAttrTypes(), mgmt)
 	if diags.HasError() {
@@ -429,6 +430,7 @@ func selfManaged(t *testing.T, ctx context.Context) types.Object {
 	v, d := types.ObjectValueFrom(ctx, managementAttrTypes(), ManagementModel{
 		Kubeconfig: types.StringNull(), SkipInit: types.BoolValue(false), SelfManaged: types.BoolValue(true),
 		Namespace: types.StringNull(), Bootstrap: types.ObjectNull(managementBootstrapAttrTypes()),
+		Addons: types.ObjectNull(bootstrapAddonsAttrTypes()),
 	})
 	if d.HasError() {
 		t.Fatal(d)

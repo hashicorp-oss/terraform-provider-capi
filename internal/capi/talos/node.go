@@ -17,6 +17,7 @@ import (
 	"github.com/siderolabs/talos/pkg/machinery/client"
 	clientconfig "github.com/siderolabs/talos/pkg/machinery/client/config"
 	"github.com/siderolabs/talos/pkg/machinery/constants"
+	"github.com/siderolabs/talos/pkg/machinery/resources/network"
 	runtimeres "github.com/siderolabs/talos/pkg/machinery/resources/runtime"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -48,6 +49,10 @@ type Node interface {
 	// until etcd is bootstrapped, so it is logged, not used to gate progress.
 	// Requires API access; returns "" on error.
 	Stage(ctx context.Context, tc *clientconfig.Config) (string, error)
+	// PinNetwork writes the node's identity (hostname, address, route,
+	// resolvers) to META as metal platform network configuration, so it
+	// survives a machine-config apply that no longer carries it.
+	PinNetwork(ctx context.Context, tc *clientconfig.Config, pin NetworkPin) error
 }
 
 // MachineryNode implements Node with the Talos machinery client.
@@ -299,4 +304,46 @@ func (n *MachineryNode) ResetToMaintenance(ctx context.Context, tc *clientconfig
 			{Label: constants.EphemeralPartitionLabel, Wipe: true},
 		},
 	})
+}
+
+// PinNetwork implements Node. The link is the one already carrying the pinned
+// address, else the one with the pinned MAC, read from the node's network
+// status resources.
+func (n *MachineryNode) PinNetwork(ctx context.Context, tc *clientconfig.Config, pin NetworkPin) error {
+	ctx, cancel := n.opCtx(ctx)
+	defer cancel()
+
+	c, err := n.authClient(ctx, tc)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = c.Close() }()
+
+	addrLinks := map[string]string{}
+	addrs, err := safe.StateListAll[*network.AddressStatus](ctx, c.COSI)
+	if err != nil {
+		return fmt.Errorf("listing address statuses: %w", err)
+	}
+	for a := range addrs.All() {
+		addrLinks[a.TypedSpec().Address.Addr().String()] = a.TypedSpec().LinkName
+	}
+	macLinks := map[string]string{}
+	links, err := safe.StateListAll[*network.LinkStatus](ctx, c.COSI)
+	if err != nil {
+		return fmt.Errorf("listing link statuses: %w", err)
+	}
+	for l := range links.All() {
+		if hw := l.TypedSpec().HardwareAddr.String(); hw != "" {
+			macLinks[strings.ToLower(hw)] = l.Metadata().ID()
+		}
+	}
+	linkName, err := pickLinkName(pin, addrLinks, macLinks)
+	if err != nil {
+		return err
+	}
+	doc, err := platformNetworkDocument(pin, linkName)
+	if err != nil {
+		return err
+	}
+	return c.MetaWrite(ctx, metaNetworkKey, doc)
 }

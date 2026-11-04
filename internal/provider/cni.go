@@ -4,12 +4,16 @@
 package provider
 
 import (
+	"context"
 	"fmt"
 	"maps"
+	"strings"
 	"time"
 
+	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"sigs.k8s.io/yaml"
 
+	"github.com/tinkerbell-community/terraform-provider-capi/internal/capi"
 	"github.com/tinkerbell-community/terraform-provider-capi/internal/capi/talos"
 )
 
@@ -60,36 +64,70 @@ type cniOptions struct {
 	gatewayAPIVersion string
 }
 
+// cniOptionsFor reads the cni block; ok is false when it is unset.
+func cniOptionsFor(ctx context.Context, data *ClusterResourceModel) (o cniOptions, ok bool, diags diag.Diagnostics) {
+	cni, d := extractCNI(ctx, data)
+	diags.Append(d...)
+	if cni == nil || cni.Provider.IsNull() || cni.Provider.ValueString() == "" {
+		return cniOptions{}, false, diags
+	}
+	o = cniOptions{
+		provider: cni.Provider.ValueString(),
+		version:  cni.Version.ValueString(),
+		values:   cni.Values.ValueString(),
+	}
+	if gw, gd := extractGatewayAPI(ctx, cni); gw != nil {
+		diags.Append(gd...)
+		o.gatewayAPIEnabled = gw.Enabled.ValueBool()
+		o.gatewayAPIVersion = gw.Version.ValueString()
+	}
+	return o, true, diags
+}
+
 // applyCNI injects the chosen CNI into a Talos bootstrap config: a machine
 // config patch disabling the built-in CNI and a Helm release installing the
 // CNI. Only "cilium" is supported today. When gateway_api is enabled, the
 // Gateway API CRDs are fetched and applied before Cilium (a pre-helm manifest)
 // so the chart's GatewayClass resolves.
 func applyCNI(cfg *talos.Config, o cniOptions) error {
-	if o.provider != "cilium" {
-		return fmt.Errorf("unsupported cni.provider %q: only \"cilium\" is supported", o.provider)
-	}
-	vals, err := ciliumValues(o.values, o.gatewayAPIEnabled)
+	rel, urls, err := cniRelease(o)
 	if err != nil {
 		return err
 	}
 	cfg.Talos.ConfigPatches = append([]string{ciliumCNIPatch}, cfg.Talos.ConfigPatches...)
-	cfg.Addons.Helm = append(cfg.Addons.Helm, talos.HelmRelease{
+	// The CNI installs before every other release: nothing schedules without it.
+	cfg.Addons.CNI = append(cfg.Addons.CNI, rel)
+	cfg.Addons.PreHelmManifestURLs = append(cfg.Addons.PreHelmManifestURLs, urls...)
+	return nil
+}
+
+// cniRelease builds the CNI Helm release and the URLs of the manifests that
+// must be applied before it (the Gateway API CRDs).
+func cniRelease(o cniOptions) (talos.HelmRelease, []string, error) {
+	if o.provider != "cilium" {
+		return talos.HelmRelease{}, nil, fmt.Errorf("unsupported cni.provider %q: only \"cilium\" is supported", o.provider)
+	}
+	vals, err := ciliumValues(o.values, o.gatewayAPIEnabled)
+	if err != nil {
+		return talos.HelmRelease{}, nil, err
+	}
+	rel := talos.HelmRelease{
 		Name:      "cilium",
 		Namespace: ciliumNamespace,
 		Chart:     ciliumChart,
 		Version:   o.version,
 		Values:    vals,
 		Timeout:   ciliumInstallTimeout,
-	})
+	}
+	var urls []string
 	if o.gatewayAPIEnabled {
 		v := o.gatewayAPIVersion
 		if v == "" {
 			v = defaultGatewayAPIVersion
 		}
-		cfg.Addons.PreHelmManifestURLs = append(cfg.Addons.PreHelmManifestURLs, gatewayAPICRDURL(v))
+		urls = append(urls, gatewayAPICRDURL(v))
 	}
-	return nil
+	return rel, urls, nil
 }
 
 // gatewayAPICRDURL is the upstream standard-install.yaml for a Gateway API release.
@@ -158,4 +196,55 @@ func mergeMaps(base, override map[string]any) map[string]any {
 		out[k] = ov
 	}
 	return out
+}
+
+// injectCNIPatch puts the Talos CNI patch in front of every strategic patch
+// list CAPI renders for the cluster's Talos machines: the control plane's
+// controlPlaneConfig.controlplane.strategicPatches, the bootstrap provider's
+// default TalosConfigTemplate strategicPatches, and each machine deployment's
+// own bootstrap spec. The bootstrap node gets the same patch through its
+// config_patches, so the node and the CAPI render agree. Idempotent.
+func injectCNIPatch(opts *capi.CreateClusterOptions) {
+	for i, p := range opts.Providers[capi.ProviderTypeControlPlane] {
+		if strings.EqualFold(p.Name, "talos") {
+			p.ResourceConfig = prependStrategicPatch(p.ResourceConfig, "controlPlaneConfig", "controlplane")
+			opts.Providers[capi.ProviderTypeControlPlane][i] = p
+		}
+	}
+	for i, p := range opts.Providers[capi.ProviderTypeBootstrap] {
+		if strings.EqualFold(p.Name, "talos") {
+			p.ResourceConfig = prependStrategicPatch(p.ResourceConfig)
+			opts.Providers[capi.ProviderTypeBootstrap][i] = p
+		}
+	}
+	for i, md := range opts.MachineDeployments {
+		if md.Bootstrap != nil {
+			opts.MachineDeployments[i].Bootstrap = prependStrategicPatch(md.Bootstrap)
+		}
+	}
+}
+
+// prependStrategicPatch returns spec with ciliumCNIPatch first in the
+// strategicPatches list found under path (created when missing).
+func prependStrategicPatch(spec map[string]any, path ...string) map[string]any {
+	if spec == nil {
+		spec = map[string]any{}
+	}
+	node := spec
+	for _, key := range path {
+		next, ok := node[key].(map[string]any)
+		if !ok {
+			next = map[string]any{}
+			node[key] = next
+		}
+		node = next
+	}
+	existing, _ := node["strategicPatches"].([]any)
+	for _, p := range existing {
+		if s, ok := p.(string); ok && s == ciliumCNIPatch {
+			return spec
+		}
+	}
+	node["strategicPatches"] = append([]any{ciliumCNIPatch}, existing...)
+	return spec
 }

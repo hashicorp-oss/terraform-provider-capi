@@ -10,6 +10,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"sort"
 	"sync"
 	"time"
 
@@ -166,6 +167,18 @@ func WithTimeouts(t Timeouts) Option { return func(bs *Bootstrapper) { bs.timeou
 // WithTempDir sets where kubeconfig and talosconfig files are written.
 func WithTempDir(dir string) Option { return func(bs *Bootstrapper) { bs.tempDir = dir } }
 
+// WithNodeFactory overrides how Talos API clients for other cluster members
+// are built (in-place teardown).
+func WithNodeFactory(f func(ip string) Node) Option {
+	return func(bs *Bootstrapper) { bs.nodeFactory = f }
+}
+
+// WithBMCFactory overrides how BMC clients for other cluster members are built
+// (in-place teardown).
+func WithBMCFactory(f func(BMCCredentials) BMC) Option {
+	return func(bs *Bootstrapper) { bs.bmcFactory = f }
+}
+
 // Bootstrapper implements capi.Bootstrapper for a Talos bare-metal node.
 type Bootstrapper struct {
 	cfg         Config
@@ -177,6 +190,8 @@ type Bootstrapper struct {
 	logger      *log.Logger
 	timeouts    Timeouts
 	tempDir     string
+	nodeFactory func(ip string) Node
+	bmcFactory  func(BMCCredentials) BMC
 
 	mu   sync.Mutex
 	last *reconciler
@@ -185,6 +200,7 @@ type Bootstrapper struct {
 var (
 	_ capi.Bootstrapper          = (*Bootstrapper)(nil)
 	_ capi.PreTemplateManifester = (*Bootstrapper)(nil)
+	_ capi.InPlaceTeardowner     = (*Bootstrapper)(nil)
 )
 
 // New builds a Bootstrapper with real bmclib, Talos, Helm, and client-go
@@ -213,6 +229,12 @@ func New(cfg Config, opts ...Option) *Bootstrapper {
 	}
 	if b.addons == nil {
 		b.addons = NewAddonInstaller(NewSDKHelmClient(b.logger), capi.NewDynamicApplier(), b.logger)
+	}
+	if b.nodeFactory == nil {
+		b.nodeFactory = func(ip string) Node { return NewMachineryNode(ip) }
+	}
+	if b.bmcFactory == nil {
+		b.bmcFactory = func(creds BMCCredentials) BMC { return NewBMCLib(creds, b.logger) }
 	}
 	return b
 }
@@ -330,46 +352,118 @@ func (b *Bootstrapper) PreTemplateManifests(_ context.Context, clusterName, name
 // Delete implements capi.Bootstrapper. With a live session the node is reset
 // and halted; in every case it is powered off and its media detached.
 func (b *Bootstrapper) Delete(ctx context.Context, cluster *capi.Cluster) error {
-	name := defaultClusterName
-	if cluster != nil && cluster.Name != "" {
-		name = cluster.Name
-	}
-	b.mu.Lock()
-	r := b.last
-	b.mu.Unlock()
-	if r == nil {
-		// Fresh process (no live session): seed secrets from state or the resume
-		// cache so teardown can reach and reset the node over the Talos API.
-		r = b.newReconciler(name, "")
-		seed := ""
-		if cluster != nil {
-			seed = cluster.ProviderSecrets[ProviderSecretsKey]
-		}
-		if seed == "" {
-			if cached, ok := readSecretsCache(secretsCachePath(b.cfg.StateDir, b.cfg.Machine.IP)); ok {
-				seed = cached
-			}
-		}
-		if seed != "" {
-			if urls, err := b.images.Resolve(ctx, b.cfg.Talos.Image); err == nil {
-				r.sess.images = urls
-			}
-			if err := r.seedSecrets(seed); err != nil {
-				b.logger.Printf("%s: seeding secrets for teardown: %v", name, err)
-			}
-		}
-	}
+	name := clusterNameOf(cluster)
+	r := b.teardownSession(ctx, cluster, name)
 	if err := r.teardown(ctx); err != nil {
 		return &capi.BootstrapError{ClusterName: name, Operation: "delete", Err: err}
 	}
-	// The cluster is gone; drop the resume cache so a later create starts fresh.
+	b.forget()
+	return nil
+}
+
+// TeardownInPlace implements capi.InPlaceTeardowner: every other member that
+// answers the cluster's talosconfig is reset (wiped and halted) and powered
+// off through its BMC, then the bootstrap node is reset and powered off. A
+// member that does not answer is only powered off. Failures are collected so
+// one unreachable machine does not leave the others running.
+func (b *Bootstrapper) TeardownInPlace(ctx context.Context, cluster *capi.Cluster, machines []capi.InventoryMachine) error {
+	name := clusterNameOf(cluster)
+	r := b.teardownSession(ctx, cluster, name)
+
+	members := append([]capi.InventoryMachine(nil), machines...)
+	sort.Slice(members, func(i, j int) bool { return members[i].Hostname < members[j].Hostname })
+	var errs []error
+	for _, m := range members {
+		if err := b.teardownMember(ctx, r, m); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", m.Hostname, err))
+		}
+	}
+	if err := r.teardown(ctx); err != nil {
+		errs = append(errs, fmt.Errorf("bootstrap node %s: %w", b.cfg.Machine.Hostname, err))
+	}
+	b.forget()
+	if len(errs) > 0 {
+		return &capi.BootstrapError{ClusterName: name, Operation: "teardown-in-place", Err: errors.Join(errs...)}
+	}
+	return nil
+}
+
+// teardownMember resets one other cluster member over the Talos API when it
+// answers our talosconfig, then powers it off through its BMC.
+func (b *Bootstrapper) teardownMember(ctx context.Context, r *reconciler, m capi.InventoryMachine) error {
+	var errs []error
+	if m.IP != "" && r.sess.talosconfig != nil {
+		node := b.nodeFactory(m.IP)
+		if st, _ := node.Probe(ctx, r.sess.talosconfig); st == TalosOurs {
+			b.logger.Printf("%s: resetting member %s (%s)", r.name, m.Hostname, m.IP)
+			if err := node.Reset(ctx, r.sess.talosconfig); err != nil {
+				errs = append(errs, fmt.Errorf("reset: %w", err))
+			} else if err := waitFor(ctx, r.timeouts.Reset, r.timeouts.Poll, func(ctx context.Context) (bool, error) {
+				st, _ := node.Probe(ctx, r.sess.talosconfig)
+				return st != TalosOurs, nil
+			}); err != nil {
+				errs = append(errs, fmt.Errorf("waiting for reset: %w", err))
+			}
+		} else {
+			b.logger.Printf("%s: member %s (%s) does not answer the cluster talosconfig (%s); powering off only", r.name, m.Hostname, m.IP, st)
+		}
+	}
+	if m.BMC != nil {
+		bmc := b.bmcFactory(BMCCredentials{Address: m.BMC.Address, Username: m.BMC.Username, Password: m.BMC.Password})
+		if err := retry(ctx, r.timeouts.BMCRetries, r.timeouts.RetryBase, r.timeouts.RetryMax, bmc.PowerOff); err != nil && !errors.Is(err, ErrUnsupported) {
+			errs = append(errs, fmt.Errorf("power off: %w", err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// teardownSession returns the live reconciler or, in a fresh process, one
+// seeded from the persisted secrets (state, then the resume cache) so teardown
+// can reach the nodes over the Talos API.
+func (b *Bootstrapper) teardownSession(ctx context.Context, cluster *capi.Cluster, name string) *reconciler {
+	b.mu.Lock()
+	r := b.last
+	b.mu.Unlock()
+	if r != nil {
+		return r
+	}
+	r = b.newReconciler(name, "")
+	seed := ""
+	if cluster != nil {
+		seed = cluster.ProviderSecrets[ProviderSecretsKey]
+	}
+	if seed == "" {
+		if cached, ok := readSecretsCache(secretsCachePath(b.cfg.StateDir, b.cfg.Machine.IP)); ok {
+			seed = cached
+		}
+	}
+	if seed != "" {
+		if urls, err := b.images.Resolve(ctx, b.cfg.Talos.Image); err == nil {
+			r.sess.images = urls
+		}
+		if err := r.seedSecrets(seed); err != nil {
+			b.logger.Printf("%s: seeding secrets for teardown: %v", name, err)
+		}
+	}
+	return r
+}
+
+// forget drops the live session and the resume cache after a teardown, so a
+// later create starts fresh.
+func (b *Bootstrapper) forget() {
 	if p := secretsCachePath(b.cfg.StateDir, b.cfg.Machine.IP); p != "" {
 		_ = os.Remove(p)
 	}
 	b.mu.Lock()
 	b.last = nil
 	b.mu.Unlock()
-	return nil
+}
+
+func clusterNameOf(cluster *capi.Cluster) string {
+	if cluster != nil && cluster.Name != "" {
+		return cluster.Name
+	}
+	return defaultClusterName
 }
 
 // Exists implements capi.Bootstrapper. It is true only while this process

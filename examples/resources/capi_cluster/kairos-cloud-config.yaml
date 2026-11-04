@@ -1,0 +1,51 @@
+#cloud-config
+# Cloud-config for the disposable bootstrap node of kairos-bootstrap.tf
+# (management.bootstrap.type = "kairos"). Build the live ISO once with
+# AuroraBoot from a "standard" Kairos image (they ship k3s; "core" images do
+# not), embedding this file and putting kairos.ram on the live kernel command
+# line so the system runs entirely from RAM and nothing is installed:
+#
+#   docker run --rm -v "$PWD:/work" -w /work quay.io/kairos/auroraboot:v0.28.0 \
+#     build-iso \
+#       --cloud-config kairos-cloud-config.yaml \
+#       --extend-live-cmdline "kairos.ram" \
+#       --override-name kairos-bootstrap \
+#       --output build \
+#       quay.io/kairos/hadron:v0.6.3-standard-amd64-generic-v4.4.0-k3s-v1.37.1-k3s1
+#
+# build/kairos-bootstrap.iso is what management.bootstrap.kairos.iso names:
+# serve it over HTTP for BMC virtual media (an Intel AMT machine can also take
+# the path itself, streamed over storage redirection). The cloud-config lands
+# at the ISO root as config.yaml and is read at every boot stage, so the
+# provider keeps the media attached until the node is powered off.
+#
+# --extend-live-cmdline appends to every live entry; the default entry is the
+# installer's (--default-grub-entry kairos-install), which also carries
+# rd.cos.disable and install-mode-interactive. If the node comes up without
+# k3s, use the template's own in-RAM entry instead: take
+# pkg/constants/grub_live_bios.cfg from the AuroraBoot release, drop
+# kairos.ram.create_partitions from "Boot Kairos to RAM now", make it the
+# default, and replace the ISO's config after the build (the --overlay-iso
+# directory is applied before the template is written, so it cannot):
+#
+#   xorriso -indev build/kairos-bootstrap.iso -outdev build/kairos-ram.iso \
+#     -boot_image any replay -map grub.cfg /boot/grub2/grub.cfg
+#
+# The node needs the address management.bootstrap.kairos.address names: give
+# its MAC a DHCP reservation, or add your flavor's static network stanza under
+# stages.initramfs.
+hostname: nuc
+
+users:
+  - name: kairos
+    groups:
+      - admin # passwordless sudo: the provider falls back to `sudo -n cat` for the kubeconfig
+    ssh_authorized_keys:
+      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGxhYkBleGFtcGxlIGJvb3RzdHJhcCBrZXk kairos-bootstrap
+
+k3s:
+  enabled: true
+  args:
+    - --tls-san=192.168.1.50 # the node's address: the provider rewrites the kubeconfig server to it
+    - --write-kubeconfig-mode=644 # lets the SSH user read /etc/rancher/k3s/k3s.yaml
+    - --disable=traefik # nothing needs an ingress; ServiceLB stays on for the Tinkerbell Service

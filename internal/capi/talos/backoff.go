@@ -68,3 +68,13 @@ func waitFor(ctx context.Context, timeout, interval time.Duration, cond func(con
 		}
 	}
 }
+
+// Retry is retry for the packages that share this package's BMC layer.
+func Retry(ctx context.Context, attempts int, base, maxDelay time.Duration, fn func(context.Context) error) error {
+	return retry(ctx, attempts, base, maxDelay, fn)
+}
+
+// WaitFor is waitFor for the packages that share this package's BMC layer.
+func WaitFor(ctx context.Context, timeout, interval time.Duration, cond func(context.Context) (bool, error)) error {
+	return waitFor(ctx, timeout, interval, cond)
+}

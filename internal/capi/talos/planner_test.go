@@ -89,3 +89,20 @@ func TestObservationString(t *testing.T) {
 		t.Fatalf("String() = %q, want %q", got, want)
 	}
 }
+
+func TestPlan_PinNetwork(t *testing.T) {
+	ours := Observation{Talos: TalosOurs, Etcd: EtcdBootstrapped, Kubernetes: K8sUnreachable}
+	if got := Plan(PlanInput{Observation: ours, PinNetwork: true, MaxAttempts: 3}); got.Kind != ActionPinNetwork {
+		t.Errorf("static addressing must pin after etcd, got %s", got.Kind)
+	}
+	if got := Plan(PlanInput{Observation: ours, PinNetwork: true, History: History{NetworkPinned: true}, MaxAttempts: 3}); got.Kind != ActionWaitKubernetes {
+		t.Errorf("pinned node proceeds, got %s", got.Kind)
+	}
+	if got := Plan(PlanInput{Observation: ours, MaxAttempts: 3}); got.Kind != ActionWaitKubernetes {
+		t.Errorf("DHCP node never pins, got %s", got.Kind)
+	}
+	notBootstrapped := Observation{Talos: TalosOurs, Etcd: EtcdNotBootstrapped}
+	if got := Plan(PlanInput{Observation: notBootstrapped, PinNetwork: true, MaxAttempts: 3}); got.Kind != ActionBootstrapEtcd {
+		t.Errorf("etcd bootstrap comes before the pin, got %s", got.Kind)
+	}
+}

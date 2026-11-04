@@ -135,7 +135,10 @@ func (r *reconciler) run(ctx context.Context) (*capi.Cluster, error) {
 		if obs.Talos == TalosOurs {
 			r.hist.Installed = true
 		}
-		act := Plan(PlanInput{Observation: obs, History: r.hist, MaxAttempts: r.cfg.Boot.Attempts, HasAddons: !r.cfg.Addons.Empty()})
+		act := Plan(PlanInput{
+			Observation: obs, History: r.hist, MaxAttempts: r.cfg.Boot.Attempts,
+			HasAddons: !r.cfg.Addons.Empty(), PinNetwork: r.cfg.Machine.Netmask != "",
+		})
 		r.logger.Printf("%s: observed %s -> %s (boot attempts %d/%d)", r.name, obs, act.Kind, r.hist.BootAttempts, r.cfg.Boot.Attempts)
 
 		switch act.Kind {
@@ -224,6 +227,8 @@ func (r *reconciler) act(ctx context.Context, kind ActionKind, obs Observation) 
 		return r.awaitNode(ctx)
 	case ActionBootstrapEtcd:
 		return r.bootstrapEtcd(ctx)
+	case ActionPinNetwork:
+		return r.pinNetwork(ctx)
 	case ActionWaitKubernetes:
 		return r.waitKubernetes(ctx)
 	case ActionInstallAddons:
@@ -386,24 +391,20 @@ func (r *reconciler) attachMedia(ctx context.Context) error {
 		}
 		// On Intel AMT, virtual media means storage redirection (IDE-R/USB-R):
 		// the ISO is streamed from here over the AMT channel, which arms the
-		// boot itself. Everything else uses bmclib virtual media.
-		if err := r.redirectISO(ctx); err == nil {
-			return nil
-		} else if !errors.Is(err, ErrUnsupported) {
+		// boot itself. Everything else uses bmclib virtual media. The image
+		// served is the one-shot reset image while a reset boot is in
+		// progress, otherwise the normal image; a local path is served from
+		// that file by the AMT path.
+		handle, err := attachISO(ctx, r.bmc, r.currentISO(), r.mediaBootDevice(), r.bmcDo)
+		if err != nil {
 			return err
 		}
-		var armed bool
-		if err := r.bmcDo(ctx, func(ctx context.Context) error {
-			var err error
-			armed, err = r.bmc.InsertMedia(ctx, r.currentISO())
-			return err
-		}); err != nil {
-			return err
+		if handle != nil {
+			r.sess.mediaRedirect = handle
+			r.sess.method = BootMethodVirtualMedia
+			r.logger.Printf("%s: booting via AMT storage redirection", r.name)
 		}
-		if armed {
-			return nil
-		}
-		return r.bmcDo(ctx, func(ctx context.Context) error { return r.bmc.SetBootDevice(ctx, r.mediaBootDevice(), false, true) })
+		return nil
 	}
 	httpBoot := func(ctx context.Context) error {
 		if r.sess.images.UKI == "" {
@@ -605,29 +606,6 @@ func (r *reconciler) rebootToDisk(ctx context.Context) error {
 	return nil
 }
 
-// redirectISO streams the installer ISO to the host over storage redirection
-// (Intel AMT) on demand from its URL — nothing is written to local disk. If
-// images.ISO is a local file path instead of a URL, RedirectISO serves that
-// file. It returns ErrUnsupported when the BMC is not an AMT redirector, so the
-// caller can fall back.
-func (r *reconciler) redirectISO(ctx context.Context) error {
-	rd, ok := r.bmc.(ISORedirector)
-	if !ok || !rd.RedirectSupported(ctx) {
-		return fmt.Errorf("storage redirection unavailable: %w", ErrUnsupported)
-	}
-	if r.currentISO() == "" {
-		return fmt.Errorf("storage redirection: no ISO URL: %w", ErrUnsupported)
-	}
-	handle, err := rd.RedirectISO(ctx, r.currentISO())
-	if err != nil {
-		return err
-	}
-	r.sess.mediaRedirect = handle
-	r.sess.method = BootMethodVirtualMedia
-	r.logger.Printf("%s: booting via AMT storage redirection", r.name)
-	return nil
-}
-
 // currentISO returns the ISO URL to serve for the boot in progress: the one-shot
 // reset (wipe) image while a reset boot is in progress, otherwise the normal
 // image.
@@ -702,6 +680,45 @@ func (r *reconciler) bootstrapEtcd(ctx context.Context) error {
 		}
 		return ErrBootstrapTimeout
 	}
+	return nil
+}
+
+// networkPin is the identity to write to META, from the machine config.
+func (r *reconciler) networkPin() (NetworkPin, error) {
+	prefix, err := netmaskToPrefix(r.cfg.Machine.Netmask)
+	if err != nil {
+		return NetworkPin{}, err
+	}
+	return NetworkPin{
+		Hostname: r.cfg.Machine.Hostname, Address: fmt.Sprintf("%s/%d", r.cfg.Machine.IP, prefix),
+		Gateway: r.cfg.Machine.Gateway, Nameservers: r.cfg.Machine.Nameservers, MAC: r.cfg.Machine.MAC,
+	}, nil
+}
+
+// pinNetwork writes the node's identity to META once it is ours, so an
+// in-place config update that drops the static network keeps the node on its
+// address and name (Talos layers platform config under the machine config).
+// It is best effort: the running config carries the same identity, so a
+// failed write is logged and the run goes on.
+func (r *reconciler) pinNetwork(ctx context.Context) error {
+	pin, err := r.networkPin()
+	if err != nil {
+		r.logger.Printf("%s: not pinning network identity in META: %v", r.name, err)
+		r.hist.NetworkPinned = true
+		return nil
+	}
+	err = retry(ctx, r.timeouts.BMCRetries, r.timeouts.RetryBase, r.timeouts.RetryMax, func(ctx context.Context) error {
+		return r.node.PinNetwork(ctx, r.sess.talosconfig, pin)
+	})
+	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		r.logger.Printf("%s: warning: writing network identity to META failed; an in-place config update must keep the static network: %v", r.name, err)
+	} else {
+		r.logger.Printf("%s: pinned %s as %s in META", r.name, pin.Address, pin.Hostname)
+	}
+	r.hist.NetworkPinned = true
 	return nil
 }
 

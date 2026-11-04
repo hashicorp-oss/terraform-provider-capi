@@ -128,6 +128,9 @@ type History struct {
 	NeedsReset bool
 	// AddonsInstalled is set once the addon installer returned success.
 	AddonsInstalled bool
+	// NetworkPinned is set once the node's identity was written to META (or
+	// the attempt was abandoned); see ActionPinNetwork.
+	NetworkPinned bool
 }
 
 // ActionKind identifies the next step the planner chose.
@@ -143,6 +146,7 @@ const (
 	ActionDetachMedia        ActionKind = "detach-media"
 	ActionAwaitNode          ActionKind = "await-node"
 	ActionBootstrapEtcd      ActionKind = "bootstrap-etcd"
+	ActionPinNetwork         ActionKind = "pin-network"
 	ActionWaitKubernetes     ActionKind = "wait-kubernetes"
 	ActionInstallAddons      ActionKind = "install-addons"
 	ActionWaitReady          ActionKind = "wait-ready"

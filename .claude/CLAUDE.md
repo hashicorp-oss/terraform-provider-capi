@@ -360,18 +360,106 @@ Groups all attributes related to HOW the cluster is managed: management cluster 
     Optional: true,
     PlanModifiers: []planmodifier.Object{objectplanmodifier.RequiresReplace()},
     Attributes: map[string]schema.Attribute{
-        "type":    // "kind" (default) | "talos"
-        "machine": // inventory.machine[].hostname; required for talos
+        "type":    // "kind" (default) | "talos" | "kairos"
+        "machine": // inventory.machine[].hostname; required for talos and kairos
         "boot":    // { method: auto|virtual_media|http, timeout: "15m", attempts: 3 }
+        "mode":    // "pivot" (default) | "in_place"
         "talos":   // { version, architecture, endpoint, image { factory, schematic, extensions, kernel_args, iso, installer }, config_patches }
-        "addons":  // { helm [ { name, namespace, chart, repository, version, values, timeout } ], manifests }
+        "kairos":  // { iso, address, ssh { user, port, private_key, host_key } }
+        "addons":  // { prerequisites [yaml], helm [ { name, namespace, chart, repository, version, values, timeout } ], manifests [yaml] }
     },
 },
 ```
 
 The Talos bootstrapper (`internal/capi/talos`) implements `capi.Bootstrapper`. It is an
-observed-state reconciler over bmclib and the Talos machinery API; nothing about the node
-is stored in Terraform state. See `docs/superpowers/specs/2026-09-12-talos-bmc-bootstrapper-design.md`.
+observed-state reconciler over bmclib and the Talos machinery API; the machine-secrets
+bundle is the only thing kept (`provider_secrets` in state plus a resume cache). See
+`docs/superpowers/specs/2026-09-12-talos-bmc-bootstrapper-design.md`.
+
+Addon install order on the bootstrap node is fixed (`talos.Addons`): Gateway API CRD URLs,
+the `cni` release, `addons.prerequisites`, `addons.helm`, `addons.manifests`. The CNI goes
+first because nothing schedules without it; `prerequisites` exist for objects the Helm
+releases wait on that need the CNI's CRDs (a Cilium load-balancer pool for the Tinkerbell
+Service).
+
+**In-place adoption** (`mode = "in_place"`, Talos only, needs `control_plane["talos"]`):
+the bootstrap node becomes the first control-plane Machine of the cluster it hosts. The
+contract (`docs/superpowers/specs/2026-11-03-bootstrap-topologies-design.md` §4) is
+implemented in `applyInPlaceContract` (`internal/provider/talos_bootstrap.go`) and the
+Talos package:
+
+- the node's machine config is `control_plane["talos"].resource_config`
+  `controlPlaneConfig.controlplane.strategicPatches` with `PROVIDER_ID` substituted to
+  `tinkerbell://<namespace>/<hostname>`, plus a kubelet `provider-id` patch when none sets
+  one, then the user's `config_patches`; a warning is raised when the patches do not set
+  `cluster.allowSchedulingOnControlPlanes` (the node allows it; the CAPI render must agree);
+- `talos.endpoint` defaults to `network.control_plane_endpoint`; different hosts are an error;
+- once the node is ours and etcd is bootstrapped, `ActionPinNetwork` writes hostname, address,
+  route and resolvers to Talos META key `0xa` (`internal/capi/talos/meta.go`, the `talosmeta`
+  action's document shape) when `inventory.machine[].network.netmask` is set, so an in-place
+  config update that drops the static network cannot move the node; best effort, logged;
+- the inventory Hardware for the bootstrap machine carries
+  `v1alpha1.tinkerbell.org/provisioned: "true"` and `allowPXE: false`, so CAPT adopts it;
+- destroy goes through `capi.InPlaceTeardowner` (`Bootstrapper.TeardownInPlace`): every other
+  inventory machine that answers the cluster talosconfig is reset and powered off through its
+  BMC, then the bootstrap node; the Cluster object is never deleted from inside itself.
+
+A DHCP reservation for the bootstrap machine's MAC remains an external prerequisite (Talos
+maintenance mode is DHCP-only). With `mode = "pivot"` the bootstrap machine is left out of
+the inventory while it hosts the management cluster.
+
+**Disposable Kairos node** (`type = "kairos"`, `internal/capi/kairos`, always `mode = "pivot"`
+and `self_managed = true`): the bootstrap machine is booted from virtual media through its BMC
+(`talos.MediaBoot`, the boot layer shared with the Talos reconciler: power off if on, eject,
+attach the ISO by AMT storage redirection or bmclib virtual media plus a one-shot boot override,
+power on) with a user-built Kairos live ISO (AuroraBoot `kairos.iso.custom.iso` embedding the
+cloud-config: `k3s.enabled`, `users[].ssh_authorized_keys`; a GRUB config whose default
+entry carries `kairos.ram`, since AuroraBoot's live template only offers that in a submenu; see
+`examples/resources/capi_cluster/kairos-cloud-config.yaml`). The bootstrapper waits for SSH on
+`kairos.address` (default: the machine's `ip_address`), keeps the media attached (AMT
+redirection session included) for the life of the node (AuroraBoot puts the cloud-config at the
+ISO root as `config.yaml`, read at every stage, and without `kairos.ram` the ISO is the root
+filesystem too), reads
+`/etc/rancher/k3s/k3s.yaml` (plain read, then `sudo -n`), rewrites its server to the node
+address, waits for the API and a Ready node, installs `bootstrap.addons`, and returns the
+cluster; a node that already answers over SSH is reused. `Delete` ejects the media and powers
+the node off: nothing was written to disk, there is no reset and no `provider_secrets`.
+`boot.method` must be `auto` or `virtual_media`; `disk` is not required on the machine;
+`management.bootstrap.talos` is an error. The pivot sequence below is unchanged; the node's
+Hardware is added to the inventory as a netboot target after the move, like any pivoted
+bootstrap machine. Model: `KairosModel{ISO, Address, SSH}` / `KairosSSHModel{User, Port,
+PrivateKey, HostKey}` (`kairosAttrTypes`, `kairosSSHAttrTypes`); wiring in
+`buildKairosBootstrapConfig` (`internal/provider/kairos_bootstrap.go`); `managerFor` picks the
+bootstrapper by `bootstrapType`.
+
+**`management.addons`** (same shape as `management.bootstrap.addons`: `prerequisites`,
+`helm`, `manifests`) are management-plane addons, the Tinkerbell stack above all. The
+manager installs them with the provider's own Helm and apply clients
+(`capi.AddonInstaller`, `talos.NewManagementAddonInstaller`) on every cluster that takes
+the management role right after `clusterctl init` there. `prerequisites` are applied only
+on the final management cluster (a transient bootstrap cluster may lack their CRDs).
+
+**Pivot sequence** (`mode = "pivot"`, `Manager.CreateCluster`): init bootstrap →
+`management.addons` without prerequisites → inventory (bootstrap machine excluded) and
+`manifests.management` → cluster objects → phase one: `ControlPlaneInitialized` → the
+`cni` release and its Gateway API CRDs on the workload cluster (`WorkloadAddons`) →
+Tinkerbell quiescence on the bootstrap cluster (`capi.Quiescer`, no Workflow
+PREPARING/PENDING/RUNNING/POST; Workflows do not move and a mid-flight agent reports to the
+tink-server that booted it) → init workload → `management.addons` with prerequisites →
+`clusterctl move` (carries Hardware and rufio Machines: their CRDs are labelled for move) →
+re-apply the inventory (bootstrap machine now a netboot target; BMC Secrets do not move) and
+`manifests.management` on the workload → delete the bootstrap cluster → phase two:
+Cluster `Available`/`Ready` on the new management cluster. A pivot without a workload
+kubeconfig is an error, never a bootstrap deletion.
+
+**`cni` reaches the CAPI render.** `injectCNIPatch` (`internal/provider/cni.go`) prepends
+the Talos CNI patch to `control_plane["talos"].resource_config` strategic patches, to
+`bootstrap["talos"].resource_config` and to every machine deployment's `bootstrap` spec, so
+nodes CAPI renders (and the in-place node after an in-place update) run without flannel. It
+applies to Talos and Kairos bootstraps (`talosClusterBootstrap`); with Kairos the cluster must
+have a `control_plane["talos"]` entry. `workloadAddonsFor` builds the workload cluster's cni
+release from the block itself (`cniOptionsFor` + `cniRelease`), so a pivot installs it on the
+workload cluster whichever node bootstrapped it.
 
 ### 3.3 Provider Maps — `core`, `infrastructure`, `bootstrap`, `control_plane`, `ipam`, `addon`
 
@@ -517,9 +605,10 @@ it keeps flannel.
 },
 ```
 
-Only valid with `management.bootstrap.type = "talos"`; anything else is a
-validation error, because the knob is sugar over that path's `config_patches`
-and `addons.helm` (`internal/provider/cni.go`, `applyCNI`). When set to
+Only valid with `management.bootstrap.type = "talos"`, or `"kairos"` with a
+`control_plane["talos"]` entry; anything else is a validation error, because
+the knob is sugar over Talos `config_patches`/strategic patches plus a Helm
+release (`internal/provider/cni.go`, `applyCNI`, `cniRelease`). When set to
 `cilium`, `buildTalosBootstrapConfig` prepends a Talos machine-config patch
 (`cluster.network.cni.name: none`, `cluster.proxy.disabled: true`,
 `machine.features.kubePrism` on 7445) and appends a Cilium Helm release
@@ -640,11 +729,22 @@ version 3 when manifest generation replaced clusterctl templates.
 
 The most complex nested attribute. Supports file-based (EKS-A CSV) or inline machine definitions.
 
+With the `tinkerbell` infrastructure provider and `manage = true` (default) every
+`machine` becomes, in the cluster namespace, a basic-auth Secret `<hostname>-bmc-auth`, a
+rufio `Machine <hostname>` (Redfish with basic auth by default, IntelAMT when the BMC port
+is 16992/16993) and a Tinkerbell `Hardware <hostname>` (labels from `labels`, `dhcp.ip`
+from `network`, `disks`, `bmcRef`). `capi.InventoryManifests` (`internal/capi/inventory.go`,
+golden `testdata/golden/inventory-tinkerbell.yaml`) renders them and the manager applies
+them before the generated cluster objects, after the caller's `manifests.management`.
+
 ```go
 "inventory": schema.SingleNestedAttribute{
     MarkdownDescription: "Hardware inventory for bare-metal provisioning. Supports file-based (CSV/YAML) or inline machine definitions. Required for Tinkerbell infrastructure provider.",
     Optional:            true,
     Attributes: map[string]schema.Attribute{
+        "manage": schema.BoolAttribute{ // create the Tinkerbell/rufio objects; default true
+            Optional: true, Computed: true, Default: booldefault.StaticBool(true),
+        },
         "source": schema.StringAttribute{
             MarkdownDescription: "Path to a hardware inventory file. Supports EKS Anywhere CSV format or YAML manifests containing Hardware, Machine, and Secret resources.",
             Optional:            true,
@@ -812,6 +912,21 @@ All computed outputs are grouped here. This block is entirely computed — pract
 
 Addon providers (e.g. `helm`) are one of the provider maps described in 3.3.
 
+### 3.13 `manifests` — Raw Manifests
+
+```go
+"manifests": schema.SingleNestedAttribute{
+    Optional: true,
+    Attributes: map[string]schema.Attribute{
+        "management": schema.ListAttribute{ElementType: types.StringType, Optional: true}, // multi-doc YAML strings
+    },
+},
+```
+
+`manifests.management` is server-side-applied to the management cluster after provider
+init and before the generated cluster objects (`CreateClusterOptions.ManagementManifests`):
+IPAM pools and credentials, extra Secrets, anything the cluster objects reference.
+
 ---
 
 ## 4. Go Model Structs
@@ -837,6 +952,7 @@ type ClusterResourceModel struct {
     Topology       types.Object `tfsdk:"topology"`
     Network        types.Object `tfsdk:"network"`   // ClusterNetworkModel {control_plane_endpoint, pods, services, service_domain}
     CNI            types.Object `tfsdk:"cni"`       // CNIModel {provider, version, values}
+    Manifests      types.Object `tfsdk:"manifests"` // ManifestsModel {management}
     Inventory      types.Object `tfsdk:"inventory"`
     Wait           types.Object `tfsdk:"wait"`
     Output         types.Object `tfsdk:"output"`
@@ -852,6 +968,8 @@ type ManagementModel struct {
     SkipInit    types.Bool   `tfsdk:"skip_init"`
     SelfManaged types.Bool   `tfsdk:"self_managed"`
     Namespace   types.String `tfsdk:"namespace"`
+    Bootstrap   types.Object `tfsdk:"bootstrap"` // ManagementBootstrapModel
+    Addons      types.Object `tfsdk:"addons"`    // BootstrapAddonsModel (management-plane addons)
 }
 
 // Shared by all six provider maps; one providerAttrTypes()/providerMapType().
@@ -907,8 +1025,19 @@ type ClusterNetworkModel struct {
 }
 
 type InventoryModel struct {
+    Manage  types.Bool   `tfsdk:"manage"`
     Source  types.String `tfsdk:"source"`
     Machine types.List   `tfsdk:"machine"` // []MachineModel
+}
+
+type ManifestsModel struct {
+    Management types.List `tfsdk:"management"` // []types.String
+}
+
+type BootstrapAddonsModel struct {
+    Prerequisites types.List `tfsdk:"prerequisites"`
+    Helm          types.List `tfsdk:"helm"` // []HelmReleaseModel
+    Manifests     types.List `tfsdk:"manifests"`
 }
 
 type MachineModel struct {
@@ -1409,7 +1538,10 @@ v2 upgraders rewrite the raw state JSON (`cluster_resource_upgrade.go`,
 `upgradeV1JSON` = v1→v2→v3, `upgradeV2JSON` = v2→v3); a legacy worker count
 becomes one machine deployment named `md-0`, and v3 adds `cluster_class: false`,
 `network: null`, `resource_config: null` on every provider entry and null
-`infrastructure`/`bootstrap` on the topology entries.
+`infrastructure`/`bootstrap` on the topology entries. `manifests`,
+`inventory.manage`, `management.addons`, `management.bootstrap.addons.prerequisites` and
+`management.bootstrap.kairos` joined v3 without a bump (`upgradeInventoryAndAddonsJSON`
+fills them; a v3 state that predates them decodes with nulls).
 
 ---
 
@@ -1514,8 +1646,14 @@ Quick reference for where every attribute lives in the schema:
 | *(new)* | `topology.control_plane.infrastructure` | `StringAttribute` (YAML/JSON) Optional | **Mutable** (template rotation) |
 | `worker_machine_count` | `topology.workers.machine_deployments[].replicas` | `ListNestedAttribute` Optional | **Mutable** |
 | *(new)* | `topology.workers.machine_deployments[].{infrastructure,bootstrap}` | `StringAttribute` (YAML/JSON) Optional | **Mutable** (template rotation) |
+| *(new)* | `manifests.management` | `ListAttribute` Optional | **Mutable** (re-applied) |
+| *(new)* | `inventory.manage` | `BoolAttribute` Optional, default true | **Mutable** |
 | *(new)* | `inventory.source` | `StringAttribute` Optional | **Mutable** |
-| *(new)* | `inventory.machine[]` | `ListNestedAttribute` Optional | **Mutable** |
+| *(new)* | `inventory.machine[]` | `ListNestedAttribute` Optional | **Mutable** (re-applied as Hardware/Machine/Secret) |
+| *(new)* | `management.bootstrap.mode` | `StringAttribute` Optional, `pivot`/`in_place` | Immutable |
+| *(new)* | `management.bootstrap.kairos.{iso,address,ssh}` | `SingleNestedAttribute` Optional | Immutable |
+| *(new)* | `management.addons.{prerequisites,helm,manifests}` | `SingleNestedAttribute` Optional | **Mutable** (re-installed on update) |
+| *(new)* | `management.bootstrap.addons.prerequisites` | `ListAttribute` Optional | Immutable |
 | `wait_for_ready` | `wait.enabled` | `BoolAttribute` Optional | **Mutable** |
 | *(new)* | `wait.timeout` | `StringAttribute` Optional | **Mutable** |
 | `kubeconfig_path` | `output.kubeconfig_path` | `StringAttribute` Optional | **Mutable** |

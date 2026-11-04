@@ -6,6 +6,7 @@ package capi
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -488,6 +489,7 @@ func TestManager_CreateCluster_SelfManaged(t *testing.T) {
 		WithManifestGenerator(&MockManifestGenerator{}),
 		WithApplier(&MockApplier{}),
 		WithMover(mover),
+		WithQuiescer(&MockQuiescer{}),
 		WithWaiter(&MockWaiter{}),
 		WithInfoRetriever(retriever),
 		WithDescriber(&MockClusterDescriber{}),
@@ -552,6 +554,7 @@ func TestManager_CreateCluster_SelfManaged_RetriesMoveTransientErrors(t *testing
 		WithManifestGenerator(&MockManifestGenerator{}),
 		WithApplier(&MockApplier{}),
 		WithMover(mover),
+		WithQuiescer(&MockQuiescer{}),
 		WithWaiter(&MockWaiter{}),
 		WithInfoRetriever(retriever),
 		WithDescriber(&MockClusterDescriber{}),
@@ -610,5 +613,305 @@ func dockerProviders() ProviderSet {
 		ProviderTypeInfrastructure: {{Type: ProviderTypeInfrastructure, Name: "docker"}},
 		ProviderTypeBootstrap:      {{Type: ProviderTypeBootstrap, Name: "kubeadm"}},
 		ProviderTypeControlPlane:   {{Type: ProviderTypeControlPlane, Name: "kubeadm"}},
+	}
+}
+
+func tinkerbellProviders() ProviderSet {
+	return ProviderSet{
+		ProviderTypeInfrastructure: {{Type: ProviderTypeInfrastructure, Name: "tinkerbell"}},
+		ProviderTypeBootstrap:      {{Type: ProviderTypeBootstrap, Name: "talos"}},
+		ProviderTypeControlPlane:   {{Type: ProviderTypeControlPlane, Name: "talos"}},
+	}
+}
+
+func inventoryTwoMachines() []InventoryMachine {
+	return []InventoryMachine{
+		{Hostname: "cp-1", IP: "10.0.0.5", MAC: "aa:bb:cc:dd:ee:01", Labels: map[string]string{"type": "cp"}},
+		{Hostname: "worker-1", IP: "10.0.0.6", MAC: "aa:bb:cc:dd:ee:02", Labels: map[string]string{"type": "worker"}},
+	}
+}
+
+func TestManager_CreateCluster_InPlaceAppliesInventoryAndManifestsBeforeCluster(t *testing.T) {
+	applier := &MockApplier{}
+	mgr := NewManager(
+		WithBootstrapper(&MockBootstrapper{}), WithInstaller(&MockInstaller{}), WithManifestGenerator(&MockManifestGenerator{}),
+		WithApplier(applier), WithWaiter(&MockWaiter{}), WithInfoRetriever(&MockKubeconfigRetriever{}), WithDescriber(&MockClusterDescriber{}),
+	)
+	_, err := mgr.CreateCluster(context.Background(), CreateClusterOptions{
+		Name: "bm", Namespace: "tinkerbell", Providers: tinkerbellProviders(),
+		SelfManaged: true, InPlace: true,
+		ManageInventory: true, Inventory: inventoryTwoMachines(), BootstrapMachine: "cp-1",
+		ManagementManifests: [][]byte{[]byte("apiVersion: v1\nkind: Secret\nmetadata:\n  name: unifi-credentials\n")},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(applier.ApplyCalls) != 3 {
+		t.Fatalf("expected inventory, management manifests, cluster manifest; got %d applies", len(applier.ApplyCalls))
+	}
+	inventory := string(applier.ApplyCalls[0].Manifest)
+	if !strings.Contains(inventory, "kind: Hardware") || !strings.Contains(inventory, "name: worker-1") {
+		t.Errorf("first apply must be the inventory, got:\n%s", inventory)
+	}
+	if !strings.Contains(inventory, "v1alpha1.tinkerbell.org/provisioned") {
+		t.Error("in-place: the bootstrap machine's Hardware must be marked provisioned")
+	}
+	if !strings.Contains(string(applier.ApplyCalls[1].Manifest), "unifi-credentials") {
+		t.Error("second apply must be the management manifests")
+	}
+	if !strings.Contains(string(applier.ApplyCalls[2].Manifest), "kind: Cluster") {
+		t.Error("the cluster manifest must be applied last")
+	}
+}
+
+func TestManager_CreateCluster_PivotLeavesBootstrapMachineOutOfInventory(t *testing.T) {
+	applier := &MockApplier{}
+	mgr := NewManager(
+		WithBootstrapper(&MockBootstrapper{}), WithInstaller(&MockInstaller{}), WithManifestGenerator(&MockManifestGenerator{}),
+		WithApplier(applier), WithWaiter(&MockWaiter{}), WithInfoRetriever(&MockKubeconfigRetriever{}), WithDescriber(&MockClusterDescriber{}),
+		WithMover(&MockMover{}),
+		WithQuiescer(&MockQuiescer{}),
+	)
+	_, err := mgr.CreateCluster(context.Background(), CreateClusterOptions{
+		Name: "bm", Namespace: "tinkerbell", Providers: tinkerbellProviders(),
+		SelfManaged: true, ManageInventory: true, Inventory: inventoryTwoMachines(), BootstrapMachine: "cp-1",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	inventory := string(applier.ApplyCalls[0].Manifest)
+	if strings.Contains(inventory, "name: cp-1") || strings.Contains(inventory, "provisioned") {
+		t.Errorf("pivot: the bootstrap machine still hosts the management cluster and must not be offered to CAPT:\n%s", inventory)
+	}
+	if !strings.Contains(inventory, "name: worker-1") {
+		t.Errorf("the other machines must be registered:\n%s", inventory)
+	}
+}
+
+func TestManager_CreateCluster_InventoryOnlyForTinkerbell(t *testing.T) {
+	applier := &MockApplier{}
+	mgr := NewManager(
+		WithBootstrapper(&MockBootstrapper{}), WithInstaller(&MockInstaller{}), WithManifestGenerator(&MockManifestGenerator{}),
+		WithApplier(applier), WithWaiter(&MockWaiter{}), WithInfoRetriever(&MockKubeconfigRetriever{}), WithDescriber(&MockClusterDescriber{}),
+	)
+	_, err := mgr.CreateCluster(context.Background(), CreateClusterOptions{
+		Name: "dev", Providers: dockerProviders(), ManageInventory: true, Inventory: inventoryTwoMachines(),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(applier.ApplyCalls) != 1 {
+		t.Fatalf("docker clusters have no Tinkerbell inventory; got %d applies", len(applier.ApplyCalls))
+	}
+}
+
+func TestManager_DeleteCluster_InPlaceTearsDownNodesInsteadOfDeletingTheCluster(t *testing.T) {
+	bootstrapper := &MockInPlaceBootstrapper{}
+	applier := &MockApplier{}
+	mgr := NewManager(WithBootstrapper(bootstrapper), WithApplier(applier))
+
+	err := mgr.DeleteCluster(context.Background(), DeleteClusterOptions{
+		Name: "bm", Namespace: "tinkerbell", ManagementKubeconfig: "/tmp/kc",
+		InPlace: true, BootstrapName: "bm-bootstrap", BootstrapMachine: "cp-1",
+		Inventory: inventoryTwoMachines(), ProviderSecrets: map[string]string{"talos_machine_secrets": "bundle"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(applier.DeleteCalls) != 0 {
+		t.Error("in-place destroy must not delete the Cluster from inside itself")
+	}
+	if len(bootstrapper.TeardownCalls) != 1 {
+		t.Fatalf("expected one in-place teardown, got %d", len(bootstrapper.TeardownCalls))
+	}
+	call := bootstrapper.TeardownCalls[0]
+	if call.Cluster.Name != "bm-bootstrap" || call.Cluster.ProviderSecrets["talos_machine_secrets"] != "bundle" {
+		t.Errorf("teardown must receive the bootstrap cluster with its secrets: %+v", call.Cluster)
+	}
+	if len(call.Machines) != 1 || call.Machines[0].Hostname != "worker-1" {
+		t.Errorf("teardown must receive every machine but the bootstrap node, got %+v", call.Machines)
+	}
+}
+
+func TestManager_DeleteCluster_InPlaceWithoutTeardownerFails(t *testing.T) {
+	mgr := NewManager(WithBootstrapper(&MockBootstrapper{}), WithApplier(&MockApplier{}))
+	err := mgr.DeleteCluster(context.Background(), DeleteClusterOptions{Name: "bm", ManagementKubeconfig: "/tmp/kc", InPlace: true})
+	if err == nil {
+		t.Fatal("in-place destroy needs a bootstrapper that can tear the cluster down")
+	}
+}
+
+// pivotManager wires every collaborator with recording mocks for pivot tests.
+type pivotMocks struct {
+	bootstrapper *MockBootstrapper
+	installer    *MockInstaller
+	applier      *MockApplier
+	mover        *MockMover
+	waiter       *MockWaiter
+	addons       *MockAddonInstaller
+	quiescer     *MockQuiescer
+	events       []string
+}
+
+func newPivotMocks() (*Manager, *pivotMocks) {
+	pm := &pivotMocks{bootstrapper: &MockBootstrapper{}, installer: &MockInstaller{}, applier: &MockApplier{}, mover: &MockMover{}, waiter: &MockWaiter{}, addons: &MockAddonInstaller{}, quiescer: &MockQuiescer{}}
+	record := func(e string) { pm.events = append(pm.events, e) }
+	pm.installer.InitFunc = func(_ context.Context, c *Cluster, _ InitOptions) error { record("init:" + c.Name); return nil }
+	pm.addons.InstallFunc = func(_ context.Context, c *Cluster, set AddonSet) error {
+		names := []string{}
+		for _, h := range set.Helm {
+			names = append(names, h.Name)
+		}
+		record(fmt.Sprintf("addons:%s:%s:prereqs=%d", c.Name, strings.Join(names, "+"), len(set.Prerequisites)))
+		return nil
+	}
+	pm.quiescer.WaitFunc = func(_ context.Context, c *Cluster, _ string, _ WaitOptions) error {
+		record("quiesce:" + c.Name)
+		return nil
+	}
+	pm.mover.MoveFunc = func(_ context.Context, from, to *Cluster, _ MoveOptions) error {
+		record("move:" + from.Name + ">" + to.Name)
+		return nil
+	}
+	pm.applier.ApplyFunc = func(_ context.Context, c *Cluster, m []byte) error {
+		kind := "cluster"
+		switch {
+		case strings.Contains(string(m), "kind: Hardware"):
+			kind = "inventory"
+		case strings.Contains(string(m), "unifi"):
+			kind = "management-manifests"
+		}
+		record("apply:" + c.Name + ":" + kind)
+		return nil
+	}
+	pm.waiter.WaitForControlPlaneFunc = func(_ context.Context, c *Cluster, _, _ string, _ WaitOptions) error {
+		record("wait-cp:" + c.Name)
+		return nil
+	}
+	pm.waiter.WaitForClusterReadyFunc = func(_ context.Context, c *Cluster, _, _ string, _ WaitOptions) error {
+		record("wait-ready:" + c.Name)
+		return nil
+	}
+	pm.bootstrapper.DeleteFunc = func(_ context.Context, c *Cluster) error { record("delete-bootstrap:" + c.Name); return nil }
+	mgr := NewManager(
+		WithBootstrapper(pm.bootstrapper), WithInstaller(pm.installer), WithManifestGenerator(&MockManifestGenerator{}),
+		WithApplier(pm.applier), WithMover(pm.mover), WithWaiter(pm.waiter), WithInfoRetriever(&MockKubeconfigRetriever{}),
+		WithDescriber(&MockClusterDescriber{}), WithAddonInstaller(pm.addons), WithQuiescer(pm.quiescer),
+	)
+	return mgr, pm
+}
+
+func pivotOptions() CreateClusterOptions {
+	return CreateClusterOptions{
+		Name: "bm", Namespace: "tinkerbell", Providers: tinkerbellProviders(),
+		SelfManaged: true, WaitForReady: true,
+		ManageInventory: true, Inventory: inventoryTwoMachines(), BootstrapMachine: "cp-1",
+		ManagementManifests: [][]byte{[]byte("kind: Secret\nmetadata:\n  name: unifi-credentials\n")},
+		ManagementAddons:    AddonSet{Prerequisites: []string{"kind: CiliumLoadBalancerIPPool"}, Helm: []HelmRelease{{Name: "tinkerbell"}}},
+		WorkloadAddons:      AddonSet{Helm: []HelmRelease{{Name: "cilium"}}},
+	}
+}
+
+func TestManager_CreateCluster_Pivot_Sequence(t *testing.T) {
+	mgr, pm := newPivotMocks()
+	result, err := mgr.CreateCluster(context.Background(), pivotOptions())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := []string{
+		"init:bm-bootstrap",
+		"addons:bm-bootstrap:tinkerbell:prereqs=0", // management addons, prerequisites skipped: it hands over
+		"apply:bm-bootstrap:inventory",             // without the bootstrap machine
+		"apply:bm-bootstrap:management-manifests",
+		"apply:bm-bootstrap:cluster",
+		"wait-cp:bm-bootstrap",       // phase one
+		"addons:bm:cilium:prereqs=0", // workload CNI before anything waits for Ready
+		"quiesce:bm-bootstrap",
+		"init:bm",
+		"addons:bm:tinkerbell:prereqs=1", // final management cluster gets the prerequisites
+		"move:bm-bootstrap>bm",
+		"apply:bm:inventory", // now with the bootstrap machine as a netboot target
+		"apply:bm:management-manifests",
+		"delete-bootstrap:bm-bootstrap",
+		"wait-ready:bm", // phase two on the new management cluster
+	}
+	if got := strings.Join(pm.events, "\n"); got != strings.Join(want, "\n") {
+		t.Fatalf("pivot sequence:\n%s\nwant:\n%s", got, strings.Join(want, "\n"))
+	}
+	if result.BootstrapCluster != nil || result.Cluster.KubeconfigPath == "" {
+		t.Errorf("result must point at the workload cluster with no bootstrap left: %+v", result)
+	}
+	first := string(pm.applier.ApplyCalls[0].Manifest)
+	if strings.Contains(first, "name: cp-1") {
+		t.Error("the bootstrap machine must not be offered to CAPT while it hosts the management cluster")
+	}
+	var afterMove string
+	for _, c := range pm.applier.ApplyCalls {
+		if c.Cluster.Name == "bm" && strings.Contains(string(c.Manifest), "kind: Hardware") {
+			afterMove = string(c.Manifest)
+		}
+	}
+	if !strings.Contains(afterMove, "name: cp-1") || strings.Contains(afterMove, "provisioned") || !strings.Contains(afterMove, "allowPXE: true") {
+		t.Errorf("after the move the bootstrap machine is a plain netboot target:\n%s", afterMove)
+	}
+}
+
+func TestManager_CreateCluster_Pivot_QuiescenceFailureCleansUpBootstrap(t *testing.T) {
+	mgr, pm := newPivotMocks()
+	pm.quiescer.WaitFunc = func(context.Context, *Cluster, string, WaitOptions) error {
+		return fmt.Errorf("workflows still running")
+	}
+	_, err := mgr.CreateCluster(context.Background(), pivotOptions())
+	if err == nil || !strings.Contains(err.Error(), "workflows still running") {
+		t.Fatalf("expected the quiescence error, got %v", err)
+	}
+	if len(pm.mover.MoveCalls) != 0 {
+		t.Error("no move may happen while provisioning is in flight")
+	}
+	if len(pm.bootstrapper.DeleteCalls) != 1 {
+		t.Error("the bootstrap cluster must be cleaned up on failure")
+	}
+}
+
+func TestManager_CreateCluster_Pivot_MissingKubeconfigFails(t *testing.T) {
+	mgr, pm := newPivotMocks()
+	_ = pm
+	retriever := &MockKubeconfigRetriever{GetKubeconfigFunc: func(context.Context, *Cluster, string, string) (string, error) { return "", fmt.Errorf("not yet") }}
+	mgr2 := NewManager(WithBootstrapper(pm.bootstrapper), WithInstaller(pm.installer), WithManifestGenerator(&MockManifestGenerator{}),
+		WithApplier(pm.applier), WithMover(pm.mover), WithWaiter(pm.waiter), WithInfoRetriever(retriever), WithDescriber(&MockClusterDescriber{}),
+		WithAddonInstaller(pm.addons), WithQuiescer(pm.quiescer))
+	_ = mgr
+	_, err := mgr2.CreateCluster(context.Background(), pivotOptions())
+	if err == nil || !strings.Contains(err.Error(), "no kubeconfig") {
+		t.Fatalf("a pivot without a workload kubeconfig must fail instead of deleting the bootstrap, got %v", err)
+	}
+	if len(pm.mover.MoveCalls) != 0 {
+		t.Error("no move without a kubeconfig")
+	}
+}
+
+func TestManager_CreateCluster_InPlaceInstallsManagementAddonsWithPrerequisitesOnce(t *testing.T) {
+	mgr, pm := newPivotMocks()
+	opts := pivotOptions()
+	opts.InPlace = true
+	if _, err := mgr.CreateCluster(context.Background(), opts); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(pm.addons.Calls) != 1 || len(pm.addons.Calls[0].Addons.Prerequisites) != 1 || pm.addons.Calls[0].Cluster.Name != "bm-bootstrap" {
+		t.Errorf("in place the bootstrap cluster is the final management cluster: %+v", pm.addons.Calls)
+	}
+	if len(pm.mover.MoveCalls) != 0 || len(pm.quiescer.Calls) != 0 || len(pm.waiter.ReadyCalls) != 1 {
+		t.Errorf("in place: no move, no quiescence, one readiness wait (move=%d quiesce=%d ready=%d)", len(pm.mover.MoveCalls), len(pm.quiescer.Calls), len(pm.waiter.ReadyCalls))
+	}
+}
+
+func TestManager_CreateCluster_AddonsWithoutInstallerFail(t *testing.T) {
+	mgr := NewManager(WithBootstrapper(&MockBootstrapper{}), WithInstaller(&MockInstaller{}), WithManifestGenerator(&MockManifestGenerator{}),
+		WithApplier(&MockApplier{}), WithWaiter(&MockWaiter{}), WithInfoRetriever(&MockKubeconfigRetriever{}), WithDescriber(&MockClusterDescriber{}))
+	_, err := mgr.CreateCluster(context.Background(), CreateClusterOptions{
+		Name: "x", Providers: dockerProviders(), ManagementAddons: AddonSet{Helm: []HelmRelease{{Name: "tinkerbell"}}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "no addon installer") {
+		t.Fatalf("expected a missing-installer error, got %v", err)
 	}
 }
