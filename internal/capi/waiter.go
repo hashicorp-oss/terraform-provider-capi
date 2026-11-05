@@ -6,6 +6,7 @@ package capi
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -123,6 +124,136 @@ func (w *DynamicWaiter) WaitForClusterDeleted(ctx context.Context, mgmtCluster *
 		}
 	}
 	return &CAPIError{Operation: op, Cluster: clusterName, Err: fmt.Errorf("%w: %s/%s still exists after %v", ErrClusterNotDeleted, namespace, clusterName, timeout)}
+}
+
+// CAAPH resources. HelmChartProxy.status.matchingClusters names the clusters
+// a proxy selected; each gets a HelmReleaseProxy owned by the proxy whose
+// spec.clusterRef names the cluster and whose Ready condition reports the
+// Helm release.
+var (
+	helmChartProxiesGVR   = schema.GroupVersionResource{Group: "addons.cluster.x-k8s.io", Version: "v1alpha1", Resource: "helmchartproxies"}
+	helmReleaseProxiesGVR = schema.GroupVersionResource{Group: "addons.cluster.x-k8s.io", Version: "v1alpha1", Resource: "helmreleaseproxies"}
+)
+
+// WaitForAddons waits until every HelmChartProxy that matches the cluster
+// has a Ready HelmReleaseProxy for it. Without the CAAPH CRDs there is
+// nothing to wait for.
+func (w *DynamicWaiter) WaitForAddons(ctx context.Context, mgmtCluster *Cluster, clusterName, namespace string, opts WaitOptions) error {
+	const op = "wait-addons"
+	namespace, timeout, pollInterval := waitDefaults(namespace, opts)
+	dynClient, err := w.clientFor(mgmtCluster.KubeconfigPath)
+	if err != nil {
+		return &CAPIError{Operation: op, Cluster: clusterName, Err: fmt.Errorf("%w: %v", ErrClusterNotReady, err)}
+	}
+	deadline := time.Now().Add(timeout)
+	for {
+		pending, err := pendingAddons(ctx, dynClient, clusterName, namespace)
+		if err != nil {
+			return &CAPIError{Operation: op, Cluster: clusterName, Err: err}
+		}
+		if len(pending) == 0 {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return &CAPIError{Operation: op, Cluster: clusterName, Err: fmt.Errorf("%w: addons not ready after %v: %s", ErrClusterNotReady, timeout, strings.Join(pending, "; "))}
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(pollInterval):
+		}
+	}
+}
+
+// pendingAddons lists the matching HelmChartProxies without a Ready release
+// for the cluster, each with the reason it is pending.
+func pendingAddons(ctx context.Context, dynClient dynamic.Interface, clusterName, namespace string) ([]string, error) {
+	proxies, err := dynClient.Resource(helmChartProxiesGVR).Namespace(namespace).List(ctx, meta_v1.ListOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("listing HelmChartProxies in %s: %w", namespace, err)
+	}
+	releases, err := dynClient.Resource(helmReleaseProxiesGVR).Namespace(namespace).List(ctx, meta_v1.ListOptions{})
+	if err != nil && !apierrors.IsNotFound(err) {
+		return nil, fmt.Errorf("listing HelmReleaseProxies in %s: %w", namespace, err)
+	}
+	var pending []string
+	for _, proxy := range proxies.Items {
+		if !proxyMatchesCluster(&proxy, clusterName, namespace) {
+			continue
+		}
+		state := "no HelmReleaseProxy yet"
+		for i := range releases.Items {
+			rel := &releases.Items[i]
+			if !releaseBelongsTo(rel, proxy.GetName(), clusterName, namespace) {
+				continue
+			}
+			if hasCondition(rel, "Ready", "True") {
+				state = ""
+				break
+			}
+			state = releaseState(rel)
+		}
+		if state != "" {
+			pending = append(pending, fmt.Sprintf("%s: %s", proxy.GetName(), state))
+		}
+	}
+	return pending, nil
+}
+
+func proxyMatchesCluster(proxy *unstructured.Unstructured, clusterName, namespace string) bool {
+	matching, _, _ := unstructured.NestedSlice(proxy.Object, "status", "matchingClusters")
+	for _, m := range matching {
+		ref, ok := m.(map[string]any)
+		if !ok {
+			continue
+		}
+		name, _, _ := unstructured.NestedString(ref, "name")
+		ns, _, _ := unstructured.NestedString(ref, "namespace")
+		if name == clusterName && (ns == "" || ns == namespace) {
+			return true
+		}
+	}
+	return false
+}
+
+func releaseBelongsTo(rel *unstructured.Unstructured, proxyName, clusterName, namespace string) bool {
+	name, _, _ := unstructured.NestedString(rel.Object, "spec", "clusterRef", "name")
+	ns, _, _ := unstructured.NestedString(rel.Object, "spec", "clusterRef", "namespace")
+	if name != clusterName || (ns != "" && ns != namespace) {
+		return false
+	}
+	for _, owner := range rel.GetOwnerReferences() {
+		if owner.Kind == "HelmChartProxy" && owner.Name == proxyName {
+			return true
+		}
+	}
+	return false
+}
+
+// releaseState summarizes a HelmReleaseProxy that is not Ready: its Helm
+// status and the Ready condition's message, which carries Helm's error.
+func releaseState(rel *unstructured.Unstructured) string {
+	status, _, _ := unstructured.NestedString(rel.Object, "status", "status")
+	if status == "" {
+		status = "pending"
+	}
+	conditions, _, _ := unstructured.NestedSlice(rel.Object, "status", "conditions")
+	for _, c := range conditions {
+		cond, ok := c.(map[string]any)
+		if !ok {
+			continue
+		}
+		if typ, _, _ := unstructured.NestedString(cond, "type"); typ != "Ready" {
+			continue
+		}
+		if msg, _, _ := unstructured.NestedString(cond, "message"); msg != "" {
+			return status + ": " + msg
+		}
+	}
+	return status
 }
 
 // connect builds the dynamic client and discovers the core API version.

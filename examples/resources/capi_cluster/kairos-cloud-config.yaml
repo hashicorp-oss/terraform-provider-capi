@@ -34,6 +34,19 @@
 # The node needs the address management.bootstrap.kairos.address names: give
 # its MAC a DHCP reservation, or add your flavor's static network stanza under
 # stages.initramfs.
+#
+# With management.bootstrap.boot.method = "manual" the same ISO is written to a
+# USB stick (dd) and the node is booted from it by hand; the provider only
+# waits for SSH, and you power the node off after the pivot.
+#
+# management.bootstrap.addons installs the live node's Tinkerbell after k3s is
+# up. The node can also bring it up itself: write a k3s HelmChart manifest to
+# /var/lib/rancher/k3s/server/manifests/ from a stages.boot write_files entry
+# and leave management.bootstrap.addons empty. The provider then only waits for
+# the node to be Ready; it cannot uninstall a release it did not install, so a
+# self-installed stack must be stopped by the node (a k3s HelmChart is removed
+# by deleting its manifest) before the pivot, which the provider cannot do for
+# you. Prefer management.bootstrap.addons.
 hostname: nuc
 
 users:

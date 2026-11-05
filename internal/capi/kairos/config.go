@@ -65,8 +65,10 @@ type SSHConfig struct {
 // Config is the complete bootstrapper configuration.
 type Config struct {
 	Machine Machine
-	// Boot controls how the ISO is booted. Only virtual media applies to a
-	// live ISO; method http (a UKI over UEFI HTTP boot) is rejected.
+	// Boot controls how the ISO is booted: virtual media through the BMC, or
+	// manual, where the machine is booted by hand (a USB stick and a power
+	// button) and only waited for. Method http (a UKI over UEFI HTTP boot)
+	// is rejected.
 	Boot bmc.BootConfig
 	// ISO is the user-built Kairos live image (AuroraBoot's
 	// kairos.iso.custom.iso): an http(s) URL the BMC can fetch, or with Intel
@@ -103,8 +105,8 @@ func (c Config) Validate() error {
 	if c.Machine.Address == "" {
 		errs = append(errs, errors.New("machine address is required"))
 	}
-	if c.Machine.BMC.Address == "" {
-		errs = append(errs, errors.New("bmc address is required"))
+	if c.Machine.BMC.Address == "" && c.Boot.Method != bmc.BootMethodManual {
+		errs = append(errs, errors.New("bmc address is required unless the boot method is manual"))
 	}
 	if c.ISO == "" {
 		errs = append(errs, errors.New("iso is required"))
@@ -120,7 +122,7 @@ func (c Config) Validate() error {
 		}
 	}
 	switch c.Boot.Method {
-	case bmc.BootMethodAuto, bmc.BootMethodVirtualMedia:
+	case bmc.BootMethodAuto, bmc.BootMethodVirtualMedia, bmc.BootMethodManual:
 	case bmc.BootMethodHTTP:
 		errs = append(errs, errors.New(`boot method "http" boots a UKI over UEFI HTTP boot, not a live ISO; use "virtual_media"`))
 	default:

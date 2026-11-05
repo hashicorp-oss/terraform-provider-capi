@@ -23,9 +23,9 @@ var providerMapAttrs = []string{"core", "infrastructure", "bootstrap", "control_
 var nullJSON = json.RawMessage("null")
 
 // upgradeV1JSON rewrites raw v1 state (objects holding a "name:version"
-// provider string plus an addons list) into v3 state: first the v2 shape
-// (provider maps and topology), then the v3 rewrite. Attributes that did not
-// change shape pass through untouched.
+// provider string plus an addons list) into the current state: first the v2
+// shape (provider maps and topology), then v3, then v4. Attributes that did
+// not change shape pass through untouched.
 func upgradeV1JSON(raw []byte) ([]byte, error) {
 	v2, err := upgradeV1ToV2JSON(raw)
 	if err != nil {
@@ -34,10 +34,65 @@ func upgradeV1JSON(raw []byte) ([]byte, error) {
 	return upgradeV2JSON(v2)
 }
 
-// upgradeV2JSON rewrites raw v2 state into v3: template and flavor go away,
+// upgradeV2JSON rewrites raw v2 state into the current state: the v3 rewrite,
+// then v4.
+func upgradeV2JSON(raw []byte) ([]byte, error) {
+	v3, err := upgradeV2ToV3JSON(raw)
+	if err != nil {
+		return nil, err
+	}
+	return upgradeV3JSON(v3)
+}
+
+// upgradeV3JSON rewrites raw v3 state into v4: the Talos bootstrapper, its
+// in-place mode, the cni block and management.addons are gone. A cluster
+// bootstrapped in place, or by a Talos node, cannot be carried over: its
+// bootstrap node is a cluster member this provider no longer knows how to
+// manage, so the state must be dropped and the cluster imported.
+func upgradeV3JSON(raw []byte) ([]byte, error) {
+	var state map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &state); err != nil {
+		return nil, fmt.Errorf("decoding v3 state: %w", err)
+	}
+	delete(state, "cni")
+
+	mgmt, err := rawObject(state["management"])
+	if err != nil {
+		return nil, fmt.Errorf("management: %w", err)
+	}
+	if mgmt != nil {
+		delete(mgmt, "addons")
+		bs, err := rawObject(mgmt["bootstrap"])
+		if err != nil {
+			return nil, fmt.Errorf("management.bootstrap: %w", err)
+		}
+		if bs != nil {
+			var typ, mode string
+			_ = json.Unmarshal(bs["type"], &typ)
+			_ = json.Unmarshal(bs["mode"], &mode)
+			name := ""
+			_ = json.Unmarshal(state["name"], &name)
+			if typ == "talos" || mode == "in_place" {
+				return nil, fmt.Errorf("cluster %q was bootstrapped with management.bootstrap.type = \"talos\" or mode = \"in_place\", which this version no longer supports: remove it from state (terraform state rm) and import it as a cluster managed through its own kubeconfig", name)
+			}
+			delete(bs, "mode")
+			delete(bs, "state_dir")
+			delete(bs, "talos")
+			if mgmt["bootstrap"], err = json.Marshal(bs); err != nil {
+				return nil, err
+			}
+		}
+		if state["management"], err = json.Marshal(mgmt); err != nil {
+			return nil, err
+		}
+	}
+	return json.Marshal(state)
+}
+
+// upgradeV2ToV3JSON rewrites raw v2 state into v3: template and flavor go away,
 // cluster_class and network appear, every provider entry gains resource_config,
 // and the topology entries gain their machine template specs.
-func upgradeV2JSON(raw []byte) ([]byte, error) {
+func upgradeV2ToV3JSON(raw []byte) ([]byte, error) {
 	var state map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &state); err != nil {
 		return nil, fmt.Errorf("decoding v2 state: %w", err)
@@ -202,7 +257,6 @@ func upgradeV1ToV2JSON(raw []byte) ([]byte, error) {
 		state["addon"] = b
 	}
 	state["ipam"] = nullJSON
-	state["cni"] = nullJSON
 	state["template"] = nullJSON
 
 	topology := map[string]json.RawMessage{
@@ -314,8 +368,9 @@ func workersTopologyJSON(count json.RawMessage) json.RawMessage {
 	return b
 }
 
-// upgradeInventoryAndAddonsJSON adds the attributes that joined the schema
-// without a version bump: inventory.manage (defaults true) and
+// upgradeInventoryAndAddonsJSON adds the attributes that joined schema
+// version 3 without a bump: inventory.manage (defaults true),
+// management.uninstall (false), management.bootstrap.kairos (null) and
 // management.bootstrap.addons.prerequisites (null). Absent objects stay absent.
 func upgradeInventoryAndAddonsJSON(state map[string]json.RawMessage) error {
 	inv, err := rawObject(state["inventory"])
@@ -337,9 +392,6 @@ func upgradeInventoryAndAddonsJSON(state map[string]json.RawMessage) error {
 	}
 	if mgmt == nil {
 		return nil
-	}
-	if _, ok := mgmt["addons"]; !ok {
-		mgmt["addons"] = nullJSON
 	}
 	if _, ok := mgmt["uninstall"]; !ok {
 		mgmt["uninstall"] = json.RawMessage("false")

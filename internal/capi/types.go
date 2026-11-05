@@ -191,15 +191,10 @@ type CreateClusterOptions struct {
 	// WaitForReady waits for the cluster to become ready.
 	WaitForReady bool
 
-	// SelfManaged moves CAPI management to the workload cluster.
+	// SelfManaged moves CAPI management to the workload cluster once its
+	// control plane is initialized (the pivot), then deletes the bootstrap
+	// cluster.
 	SelfManaged bool
-
-	// InPlace keeps the bootstrap cluster as the self-managed management cluster
-	// instead of pivoting CAPI to a separate workload cluster and tearing the
-	// bootstrap cluster down. With a Talos bootstrapper this makes the bootstrap
-	// node the cluster (its pre-created secrets are adopted by the CAPI providers)
-	// so no pivot is needed. Ignored unless SelfManaged is set.
-	InPlace bool
 
 	// Wait configures timeout and poll options.
 	Wait WaitOptions
@@ -212,13 +207,6 @@ type CreateClusterOptions struct {
 	// node it already owns.
 	ProviderSecrets map[string]string
 
-	// PreTemplateManifests are raw YAML manifests applied to the management
-	// cluster BEFORE the cluster template, so resources the CAPI providers would
-	// otherwise generate (e.g. the Talos machine-secrets Secret, pre-populated
-	// from the bootstrap node's bundle so the cluster shares its PKI and needs no
-	// pivot) already exist and are adopted instead. Empty means none.
-	PreTemplateManifests [][]byte
-
 	// ManageInventory renders Inventory as Tinkerbell Hardware, rufio Machine
 	// and BMC Secret objects and applies them before the cluster manifest.
 	// Only meaningful with the tinkerbell infrastructure provider.
@@ -228,25 +216,20 @@ type CreateClusterOptions struct {
 	Inventory []InventoryMachine
 
 	// BootstrapMachine is the hostname of the Inventory machine that runs the
-	// bootstrap cluster. In place, its Hardware is marked provisioned so CAPT
-	// adopts it; otherwise it is left out of the inventory while it still hosts
-	// the management cluster.
+	// bootstrap cluster. It is left out of the inventory while it hosts the
+	// management cluster and registered as a netboot target after the move.
 	BootstrapMachine string
 
 	// ManagementManifests are raw YAML manifests the caller wants on the
 	// management cluster before the cluster manifest (IPAM pools, Secrets).
 	ManagementManifests [][]byte
 
-	// ManagementAddons are installed on every cluster that takes the
-	// management role, right after clusterctl init there: the bootstrap
-	// cluster, and with a pivot the workload cluster too (where the
-	// Prerequisites are applied as well). The Tinkerbell stack lives here.
-	ManagementAddons AddonSet
-
-	// WorkloadAddons are installed on the workload cluster as soon as its
-	// control plane is initialized during a pivot, before anything waits for
-	// nodes to be Ready: the CNI.
-	WorkloadAddons AddonSet
+	// BootstrapAddons are the bootstrap cluster's own stack (a Tinkerbell on
+	// host networking), installed right after clusterctl init there and
+	// uninstalled before management moves away, so the workload cluster's
+	// own instance is the only one running. The workload cluster's addons
+	// are CAAPH HelmChartProxy objects, not this set.
+	BootstrapAddons AddonSet
 
 	// UpgradeProviders are configured providers whose settings changed since
 	// the last apply: they are upgraded (or re-rendered at the same version)
@@ -652,21 +635,11 @@ type DeleteClusterOptions struct {
 	// to reach a node we own during teardown (see Cluster.ProviderSecrets).
 	ProviderSecrets map[string]string
 
-	// InPlace marks a self-managed cluster whose bootstrap node is a member of
-	// the cluster. Teardown then goes through the bootstrapper's
-	// InPlaceTeardowner instead of deleting the Cluster object.
-	InPlace bool
-
-	// Inventory and BootstrapMachine are the machines to reset on an in-place
-	// teardown; the bootstrap machine is reset last by the bootstrapper.
-	Inventory        []InventoryMachine
-	BootstrapMachine string
-
 	// SelfManaged marks a cluster that manages itself after a pivot. Deleting
 	// its Cluster object from inside would power off the machines running
 	// the controllers, so management is first moved to a fresh bootstrap
 	// cluster (the reverse of the create pivot) and the cluster is deleted
-	// from there. Ignored with InPlace.
+	// from there.
 	SelfManaged bool
 
 	// Spec is the configuration the cluster was created with. A self-managed

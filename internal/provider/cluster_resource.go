@@ -60,7 +60,7 @@ func (r *ClusterResource) Metadata(ctx context.Context, req resource.MetadataReq
 
 func (r *ClusterResource) Schema(ctx context.Context, req resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		Version:             3,
+		Version:             4,
 		MarkdownDescription: "Manages a Cluster API cluster using the CAPI management workflow (bootstrap -> init -> apply -> wait -> move).",
 
 		Attributes: map[string]schema.Attribute{
@@ -195,44 +195,34 @@ func (r *ClusterResource) Schema(ctx context.Context, req resource.SchemaRequest
 					},
 
 					"bootstrap": schema.SingleNestedAttribute{
-						MarkdownDescription: "Transient bootstrap cluster configuration. `type = \"kind\"` (default) creates a kind cluster. `type = \"talos\"` provisions one `inventory.machine` entry as a single-node Talos cluster through its BMC. `type = \"kairos\"` boots one `inventory.machine` entry from a user-built Kairos live ISO that runs k3s from RAM (see `kairos`). The bootstrap cluster is torn down after the self-managed pivot and nothing about it is kept in state.",
+						MarkdownDescription: "Transient bootstrap cluster configuration, used once at create. `type = \"kind\"` (default) creates a kind cluster on the machine running Terraform. `type = \"kairos\"` boots one `inventory.machine` entry from a user-built Kairos live ISO that runs k3s from RAM (see `kairos`); nothing is written to its disk, and after the self-managed pivot it is powered off and provisioned by CAPT as an ordinary cluster member. Nothing about the bootstrap cluster is kept in state.",
 						Optional:            true,
 						PlanModifiers: []planmodifier.Object{
 							objectplanmodifier.RequiresReplace(),
 						},
 						Attributes: map[string]schema.Attribute{
 							"type": schema.StringAttribute{
-								MarkdownDescription: "Bootstrap cluster type: `kind`, `talos` or `kairos`.",
+								MarkdownDescription: "Bootstrap cluster type: `kind` or `kairos`.",
 								Optional:            true,
 								Computed:            true,
 								Default:             stringdefault.StaticString("kind"),
 							},
-							"mode": schema.StringAttribute{
-								MarkdownDescription: "How the bootstrap cluster becomes the management cluster: `pivot` (default) moves CAPI to the workload cluster and tears the bootstrap cluster down; `in_place` keeps the bootstrap node as the self-managed cluster (no pivot) — for Talos, the CAPI providers adopt the bootstrap node's pre-created secrets so it is the same cluster.",
-								Optional:            true,
-								Computed:            true,
-								Default:             stringdefault.StaticString("pivot"),
-							},
-							"state_dir": schema.StringAttribute{
-								MarkdownDescription: "Optional override for where the Talos machine-secrets bundle is cached between applies. The cache lets a failed apply be retried without wiping and re-installing the node: the next `terraform apply` creates the resource but resumes from the node's current state (recognized as ours via the cached secrets), and the cache is removed on destroy. Defaults to a per-user cache directory (`os.UserCacheDir()`, falling back to the temp dir), so caching is on without configuration.",
-								Optional:            true,
-							},
 							"machine": schema.StringAttribute{
-								MarkdownDescription: "Hostname of the `inventory.machine` entry to use as the bootstrap node. Its `bmc`, `network.ip_address`, and `disk.device` are used (a `kairos` node writes nothing to disk and needs no `disk`). Required when `type` is `talos` or `kairos`.",
+								MarkdownDescription: "Hostname of the `inventory.machine` entry to boot the live image on. Its `bmc` and `network.ip_address` are used; a live node writes nothing to disk and needs no `disk`. Required when `type = \"kairos\"`.",
 								Optional:            true,
 							},
 							"boot": schema.SingleNestedAttribute{
-								MarkdownDescription: "How the node is booted into the Talos installer.",
+								MarkdownDescription: "How the node is booted into the live image.",
 								Optional:            true,
 								Attributes: map[string]schema.Attribute{
 									"method": schema.StringAttribute{
-										MarkdownDescription: "`auto` (virtual media, then UEFI HTTP boot), `virtual_media`, or `http`.",
+										MarkdownDescription: "`auto` or `virtual_media` attach the ISO through the BMC (Intel AMT storage redirection, or bmclib virtual media plus a one-shot boot override) and power the node on. `manual` drives no BMC: the node is booted by hand (a USB stick and a power button) and only waited for, and powered off by hand after the pivot.",
 										Optional:            true,
 										Computed:            true,
 										Default:             stringdefault.StaticString("auto"),
 									},
 									"timeout": schema.StringAttribute{
-										MarkdownDescription: "Per-attempt boot and install timeout as a Go duration (e.g. `15m`).",
+										MarkdownDescription: "Per-attempt wait for the node to answer over SSH after a boot, as a Go duration (e.g. `15m`).",
 										Optional:            true,
 										Computed:            true,
 										Default:             stringdefault.StaticString("15m"),
@@ -251,71 +241,12 @@ func (r *ClusterResource) Schema(ctx context.Context, req resource.SchemaRequest
 									},
 								},
 							},
-							"talos": schema.SingleNestedAttribute{
-								MarkdownDescription: "Talos version, images, and machine config patches.",
-								Optional:            true,
-								Attributes: map[string]schema.Attribute{
-									"version": schema.StringAttribute{
-										MarkdownDescription: "Talos version (e.g. `v1.13.6`). Required when `type = \"talos\"`.",
-										Optional:            true,
-									},
-									"architecture": schema.StringAttribute{
-										MarkdownDescription: "`amd64` or `arm64`.",
-										Optional:            true,
-										Computed:            true,
-										Default:             stringdefault.StaticString("amd64"),
-									},
-									"endpoint": schema.StringAttribute{
-										MarkdownDescription: "Cluster endpoint written into the machine config. Defaults to `https://<machine ip>:6443`.",
-										Optional:            true,
-									},
-									"image": schema.SingleNestedAttribute{
-										MarkdownDescription: "Image Factory schematic or explicit image overrides.",
-										Optional:            true,
-										Attributes: map[string]schema.Attribute{
-											"factory": schema.StringAttribute{
-												MarkdownDescription: "Image Factory base URL.",
-												Optional:            true,
-												Computed:            true,
-												Default:             stringdefault.StaticString("https://factory.talos.dev"),
-											},
-											"schematic": schema.StringAttribute{
-												MarkdownDescription: "Precomputed schematic id. Conflicts with `extensions`, `kernel_args`, `iso`, and `installer`.",
-												Optional:            true,
-											},
-											"extensions": schema.ListAttribute{
-												MarkdownDescription: "Official system extension names for a new schematic.",
-												ElementType:         types.StringType,
-												Optional:            true,
-											},
-											"kernel_args": schema.ListAttribute{
-												MarkdownDescription: "Extra kernel arguments for a new schematic.",
-												ElementType:         types.StringType,
-												Optional:            true,
-											},
-											"iso": schema.StringAttribute{
-												MarkdownDescription: "Explicit ISO URL. Must be set together with `installer`; disables UEFI HTTP boot.",
-												Optional:            true,
-											},
-											"installer": schema.StringAttribute{
-												MarkdownDescription: "Explicit installer image reference. Must be set together with `iso`.",
-												Optional:            true,
-											},
-										},
-									},
-									"config_patches": schema.ListAttribute{
-										MarkdownDescription: "Machine config patches (YAML strings) applied in order after the built-in install patch.",
-										ElementType:         types.StringType,
-										Optional:            true,
-									},
-								},
-							},
 							"kairos": schema.SingleNestedAttribute{
-								MarkdownDescription: "Disposable live node for `type = \"kairos\"`: a user-built Kairos ISO (AuroraBoot's `kairos.iso.custom.iso` with the cloud-config embedded: `k3s.enabled`, the SSH key, the node's static address, `kairos.ram` on the live command line) booted from virtual media through the machine's BMC. The provider reads the k3s kubeconfig over SSH, uses the node as the management cluster until the pivot, then powers it off and ejects the media. Nothing is written to its disk, so `mode` must be `pivot` and `management.self_managed` must be true.",
+								MarkdownDescription: "Disposable live node for `type = \"kairos\"`: a user-built Kairos ISO (AuroraBoot's `kairos.iso.custom.iso` with the cloud-config embedded: `k3s.enabled`, the SSH key, the node's static address, `kairos.ram` on the live command line) booted from virtual media through the machine's BMC, or by hand with `boot.method = \"manual\"`. The provider reads the k3s kubeconfig over SSH, uses the node as the management cluster until the pivot, then ejects the media and powers it off. Requires `management.self_managed = true`.",
 								Optional:            true,
 								Attributes: map[string]schema.Attribute{
 									"iso": schema.StringAttribute{
-										MarkdownDescription: "The live image: an `http(s)` URL the BMC fetches as virtual media, or with Intel AMT storage redirection also a local path.",
+										MarkdownDescription: "The live image: an `http(s)` URL the BMC fetches as virtual media, or with Intel AMT storage redirection also a local path. Informational with `boot.method = \"manual\"`.",
 										Required:            true,
 									},
 									"address": schema.StringAttribute{
@@ -351,10 +282,9 @@ func (r *ClusterResource) Schema(ctx context.Context, req resource.SchemaRequest
 									},
 								},
 							},
-							"addons": addonsAttribute("Helm releases and manifests installed on the bootstrap node before CAPI is initialized, in this order: the `cni` release, `prerequisites`, `helm`, `manifests`. For releases only the bootstrap node needs; the Tinkerbell stack belongs in `management.addons`."),
+							"addons": addonsAttribute("The bootstrap cluster's own stack, installed right after its CAPI providers are initialized (`prerequisites`, `helm`, `manifests`, in that order) and uninstalled before management moves to the workload cluster: a Tinkerbell on host networking bound to the node's address, so the first control-plane machine can netboot. The workload cluster's own addons (its CNI, its Tinkerbell) are `HelmChartProxy` and `ClusterResourceSet` objects declared in `manifests.management`; CAAPH installs them once the control plane is initialized and they move with the cluster."),
 						},
 					},
-					"addons": addonsAttribute("Management-plane addons, installed by the provider's own Helm and apply clients on every cluster that takes the management role, right after its CAPI providers are initialized: the bootstrap cluster, and with a pivot the workload cluster again before the move. The Tinkerbell stack lives here. `prerequisites` are applied only on the final management cluster (they are objects such as a Cilium load-balancer pool whose CRDs a transient bootstrap cluster may not have); `helm` and `manifests` are installed on both."),
 				},
 			},
 
@@ -434,47 +364,13 @@ func (r *ClusterResource) Schema(ctx context.Context, req resource.SchemaRequest
 				},
 			},
 
-			// --- cni ---
-			"cni": schema.SingleNestedAttribute{
-				MarkdownDescription: "Container Network Interface for the workload cluster, replacing Talos's built-in flannel. Valid with a `talos` management bootstrap, or a `kairos` one whose cluster has a `control_plane[\"talos\"]` entry; it disables the built-in CNI and kube-proxy (KubePrism handles the API server) in every Talos machine config and installs the CNI as a Helm release on the cluster.",
-				Optional:            true,
-				Attributes: map[string]schema.Attribute{
-					"provider": schema.StringAttribute{
-						MarkdownDescription: "CNI provider. Only `cilium` is supported today.",
-						Required:            true,
-					},
-					"version": schema.StringAttribute{
-						MarkdownDescription: "CNI Helm chart version. Omit to use the chart's latest release.",
-						Optional:            true,
-					},
-					"values": schema.StringAttribute{
-						MarkdownDescription: "Extra Helm values (YAML), deep-merged over the defaults (`kubeProxyReplacement`, KubePrism host/port, Kubernetes IPAM).",
-						Optional:            true,
-					},
-					"gateway_api": schema.SingleNestedAttribute{
-						MarkdownDescription: "Install the Gateway API CRDs before Cilium and enable `gatewayAPI` in the Cilium values. Cilium does not bundle the CRDs; without them the chart's GatewayClass fails to apply.",
-						Optional:            true,
-						Attributes: map[string]schema.Attribute{
-							"enabled": schema.BoolAttribute{
-								MarkdownDescription: "Fetch the upstream Gateway API `standard-install.yaml` and apply it before Cilium, and set `gatewayAPI.enabled=true` in the Cilium values.",
-								Optional:            true,
-							},
-							"version": schema.StringAttribute{
-								MarkdownDescription: "Gateway API release tag for the CRDs (e.g. `v1.3.0`). Defaults to a known-good release.",
-								Optional:            true,
-							},
-						},
-					},
-				},
-			},
-
 			// --- manifests ---
 			"manifests": schema.SingleNestedAttribute{
 				MarkdownDescription: "Raw Kubernetes manifests the provider applies for you.",
 				Optional:            true,
 				Attributes: map[string]schema.Attribute{
 					"management": schema.ListAttribute{
-						MarkdownDescription: "Multi-document YAML strings applied to the management cluster after the providers are initialized and before the generated cluster objects: IPAM pools and their credentials, extra Secrets, anything the cluster objects reference. Applied with server-side apply on every create and update.",
+						MarkdownDescription: "Multi-document YAML strings applied to the management cluster after the providers are initialized and before the generated cluster objects: IPAM pools and their credentials, extra Secrets, anything the cluster objects reference. Applied with server-side apply on every create and update, and again on the workload cluster after a self-managed pivot. With a pivot this is also where the workload cluster's addons go, as CAAPH `HelmChartProxy` and `ClusterResourceSet` objects (the `helm` addon provider installs CAAPH): CAAPH brings them up on the workload cluster as soon as its control plane is initialized, and the pivot waits for them before management moves.",
 						ElementType:         types.StringType,
 						Optional:            true,
 					},
@@ -483,7 +379,7 @@ func (r *ClusterResource) Schema(ctx context.Context, req resource.SchemaRequest
 
 			// --- inventory ---
 			"inventory": schema.SingleNestedAttribute{
-				MarkdownDescription: "Hardware inventory for bare-metal provisioning. With the `tinkerbell` infrastructure provider each machine becomes a Tinkerbell Hardware, a rufio Machine and a BMC credentials Secret in the cluster namespace, applied before the generated cluster objects so CAPT can claim them. The `management.bootstrap.machine` entry is marked provisioned (and excluded from PXE) with `mode = \"in_place\"`, so CAPT adopts the running node; with a pivot it is left out until the bootstrap cluster is gone.",
+				MarkdownDescription: "Hardware inventory for bare-metal provisioning. With the `tinkerbell` infrastructure provider each machine becomes a Tinkerbell Hardware, a rufio Machine and a BMC credentials Secret in the cluster namespace, applied before the generated cluster objects so CAPT can claim them. The `management.bootstrap.machine` entry is left out while it hosts the bootstrap cluster and registered as a netboot target after the pivot.",
 				Optional:            true,
 				Attributes: map[string]schema.Attribute{
 					"manage": schema.BoolAttribute{
@@ -632,15 +528,15 @@ func providerMapAttribute(desc string, required bool, lifecycle providerMapLifec
 	}
 }
 
-// addonsAttribute is the shared shape of management.addons and
-// management.bootstrap.addons: raw prerequisites, Helm releases, raw manifests.
+// addonsAttribute is the shape of management.bootstrap.addons: raw
+// prerequisites, Helm releases, raw manifests.
 func addonsAttribute(desc string) schema.SingleNestedAttribute {
 	return schema.SingleNestedAttribute{
 		MarkdownDescription: desc,
 		Optional:            true,
 		Attributes: map[string]schema.Attribute{
 			"prerequisites": schema.ListAttribute{
-				MarkdownDescription: "Raw YAML manifests applied after the `cni` release and before the Helm releases, for objects the releases depend on that need the CNI's CRDs, such as a Cilium load-balancer pool and L2 announcement policy for the Tinkerbell Service.",
+				MarkdownDescription: "Raw YAML manifests applied before the Helm releases, for objects the releases depend on.",
 				ElementType:         types.StringType,
 				Optional:            true,
 			},
@@ -954,7 +850,6 @@ func (r *ClusterResource) Create(ctx context.Context, req resource.CreateRequest
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	createOpts.WorkloadAddons = workloadAddonsFor(ctx, &data)
 	result, err := mgr.CreateCluster(ctx, *createOpts)
 	if err != nil {
 		resp.Diagnostics.AddError("Cluster Creation Error", fmt.Sprintf("Failed to create cluster: %s", err))
@@ -1081,7 +976,6 @@ func (r *ClusterResource) Update(ctx context.Context, req resource.UpdateRequest
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	reconcileOpts.WorkloadAddons = workloadAddonsFor(ctx, &plan)
 	result, err := mgr.CreateCluster(ctx, *reconcileOpts)
 	if err != nil {
 		resp.Diagnostics.AddError("Cluster Update Error", fmt.Sprintf("Failed to reconcile cluster: %s", err))
@@ -1160,33 +1054,9 @@ func (r *ClusterResource) Delete(ctx context.Context, req resource.DeleteRequest
 	}
 
 	// The default manager runs kind bootstrap clusters: it deletes a plain
-	// cluster and reverse-pivots a self-managed one. A physical bootstrap
-	// node needs its own bootstrapper.
+	// cluster and reverse-pivots a self-managed one.
 	mgr := r.manager
-	switch bootstrapType(ctx, &data) {
-	case "talos":
-		// A pivoted Talos bootstrap node was reset and released right after
-		// the pivot, and CAPT may have reclaimed it into the workload cluster
-		// since: never touch it on destroy. An in-place node is the cluster;
-		// the whole cluster is torn down node by node through the bootstrapper.
-		deleteOpts.DeleteBootstrap = false
-		if bs, _ := extractManagementBootstrap(ctx, mgmt); bs != nil && bs.Mode.ValueString() == "in_place" {
-			typed, d := r.managerFor(ctx, &data)
-			resp.Diagnostics.Append(d...)
-			if d.HasError() {
-				return
-			}
-			mgr = typed
-			deleteOpts.InPlace = true
-			deleteOpts.SelfManaged = false
-			deleteOpts.BootstrapMachine = bootstrapMachineHostname(ctx, &data)
-			if inv, _ := extractInventory(ctx, &data); inv != nil {
-				machines, d := extractInventoryMachines(ctx, inv)
-				resp.Diagnostics.Append(d...)
-				deleteOpts.Inventory = machines
-			}
-		}
-	case "kairos":
+	if bootstrapType(ctx, &data) == "kairos" {
 		// A disposable node is powered off right after the pivot. When that
 		// failed, status.bootstrap_cluster is still set: power it off now
 		// through the Kairos bootstrapper, before the reverse pivot.
@@ -1202,7 +1072,7 @@ func (r *ClusterResource) Delete(ctx context.Context, req resource.DeleteRequest
 		}
 	}
 
-	if mgmtKubeconfig == "" && !deleteOpts.InPlace {
+	if mgmtKubeconfig == "" {
 		tflog.Warn(ctx, "No management kubeconfig for deletion - manual cleanup may be needed")
 		return
 	}
@@ -1235,7 +1105,7 @@ func (r *ClusterResource) ImportState(ctx context.Context, req resource.ImportSt
 	mgmt, d := types.ObjectValueFrom(ctx, managementAttrTypes(), ManagementModel{
 		Kubeconfig: stringOrNull(kubeconfig), Namespace: stringOrNull(namespace),
 		SkipInit: types.BoolNull(), SelfManaged: types.BoolNull(), Uninstall: types.BoolNull(),
-		Bootstrap: types.ObjectNull(managementBootstrapAttrTypes()), Addons: types.ObjectNull(bootstrapAddonsAttrTypes()),
+		Bootstrap: types.ObjectNull(managementBootstrapAttrTypes()),
 	})
 	resp.Diagnostics.Append(d...)
 	if d.HasError() {
@@ -1280,7 +1150,6 @@ func (r *ClusterResource) UpgradeState(ctx context.Context) map[int64]resource.S
 					SelfManaged: v0.SelfManaged,
 					Namespace:   ns,
 					Bootstrap:   types.ObjectNull(managementBootstrapAttrTypes()),
-					Addons:      types.ObjectNull(bootstrapAddonsAttrTypes()),
 				}
 				mgmtVal, d := types.ObjectValueFrom(ctx, managementAttrTypes(), mgmt)
 				resp.Diagnostics.Append(d...)
@@ -1312,7 +1181,6 @@ func (r *ClusterResource) UpgradeState(ctx context.Context) map[int64]resource.S
 				// MachineDeployment.
 				v1.Topology, d = legacyTopologyObject(ctx, v0.ControlPlaneMachineCount, v0.WorkerMachineCount)
 				resp.Diagnostics.Append(d...)
-				v1.CNI = types.ObjectNull(cniAttrTypes())
 
 				v1.Inventory = types.ObjectNull(inventoryAttrTypes())
 
@@ -1340,10 +1208,11 @@ func (r *ClusterResource) UpgradeState(ctx context.Context) map[int64]resource.S
 				resp.Diagnostics.Append(resp.State.Set(ctx, v1)...)
 			},
 		},
-		// No PriorSchema for v1 and v2: the schemas were large and only a
+		// No PriorSchema for v1, v2 and v3: the schemas were large and only a
 		// handful of attributes change shape, so the upgrades rewrite raw JSON.
 		1: rawJSONUpgrader(1, upgradeV1JSON),
 		2: rawJSONUpgrader(2, upgradeV2JSON),
+		3: rawJSONUpgrader(3, upgradeV3JSON),
 	}
 }
 
@@ -1468,34 +1337,8 @@ func (r *ClusterResource) validateLifecycleConfig(ctx context.Context, data *Clu
 		validateInventory(ctx, inv, cp, workerCount, diags)
 	}
 
-	// CNI is wired through the Talos machine configs (the bootstrap node's
-	// and the CAPI render's) plus a Helm release, so it needs a Talos
-	// cluster: a Talos bootstrap node, or a Kairos node pivoting to a Talos
-	// control plane.
-	if cni, d := extractCNI(ctx, data); cni != nil {
-		diags.Append(d...)
-		if p := strings.ToLower(cni.Provider.ValueString()); p != "cilium" {
-			diags.AddError("Invalid cni configuration", fmt.Sprintf("cni.provider %q is not supported; only \"cilium\".", cni.Provider.ValueString()))
-		}
-		switch bootstrapType(ctx, data) {
-		case "talos":
-		case "kairos":
-			if _, ok := controlPlaneStrategicPatches(ctx, data, diags); !ok {
-				diags.AddError("Invalid cni configuration", "cni with management.bootstrap.type = \"kairos\" requires a control_plane[\"talos\"] entry: the CNI's Talos patch goes into the machine configs CAPI renders.")
-			}
-		default:
-			diags.AddError("Invalid cni configuration", "cni requires management.bootstrap.type = \"talos\" or \"kairos\".")
-		}
-	}
-
-	// Validate bootstrap cluster configuration and the management addons
+	// Validate the bootstrap cluster configuration
 	validateManagementBootstrap(ctx, data, diags)
-	if mgmt, d := extractManagement(ctx, data); mgmt != nil {
-		diags.Append(d...)
-		ad, d := extractManagementAddons(ctx, mgmt)
-		diags.Append(d...)
-		validateAddonsModel(ctx, "management.addons", ad, diags)
-	}
 }
 
 func (r *ClusterResource) resolveManagementKubeconfig(ctx context.Context, plan *ClusterResourceModel, state *ClusterResourceModel) string {
@@ -1556,7 +1399,6 @@ func (r *ClusterResource) ensureManagementComputed(ctx context.Context, data *Cl
 			Uninstall:   types.BoolValue(false),
 			Namespace:   types.StringValue(namespace),
 			Bootstrap:   types.ObjectNull(managementBootstrapAttrTypes()),
-			Addons:      types.ObjectNull(bootstrapAddonsAttrTypes()),
 		}
 	} else {
 		if mgmt.Namespace.IsNull() || mgmt.Namespace.ValueString() == "" {
@@ -1567,9 +1409,6 @@ func (r *ClusterResource) ensureManagementComputed(ctx context.Context, data *Cl
 		}
 		if mgmt.Bootstrap.IsUnknown() {
 			mgmt.Bootstrap = types.ObjectNull(managementBootstrapAttrTypes())
-		}
-		if mgmt.Addons.IsUnknown() {
-			mgmt.Addons = types.ObjectNull(bootstrapAddonsAttrTypes())
 		}
 	}
 
@@ -1656,7 +1495,9 @@ func clusterResourceSchemaV0() schema.Schema {
 	}
 }
 
-// validateManagementBootstrap checks management.bootstrap when type = "talos".
+// validateManagementBootstrap checks management.bootstrap: the type, the
+// machine a Kairos node boots on, the boot settings, the kairos block and the
+// bootstrap addons.
 func validateManagementBootstrap(ctx context.Context, data *ClusterResourceModel, diags *diag.Diagnostics) {
 	const summary = "Invalid bootstrap configuration"
 
@@ -1672,61 +1513,28 @@ func validateManagementBootstrap(ctx context.Context, data *ClusterResourceModel
 	if !bs.Type.IsNull() && !bs.Type.IsUnknown() {
 		typ = bs.Type.ValueString()
 	}
-	if !bs.Mode.IsNull() && !bs.Mode.IsUnknown() {
-		switch bs.Mode.ValueString() {
-		case "", "pivot":
-		case "in_place":
-			if typ != "talos" {
-				diags.AddError(summary, "management.bootstrap.mode = \"in_place\" requires type = \"talos\": only a Talos bootstrap node can be adopted as a cluster member.")
-			}
-		default:
-			diags.AddError(summary, fmt.Sprintf("management.bootstrap.mode %q is not supported. Supported: pivot, in_place.", bs.Mode.ValueString()))
-		}
-	}
 	switch typ {
 	case "kind":
 		return
-	case "talos", "kairos":
+	case "kairos":
 	default:
-		diags.AddError(summary, fmt.Sprintf("management.bootstrap.type %q is not supported. Supported: kind, talos, kairos.", typ))
+		diags.AddError(summary, fmt.Sprintf("management.bootstrap.type %q is not supported. Supported: kind, kairos.", typ))
 		return
-	}
-
-	if bs.Machine.IsNull() || bs.Machine.ValueString() == "" {
-		diags.AddError(summary, fmt.Sprintf("management.bootstrap.machine is required when type = %q.", typ))
-	} else {
-		m, d := findInventoryMachine(ctx, data, bs.Machine.ValueString())
-		diags.Append(d...)
-		if m == nil {
-			diags.AddError(summary, fmt.Sprintf("management.bootstrap.machine %q does not match any inventory.machine hostname.", bs.Machine.ValueString()))
-		} else {
-			if m.BMC.IsNull() || m.BMC.IsUnknown() {
-				diags.AddError(summary, fmt.Sprintf("inventory machine %q must define bmc to be used as the bootstrap node.", bs.Machine.ValueString()))
-			}
-			// A Kairos live node writes nothing to disk.
-			if typ == "talos" && (m.Disk.IsNull() || m.Disk.IsUnknown()) {
-				diags.AddError(summary, fmt.Sprintf("inventory machine %q must define disk.device to be used as the bootstrap node.", bs.Machine.ValueString()))
-			}
-			var n NetworkModel
-			diags.Append(m.Network.As(ctx, &n, basetypes.ObjectAsOptions{})...)
-			if n.IPAddress.IsNull() || n.IPAddress.ValueString() == "" {
-				diags.AddError(summary, fmt.Sprintf("inventory machine %q must define network.ip_address to be used as the bootstrap node.", bs.Machine.ValueString()))
-			}
-		}
 	}
 
 	boot, d := extractBoot(ctx, bs)
 	diags.Append(d...)
+	manual := false
 	if boot != nil {
 		if !boot.Method.IsNull() && !boot.Method.IsUnknown() {
 			switch boot.Method.ValueString() {
 			case "auto", "virtual_media":
+			case "manual":
+				manual = true
 			case "http":
-				if typ == "kairos" {
-					diags.AddError(summary, "management.bootstrap.boot.method \"http\" boots a Talos UKI over UEFI HTTP boot; a Kairos live ISO boots from virtual media (auto or virtual_media).")
-				}
+				diags.AddError(summary, "management.bootstrap.boot.method \"http\" boots a UKI over UEFI HTTP boot; a live ISO boots from virtual media (auto or virtual_media) or by hand (manual).")
 			default:
-				diags.AddError(summary, fmt.Sprintf("management.bootstrap.boot.method %q is not supported. Supported: auto, virtual_media, http.", boot.Method.ValueString()))
+				diags.AddError(summary, fmt.Sprintf("management.bootstrap.boot.method %q is not supported. Supported: auto, virtual_media, manual.", boot.Method.ValueString()))
 			}
 		}
 		if !boot.Timeout.IsNull() && !boot.Timeout.IsUnknown() {
@@ -1739,59 +1547,26 @@ func validateManagementBootstrap(ctx context.Context, data *ClusterResourceModel
 		}
 	}
 
-	tm, d := extractTalos(ctx, bs)
-	diags.Append(d...)
-	if typ == "kairos" {
-		if tm != nil {
-			diags.AddError(summary, "management.bootstrap.talos applies to type = \"talos\"; a Kairos node is configured by management.bootstrap.kairos.")
-		}
-		validateKairosBootstrap(ctx, data, bs, diags)
-		ad, d := extractBootstrapAddons(ctx, bs)
+	if bs.Machine.IsNull() || bs.Machine.ValueString() == "" {
+		diags.AddError(summary, fmt.Sprintf("management.bootstrap.machine is required when type = %q.", typ))
+	} else {
+		m, d := findInventoryMachine(ctx, data, bs.Machine.ValueString())
 		diags.Append(d...)
-		validateAddonsModel(ctx, "management.bootstrap.addons", ad, diags)
-		return
-	}
-	if tm == nil || tm.Version.IsNull() || tm.Version.ValueString() == "" {
-		diags.AddError(summary, "management.bootstrap.talos.version is required when type = \"talos\".")
-	}
-	if tm != nil {
-		if !tm.Architecture.IsNull() && !tm.Architecture.IsUnknown() {
-			switch tm.Architecture.ValueString() {
-			case "amd64", "arm64":
-			default:
-				diags.AddError(summary, fmt.Sprintf("management.bootstrap.talos.architecture %q is not supported. Supported: amd64, arm64.", tm.Architecture.ValueString()))
+		if m == nil {
+			diags.AddError(summary, fmt.Sprintf("management.bootstrap.machine %q does not match any inventory.machine hostname.", bs.Machine.ValueString()))
+		} else {
+			if !manual && (m.BMC.IsNull() || m.BMC.IsUnknown()) {
+				diags.AddError(summary, fmt.Sprintf("inventory machine %q must define bmc to be used as the bootstrap node (or set boot.method = \"manual\").", bs.Machine.ValueString()))
 			}
-		}
-
-		img, d := extractTalosImage(ctx, tm)
-		diags.Append(d...)
-		if img != nil {
-			set := func(s types.String) bool { return !s.IsNull() && !s.IsUnknown() && s.ValueString() != "" }
-			nonEmpty := func(l types.List) bool { return !l.IsNull() && !l.IsUnknown() && len(l.Elements()) > 0 }
-			hasISO, hasInstaller := set(img.ISO), set(img.Installer)
-			hasSchematic := set(img.Schematic)
-			hasCustom := nonEmpty(img.Extensions) || nonEmpty(img.KernelArgs)
-			if hasISO != hasInstaller {
-				diags.AddError(summary, "management.bootstrap.talos.image.iso and installer must be set together.")
-			}
-			if hasISO && (hasSchematic || hasCustom) {
-				diags.AddError(summary, "management.bootstrap.talos.image.iso/installer conflict with schematic, extensions, and kernel_args.")
-			}
-			if hasSchematic && hasCustom {
-				diags.AddError(summary, "management.bootstrap.talos.image.schematic conflicts with extensions and kernel_args.")
-			}
-		}
-
-		patches, d := stringList(ctx, tm.ConfigPatches)
-		diags.Append(d...)
-		for i, p := range patches {
-			var v any
-			if err := yaml.Unmarshal([]byte(p), &v); err != nil {
-				diags.AddError(summary, fmt.Sprintf("management.bootstrap.talos.config_patches[%d] is not valid YAML: %v", i, err))
+			var n NetworkModel
+			diags.Append(m.Network.As(ctx, &n, basetypes.ObjectAsOptions{})...)
+			if n.IPAddress.IsNull() || n.IPAddress.ValueString() == "" {
+				diags.AddError(summary, fmt.Sprintf("inventory machine %q must define network.ip_address to be used as the bootstrap node.", bs.Machine.ValueString()))
 			}
 		}
 	}
 
+	validateKairosBootstrap(ctx, data, bs, diags)
 	ad, d := extractBootstrapAddons(ctx, bs)
 	diags.Append(d...)
 	validateAddonsModel(ctx, "management.bootstrap.addons", ad, diags)

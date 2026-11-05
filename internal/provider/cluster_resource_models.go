@@ -69,8 +69,7 @@ type ClusterResourceModel struct {
 	IPAM           types.Map    `tfsdk:"ipam"`
 	Addon          types.Map    `tfsdk:"addon"`
 	Topology       types.Object `tfsdk:"topology"`
-	Network        types.Object `tfsdk:"network"` // ClusterNetworkModel
-	CNI            types.Object `tfsdk:"cni"`
+	Network        types.Object `tfsdk:"network"`   // ClusterNetworkModel
 	Manifests      types.Object `tfsdk:"manifests"` // ManifestsModel
 	Inventory      types.Object `tfsdk:"inventory"`
 	Wait           types.Object `tfsdk:"wait"`
@@ -86,46 +85,23 @@ type ManagementModel struct {
 	Uninstall   types.Bool   `tfsdk:"uninstall"`
 	Namespace   types.String `tfsdk:"namespace"`
 	Bootstrap   types.Object `tfsdk:"bootstrap"` // ManagementBootstrapModel
-	Addons      types.Object `tfsdk:"addons"`    // BootstrapAddonsModel: management-plane addons
 }
 
 // ManagementBootstrapModel configures the transient bootstrap cluster.
 type ManagementBootstrapModel struct {
-	Type     types.String `tfsdk:"type"`
-	Mode     types.String `tfsdk:"mode"`
-	StateDir types.String `tfsdk:"state_dir"`
-	Machine  types.String `tfsdk:"machine"`
-	Boot     types.Object `tfsdk:"boot"`   // BootModel
-	Talos    types.Object `tfsdk:"talos"`  // TalosModel
-	Kairos   types.Object `tfsdk:"kairos"` // KairosModel
-	Addons   types.Object `tfsdk:"addons"` // BootstrapAddonsModel
+	Type    types.String `tfsdk:"type"`
+	Machine types.String `tfsdk:"machine"`
+	Boot    types.Object `tfsdk:"boot"`   // BootModel
+	Kairos  types.Object `tfsdk:"kairos"` // KairosModel
+	Addons  types.Object `tfsdk:"addons"` // BootstrapAddonsModel
 }
 
-// BootModel controls how the Talos bootstrap node boots the installer.
+// BootModel controls how the bootstrap node boots the live image.
 type BootModel struct {
 	Method   types.String `tfsdk:"method"`
 	Timeout  types.String `tfsdk:"timeout"`
 	Attempts types.Int64  `tfsdk:"attempts"`
 	Device   types.String `tfsdk:"device"`
-}
-
-// TalosModel controls the Talos version, images, and config patches.
-type TalosModel struct {
-	Version       types.String `tfsdk:"version"`
-	Architecture  types.String `tfsdk:"architecture"`
-	Endpoint      types.String `tfsdk:"endpoint"`
-	Image         types.Object `tfsdk:"image"` // TalosImageModel
-	ConfigPatches types.List   `tfsdk:"config_patches"`
-}
-
-// TalosImageModel selects Image Factory artifacts or explicit overrides.
-type TalosImageModel struct {
-	Factory    types.String `tfsdk:"factory"`
-	Schematic  types.String `tfsdk:"schematic"`
-	Extensions types.List   `tfsdk:"extensions"`
-	KernelArgs types.List   `tfsdk:"kernel_args"`
-	ISO        types.String `tfsdk:"iso"`
-	Installer  types.String `tfsdk:"installer"`
 }
 
 // KairosModel configures the disposable Kairos live node (type = "kairos").
@@ -176,21 +152,6 @@ type ProviderModel struct {
 	ManifestPatches       types.List   `tfsdk:"manifest_patches"`
 	Patches               types.List   `tfsdk:"patches"`
 	ResourceConfig        types.String `tfsdk:"resource_config"` // YAML/JSON object merged into the provider's cluster object spec
-}
-
-// CNIModel configures the workload cluster CNI, replacing Talos's default.
-type CNIModel struct {
-	Provider   types.String `tfsdk:"provider"`
-	Version    types.String `tfsdk:"version"`
-	Values     types.String `tfsdk:"values"`
-	GatewayAPI types.Object `tfsdk:"gateway_api"` // GatewayAPIModel
-}
-
-// GatewayAPIModel installs the Gateway API CRDs before Cilium and enables
-// gatewayAPI in the Cilium values.
-type GatewayAPIModel struct {
-	Enabled types.Bool   `tfsdk:"enabled"`
-	Version types.String `tfsdk:"version"`
 }
 
 // FetchConfigModel controls where provider components are fetched from.
@@ -364,7 +325,6 @@ type StatusModel struct {
 
 func managementAttrTypes() map[string]attr.Type {
 	return map[string]attr.Type{
-		"addons":       types.ObjectType{AttrTypes: bootstrapAddonsAttrTypes()},
 		"kubeconfig":   types.StringType,
 		"skip_init":    types.BoolType,
 		"self_managed": types.BoolType,
@@ -376,14 +336,11 @@ func managementAttrTypes() map[string]attr.Type {
 
 func managementBootstrapAttrTypes() map[string]attr.Type {
 	return map[string]attr.Type{
-		"type":      types.StringType,
-		"mode":      types.StringType,
-		"state_dir": types.StringType,
-		"machine":   types.StringType,
-		"boot":      types.ObjectType{AttrTypes: bootAttrTypes()},
-		"talos":     types.ObjectType{AttrTypes: talosAttrTypes()},
-		"kairos":    types.ObjectType{AttrTypes: kairosAttrTypes()},
-		"addons":    types.ObjectType{AttrTypes: bootstrapAddonsAttrTypes()},
+		"type":    types.StringType,
+		"machine": types.StringType,
+		"boot":    types.ObjectType{AttrTypes: bootAttrTypes()},
+		"kairos":  types.ObjectType{AttrTypes: kairosAttrTypes()},
+		"addons":  types.ObjectType{AttrTypes: bootstrapAddonsAttrTypes()},
 	}
 }
 
@@ -393,27 +350,6 @@ func bootAttrTypes() map[string]attr.Type {
 		"timeout":  types.StringType,
 		"attempts": types.Int64Type,
 		"device":   types.StringType,
-	}
-}
-
-func talosAttrTypes() map[string]attr.Type {
-	return map[string]attr.Type{
-		"version":        types.StringType,
-		"architecture":   types.StringType,
-		"endpoint":       types.StringType,
-		"image":          types.ObjectType{AttrTypes: talosImageAttrTypes()},
-		"config_patches": types.ListType{ElemType: types.StringType},
-	}
-}
-
-func talosImageAttrTypes() map[string]attr.Type {
-	return map[string]attr.Type{
-		"factory":     types.StringType,
-		"schematic":   types.StringType,
-		"extensions":  types.ListType{ElemType: types.StringType},
-		"kernel_args": types.ListType{ElemType: types.StringType},
-		"iso":         types.StringType,
-		"installer":   types.StringType,
 	}
 }
 
@@ -472,22 +408,6 @@ func providerAttrTypes() map[string]attr.Type {
 // providerMapType is the Terraform type of every provider map attribute.
 func providerMapType() types.MapType {
 	return types.MapType{ElemType: types.ObjectType{AttrTypes: providerAttrTypes()}}
-}
-
-func cniAttrTypes() map[string]attr.Type {
-	return map[string]attr.Type{
-		"provider":    types.StringType,
-		"version":     types.StringType,
-		"values":      types.StringType,
-		"gateway_api": types.ObjectType{AttrTypes: gatewayAPIAttrTypes()},
-	}
-}
-
-func gatewayAPIAttrTypes() map[string]attr.Type {
-	return map[string]attr.Type{
-		"enabled": types.BoolType,
-		"version": types.StringType,
-	}
 }
 
 func fetchConfigAttrTypes() map[string]attr.Type {
@@ -700,24 +620,6 @@ func extractBoot(ctx context.Context, bs *ManagementBootstrapModel) (*BootModel,
 	return &b, diags
 }
 
-func extractTalos(ctx context.Context, bs *ManagementBootstrapModel) (*TalosModel, diag.Diagnostics) {
-	if bs == nil || bs.Talos.IsNull() || bs.Talos.IsUnknown() {
-		return nil, nil
-	}
-	var tm TalosModel
-	diags := bs.Talos.As(ctx, &tm, basetypes.ObjectAsOptions{})
-	return &tm, diags
-}
-
-func extractTalosImage(ctx context.Context, tm *TalosModel) (*TalosImageModel, diag.Diagnostics) {
-	if tm == nil || tm.Image.IsNull() || tm.Image.IsUnknown() {
-		return nil, nil
-	}
-	var img TalosImageModel
-	diags := tm.Image.As(ctx, &img, basetypes.ObjectAsOptions{})
-	return &img, diags
-}
-
 func extractKairos(ctx context.Context, bs *ManagementBootstrapModel) (*KairosModel, diag.Diagnostics) {
 	if bs == nil || bs.Kairos.IsNull() || bs.Kairos.IsUnknown() {
 		return nil, nil
@@ -745,15 +647,8 @@ func extractBootstrapAddons(ctx context.Context, bs *ManagementBootstrapModel) (
 	return &ad, diags
 }
 
-// extractManagementAddons returns management.addons, or nil when unset.
-func extractManagementAddons(ctx context.Context, mgmt *ManagementModel) (*BootstrapAddonsModel, diag.Diagnostics) {
-	if mgmt == nil || mgmt.Addons.IsNull() || mgmt.Addons.IsUnknown() {
-		return nil, nil
-	}
-	var ad BootstrapAddonsModel
-	diags := mgmt.Addons.As(ctx, &ad, basetypes.ObjectAsOptions{})
-	return &ad, diags
-}
+// defaultHelmTimeout bounds a Helm install when the release sets no timeout.
+const defaultHelmTimeout = 10 * time.Minute
 
 // addonSetFromModel converts an addons block to the backend set.
 func addonSetFromModel(ctx context.Context, ad *BootstrapAddonsModel) (capi.AddonSet, diag.Diagnostics) {
@@ -936,26 +831,6 @@ func extractTopology(ctx context.Context, data *ClusterResourceModel) (cp capi.C
 		}
 	}
 	return cp, mds, diags
-}
-
-// extractCNI returns the CNI configuration, or nil when unset.
-func extractCNI(ctx context.Context, data *ClusterResourceModel) (*CNIModel, diag.Diagnostics) {
-	if data.CNI.IsNull() || data.CNI.IsUnknown() {
-		return nil, nil
-	}
-	var cni CNIModel
-	diags := data.CNI.As(ctx, &cni, basetypes.ObjectAsOptions{})
-	return &cni, diags
-}
-
-// extractGatewayAPI returns the CNI Gateway API settings, or nil when unset.
-func extractGatewayAPI(ctx context.Context, cni *CNIModel) (*GatewayAPIModel, diag.Diagnostics) {
-	if cni == nil || cni.GatewayAPI.IsNull() || cni.GatewayAPI.IsUnknown() {
-		return nil, nil
-	}
-	var gw GatewayAPIModel
-	diags := cni.GatewayAPI.As(ctx, &gw, basetypes.ObjectAsOptions{})
-	return &gw, diags
 }
 
 // extractNetwork returns the Cluster.spec network settings (zero when unset).
@@ -1264,10 +1139,6 @@ func buildCreateOptions(ctx context.Context, data *ClusterResourceModel) (*capi.
 		if !mgmt.Namespace.IsNull() {
 			opts.Namespace = mgmt.Namespace.ValueString()
 		}
-		if bs, bd := extractManagementBootstrap(ctx, mgmt); bs != nil {
-			diags.Append(bd...)
-			opts.InPlace = bs.Mode.ValueString() == "in_place"
-		}
 	}
 
 	// Providers
@@ -1328,19 +1199,14 @@ func buildCreateOptions(ctx context.Context, data *ClusterResourceModel) (*capi.
 	diags.Append(d...)
 	opts.ManagementManifests = manifests
 
-	// Management-plane addons (the Tinkerbell stack).
+	// The bootstrap cluster's own stack, uninstalled again before the pivot.
 	if mgmt != nil {
-		ad, d := extractManagementAddons(ctx, mgmt)
+		bs, d := extractManagementBootstrap(ctx, mgmt)
 		diags.Append(d...)
-		opts.ManagementAddons, d = addonSetFromModel(ctx, ad)
+		ad, d := extractBootstrapAddons(ctx, bs)
 		diags.Append(d...)
-	}
-
-	// The cni block's Talos patch must be in what CAPI renders for every
-	// node, not only in the bootstrap node's own config.
-	if cni, d := extractCNI(ctx, data); cni != nil && talosClusterBootstrap(ctx, data) {
+		opts.BootstrapAddons, d = addonSetFromModel(ctx, ad)
 		diags.Append(d...)
-		injectCNIPatch(opts)
 	}
 
 	return opts, diags
@@ -1360,23 +1226,12 @@ func bootstrapType(ctx context.Context, data *ClusterResourceModel) string {
 	return bs.Type.ValueString()
 }
 
-// talosClusterBootstrap reports whether the cluster's nodes are Talos
-// machines the provider configures the CNI for: a Talos bootstrap node, or
-// a disposable Kairos node that pivots to a Talos control plane.
-func talosClusterBootstrap(ctx context.Context, data *ClusterResourceModel) bool {
-	switch bootstrapType(ctx, data) {
-	case "talos", "kairos":
-		return true
-	}
-	return false
-}
-
 // bootstrapMachineHostname is management.bootstrap.machine when the bootstrap
-// cluster runs on an inventory machine (type "talos" or "kairos"), else "".
+// cluster runs on an inventory machine (type "kairos"), else "".
 func bootstrapMachineHostname(ctx context.Context, data *ClusterResourceModel) string {
 	mgmt, _ := extractManagement(ctx, data)
 	bs, _ := extractManagementBootstrap(ctx, mgmt)
-	if bs == nil || (bs.Type.ValueString() != "talos" && bs.Type.ValueString() != "kairos") {
+	if bs == nil || bs.Type.ValueString() != "kairos" {
 		return ""
 	}
 	if bs.Machine.IsNull() || bs.Machine.IsUnknown() {

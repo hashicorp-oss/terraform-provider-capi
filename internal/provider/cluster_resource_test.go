@@ -75,22 +75,16 @@ resource "capi_cluster" "test" {
 `
 }
 
-// TestAccClusterResource_TalosBootstrap provisions a real bare-metal node as a
-// Talos bootstrap cluster through the capi_cluster resource. Only the
-// machine-specific settings are Terraform variables (passed via TF_VAR_* on the
-// command line); the rest of the config is fixed. It runs only when TF_ACC and
-// the machine variables are set, e.g.:
+// TestAccClusterResource_KairosBootstrap stands a self-managed Tinkerbell
+// cluster up from a disposable Kairos live node. It needs real hardware and
+// is skipped unless TF_ACC and the machine variables are set:
 //
-//	TF_ACC=1 \
-//	TF_VAR_node_ip=10.0.0.160 \
-//	TF_VAR_disk=/dev/nvme0n1 \
-//	TF_VAR_bmc_address='https://10.0.0.160:16993' \
-//	TF_VAR_bmc_username=admin \
-//	TF_VAR_bmc_password=... \
-//	go test ./internal/provider/ -run TestAccClusterResource_TalosBootstrap -v -timeout 90m
-func TestAccClusterResource_TalosBootstrap(t *testing.T) {
-	if os.Getenv("TF_ACC") == "" || os.Getenv("TF_VAR_bmc_address") == "" {
-		t.Skip("set TF_ACC and TF_VAR_node_ip/disk/bmc_address/bmc_username/bmc_password to run against real hardware")
+//	TF_ACC=1 TF_VAR_bootstrap_ip=10.0.0.50 TF_VAR_bootstrap_bmc=10.0.1.50 TF_VAR_bmc_password=... \
+//	TF_VAR_cp_ip=10.0.0.5 TF_VAR_cp_mac=... TF_VAR_cp_bmc=10.0.1.5 TF_VAR_ssh_private_key="$(cat key)" \
+//	go test ./internal/provider/ -run TestAccClusterResource_KairosBootstrap -v -timeout 120m
+func TestAccClusterResource_KairosBootstrap(t *testing.T) {
+	if os.Getenv("TF_ACC") == "" || os.Getenv("TF_VAR_bootstrap_bmc") == "" {
+		t.Skip("set TF_ACC and the TF_VAR_* machine variables to run against real hardware")
 	}
 
 	resource.Test(t, resource.TestCase{
@@ -98,32 +92,33 @@ func TestAccClusterResource_TalosBootstrap(t *testing.T) {
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{
 			{
-				Config: testAccClusterResourceTalosConfig(),
+				Config: testAccClusterResourceKairosConfig(),
 				Check: resource.ComposeAggregateTestCheckFunc(
-					resource.TestCheckResourceAttrSet("capi_cluster.talos", "id"),
-					resource.TestCheckResourceAttr("capi_cluster.talos", "management.bootstrap.type", "talos"),
-					resource.TestCheckResourceAttrSet("capi_cluster.talos", "management.bootstrap.mode"),
-					// The bootstrapper generated and persisted the machine-secrets
-					// bundle, and the cluster came up enough to expose a kubeconfig.
-					resource.TestCheckResourceAttrSet("capi_cluster.talos", "provider_secrets"),
-					resource.TestCheckResourceAttrSet("capi_cluster.talos", "status.kubeconfig"),
+					resource.TestCheckResourceAttrSet("capi_cluster.kairos", "id"),
+					resource.TestCheckResourceAttr("capi_cluster.kairos", "management.bootstrap.type", "kairos"),
+					// The pivot completed: the bootstrap cluster is gone and the
+					// cluster manages itself.
+					resource.TestCheckNoResourceAttr("capi_cluster.kairos", "status.bootstrap_cluster"),
+					resource.TestCheckResourceAttrSet("capi_cluster.kairos", "status.kubeconfig"),
 				),
 			},
 		},
 	})
 }
 
-// testAccClusterResourceTalosConfig fixes everything except the machine-specific
-// settings, which come from TF_VAR_node_ip / disk / bmc_address / bmc_username /
-// bmc_password on the command line.
-func testAccClusterResourceTalosConfig() string {
+// testAccClusterResourceKairosConfig fixes everything except the
+// machine-specific settings, which come from TF_VAR_* on the command line.
+func testAccClusterResourceKairosConfig() string {
 	return `
-variable "node_ip" { type = string }
-variable "disk" {
+variable "bootstrap_ip" { type = string }
+variable "bootstrap_bmc" { type = string }
+variable "bootstrap_mac" {
   type    = string
-  default = "/dev/nvme0n1"
+  default = "aa:bb:cc:dd:ee:50"
 }
-variable "bmc_address" { type = string }
+variable "cp_ip" { type = string }
+variable "cp_mac" { type = string }
+variable "cp_bmc" { type = string }
 variable "bmc_username" {
   type    = string
   default = "admin"
@@ -132,14 +127,25 @@ variable "bmc_password" {
   type      = string
   sensitive = true
 }
+variable "ssh_private_key" {
+  type      = string
+  sensitive = true
+}
+variable "kairos_iso" {
+  type    = string
+  default = "http://files.lab.internal/kairos-bootstrap.iso"
+}
 
-resource "capi_cluster" "talos" {
-  name               = "acc-talos"
+resource "capi_cluster" "kairos" {
+  name               = "acc-kairos"
   kubernetes_version = "v1.34.0"
 
-  infrastructure = { tinkerbell = { version = "v0.5.4" } }
-  bootstrap      = { talos = { version = "v0.6.7" } }
-  control_plane  = { talos = { version = "v0.6.7" } }
+  network = { control_plane_endpoint = { host = "10.0.0.160" } }
+
+  infrastructure = { tinkerbell = { version = "v0.7.9", fetch_config = { owner = "tinkerbell-community" } } }
+  bootstrap      = { talos = { version = "v0.8.2", fetch_config = { owner = "sidero-community" } } }
+  control_plane  = { talos = { version = "v0.7.1", fetch_config = { owner = "sidero-community" } } }
+  addon          = { helm = {} }
 
   topology = {
     control_plane = { replicas = 1 }
@@ -149,20 +155,27 @@ resource "capi_cluster" "talos" {
     self_managed = true
 
     bootstrap = {
-      type    = "talos"
-      mode    = "in_place"
+      type    = "kairos"
       machine = "nuc"
 
       boot = {
-        method   = "virtual_media"
-        timeout  = "15m"
-        attempts = 3
+        method   = "manual"
+        timeout  = "20m"
+        attempts = 1
       }
 
-      talos = {
-        version      = "v1.13.10"
-        architecture = "amd64"
-        image        = { schematic = "376567988ad370138ad8b2698212367b8edcb69b5fd68c80be1f2ec7d603b4ba" }
+      kairos = {
+        iso = var.kairos_iso
+        ssh = { private_key = var.ssh_private_key }
+      }
+
+      addons = {
+        helm = [{
+          name      = "tinkerbell"
+          namespace = "tinkerbell"
+          chart     = "oci://ghcr.io/tinkerbell/charts/tinkerbell"
+          values    = yamlencode({ deployment = { hostNetwork = true }, publicIP = var.bootstrap_ip })
+        }]
       }
     }
   }
@@ -172,14 +185,29 @@ resource "capi_cluster" "talos" {
       {
         hostname = "nuc"
         network = {
-          ip_address  = var.node_ip
-          netmask     = "255.255.0.0"
+          ip_address  = var.bootstrap_ip
+          netmask     = "255.255.255.0"
           gateway     = "10.0.0.1"
-          mac_address = "88:ae:dd:75:3d:a0"
+          mac_address = var.bootstrap_mac
         }
-        disk = { device = var.disk }
         bmc = {
-          address  = var.bmc_address
+          address  = var.bootstrap_bmc
+          username = var.bmc_username
+          password = var.bmc_password
+        }
+        labels = { type = "worker" }
+      },
+      {
+        hostname = "cp-1"
+        network = {
+          ip_address  = var.cp_ip
+          netmask     = "255.255.255.0"
+          gateway     = "10.0.0.1"
+          mac_address = var.cp_mac
+        }
+        disk = { device = "/dev/nvme0n1" }
+        bmc = {
+          address  = var.cp_bmc
           username = var.bmc_username
           password = var.bmc_password
         }
@@ -188,7 +216,7 @@ resource "capi_cluster" "talos" {
     ]
   }
 
-  wait = { enabled = false }
+  wait = { enabled = true, timeout = "90m" }
 }
 `
 }

@@ -1,9 +1,10 @@
 # A Tinkerbell cluster bootstrapped from a disposable node: a spare machine (a
-# NUC, say) is booted through its BMC from a Kairos live ISO that runs k3s from
-# RAM. The provider uses that node as the management cluster only until Cluster
-# API has pivoted to the new control plane, then powers it off and ejects the
-# media. Nothing is written to its disk, and afterwards it is an ordinary netboot
-# target like every other inventory machine.
+# NUC, say) is booted from a Kairos live ISO that runs k3s from RAM, either
+# through its BMC or by hand. The provider uses that node as the management
+# cluster only until Cluster API has pivoted to the new control plane, then
+# powers it off and ejects the media. Nothing is written to its disk, and
+# afterwards it is an ordinary netboot target like every other inventory
+# machine.
 #
 # Build the ISO once from kairos-cloud-config.yaml (its header has the AuroraBoot
 # command): management.bootstrap.kairos.iso is the ISO it produces, served over
@@ -11,19 +12,22 @@
 # streamed over storage redirection). The media stays attached until the node is
 # powered off.
 #
-# Sequence (docs/superpowers/specs/2026-11-03-bootstrap-topologies-design.md §6):
-# boot the live node -> clusterctl init + management.addons (Tinkerbell) there ->
-# inventory and cluster objects -> first control-plane machine -> the cni release
-# on the new cluster -> no Workflow in flight -> clusterctl init + management.addons
-# on the new cluster -> clusterctl move (Hardware and BMC Machines move; their
-# Secrets are re-applied) -> live node powered off -> cluster Ready.
+# Sequence (docs/superpowers/specs/2026-11-04-provider-design.md §4.3): boot the
+# live node -> clusterctl init + bootstrap.addons there (a Tinkerbell on host
+# networking) -> inventory, manifests.management and the cluster objects -> the
+# first control-plane machine netboots from the live node -> the Cluster is
+# paused, in-flight Workflows finish, the live node's Tinkerbell is uninstalled
+# -> CAAPH brings up the HelmChartProxies below on the new cluster (Cilium, the
+# load-balancer pool, the cluster's own Tinkerbell) -> clusterctl move -> the
+# live node is powered off and netboots as a member. At most one Tinkerbell
+# answers DHCP at any step.
 locals {
   talos_version = "v1.13"
   cluster_name  = "bm-cluster"
   namespace     = "tinkerbell"
 
-  # Where the Tinkerbell stack answers. On the live node its Service takes the
-  # node's own address through k3s ServiceLB; on the cluster it takes a Cilium
+  # Where the Tinkerbell stack answers. On the live node it binds the node's
+  # own address (host networking); on the cluster its Service takes a Cilium
   # L2 VIP. A machine reads talos.config once, on its first boot, from whichever
   # stack provisions it, so the install image names the stack by a DNS name:
   # point it at the live node while the cluster bootstraps and at the VIP after
@@ -42,6 +46,93 @@ locals {
     machine = {
       install = { disk = "/dev/nvme0n1" }
       kubelet = { extraArgs = { provider-id = "PROVIDER_ID" } }
+    }
+  })
+
+  # Talos ships flannel and kube-proxy; Cilium replaces both, so every machine
+  # config CAPI renders carries this patch (cni-none.yaml) and Cilium is
+  # installed with the Talos-required values in cilium-values.yaml.
+  talos_cni_patch = file("${path.module}/cni-none.yaml")
+
+  cluster_selector = { matchLabels = { "cluster.x-k8s.io/cluster-name" = local.cluster_name } }
+
+  # The cluster's own addons, as CAAPH objects on the management cluster. They
+  # are declared on the live node, installed on the new cluster as soon as its
+  # control plane is initialized, waited for before the move, and moved with
+  # the cluster. The helm addon provider below installs CAAPH.
+  cilium_proxy = yamlencode({
+    apiVersion = "addons.cluster.x-k8s.io/v1alpha1"
+    kind       = "HelmChartProxy"
+    metadata   = { name = "cilium", namespace = local.namespace }
+    spec = {
+      clusterSelector   = local.cluster_selector
+      repoURL           = "oci://quay.io/cilium/charts"
+      chartName         = "cilium"
+      version           = "1.20.1" # a tag that exists on the registry; quay keeps only recent patch releases
+      releaseName       = "cilium"
+      namespace         = "kube-system"
+      reconcileStrategy = "Continuous"
+      valuesTemplate    = file("${path.module}/cilium-values.yaml")
+    }
+  })
+
+  # Objects the cluster's Tinkerbell depends on that need Cilium's CRDs: its
+  # load-balancer pool and the L2 announcement of the VIP.
+  tinkerbell_network_crs = yamlencode({
+    apiVersion = "v1"
+    kind       = "ConfigMap"
+    metadata   = { name = "tinkerbell-network", namespace = local.namespace }
+    data = {
+      "pool.yaml" = yamlencode({
+        apiVersion = "cilium.io/v2"
+        kind       = "CiliumLoadBalancerIPPool"
+        metadata   = { name = "tinkerbell" }
+        spec       = { blocks = [{ cidr = "${local.tinkerbell_ip}/32" }] }
+      })
+      "l2.yaml" = yamlencode({
+        apiVersion = "cilium.io/v2alpha1"
+        kind       = "CiliumL2AnnouncementPolicy"
+        metadata   = { name = "tinkerbell" }
+        spec       = { loadBalancerIPs = true, interfaces = ["^eth[0-9]+"] }
+      })
+    }
+  })
+  tinkerbell_network_set = yamlencode({
+    apiVersion = "addons.cluster.x-k8s.io/v1beta2"
+    kind       = "ClusterResourceSet"
+    metadata   = { name = "tinkerbell-network", namespace = local.namespace }
+    spec = {
+      clusterSelector = local.cluster_selector
+      strategy        = "Reconcile"
+      resources       = [{ kind = "ConfigMap", name = "tinkerbell-network" }]
+    }
+  })
+
+  tinkerbell_proxy = yamlencode({
+    apiVersion = "addons.cluster.x-k8s.io/v1alpha1"
+    kind       = "HelmChartProxy"
+    metadata   = { name = "tinkerbell", namespace = local.namespace }
+    spec = {
+      clusterSelector   = local.cluster_selector
+      repoURL           = "oci://ghcr.io/tinkerbell-community/charts"
+      chartName         = "tinkerbell"
+      version           = "0.23.4"
+      releaseName       = "tinkerbell"
+      namespace         = local.namespace
+      reconcileStrategy = "Continuous"
+      # The cluster's instance, customized for the cluster: a LoadBalancer
+      # Service on the VIP, smee as a proxy DHCP server. Use the keys of your
+      # chart version's values.yaml.
+      valuesTemplate = yamlencode({
+        publicIP = local.tinkerbell_ip
+        service  = { type = "LoadBalancer", loadBalancerIP = local.tinkerbell_ip }
+        deployment = {
+          envs = {
+            dhcp = { mode = "auto-proxy", tftpIp = local.tinkerbell_host, syslogIp = local.tinkerbell_host, ipxeHttpBinaryHost = local.tinkerbell_host, ipxeHttpScriptHost = local.tinkerbell_host }
+            ipxe = { httpScriptOsieUrl = "http://${local.tinkerbell_host}:7080/images", scriptTinkServerAddrPort = "${local.tinkerbell_host}:42113" }
+          }
+        }
+      })
     }
   })
 }
@@ -102,13 +193,11 @@ resource "capi_cluster" "kairos" {
       fetch_config = { owner = "sidero-community" }
       resource_config = yamlencode({
         talosVersion     = local.talos_version
-        strategicPatches = [local.talos_common_patch]
+        strategicPatches = [local.talos_cni_patch, local.talos_common_patch]
       })
     }
   }
 
-  # cni below injects its Talos patch into these strategic patches too, so the
-  # machines CAPI renders run without flannel.
   control_plane = {
     talos = {
       version      = "v0.8.0"
@@ -118,6 +207,7 @@ resource "capi_cluster" "kairos" {
           controlplane = {
             talosVersion = local.talos_version
             strategicPatches = [
+              local.talos_cni_patch,
               local.talos_common_patch,
               yamlencode({
                 machine = {
@@ -136,6 +226,9 @@ resource "capi_cluster" "kairos" {
       })
     }
   }
+
+  # CAAPH, which installs the HelmChartProxies in manifests.management.
+  addon = { helm = {} }
 
   topology = {
     control_plane = {
@@ -162,14 +255,14 @@ resource "capi_cluster" "kairos" {
       machine = "nuc" # inventory.machine[].hostname: its bmc boots the ISO; no disk is needed
 
       boot = {
-        method   = "virtual_media" # a live ISO boots from virtual media; "http" is for a Talos UKI
+        method   = "virtual_media" # or "manual": boot the node from a USB stick yourself; no BMC is driven
         device   = "usb"           # BMCs that present virtual media as a USB device (NanoKVM, Intel AMT USB-R)
         timeout  = "10m"           # per attempt, until the node answers over SSH
         attempts = 3
       }
 
       kairos = {
-        iso     = "http://files.lab.internal/kairos/kairos.iso.custom.iso"
+        iso     = "http://files.lab.internal/kairos/kairos-bootstrap.iso"
         address = local.bootstrap_ip # the static address the cloud-config gives the node
         ssh = {
           user        = "kairos"
@@ -178,62 +271,41 @@ resource "capi_cluster" "kairos" {
         }
       }
 
-      # Releases only the live node needs; the Tinkerbell stack belongs in
-      # management.addons so the cluster gets it too.
-    }
-
-    # Installed by the provider right after the CAPI providers on both the live
-    # node and the cluster. k3s ServiceLB gives the Tinkerbell LoadBalancer
-    # Service the live node's address; on the cluster Cilium LB-IPAM gives it
-    # the VIP, so the pool and the announcement policy are prerequisites, which
-    # are applied only on the final management cluster.
-    addons = {
-      prerequisites = [
-        yamlencode({
-          apiVersion = "cilium.io/v2"
-          kind       = "CiliumLoadBalancerIPPool"
-          metadata   = { name = "tinkerbell" }
-          spec       = { blocks = [{ cidr = "${local.tinkerbell_ip}/32" }] }
-        }),
-        yamlencode({
-          apiVersion = "cilium.io/v2alpha1"
-          kind       = "CiliumL2AnnouncementPolicy"
-          metadata   = { name = "tinkerbell" }
-          spec       = { loadBalancerIPs = true, interfaces = ["^eth[0-9]+"] }
-        }),
-      ]
-      helm = [
-        {
-          name      = "tinkerbell"
-          namespace = local.namespace
-          chart     = "oci://ghcr.io/tinkerbell-community/charts/tinkerbell"
-          version   = "0.23.4"
-          timeout   = "15m"
-          values = yamlencode({
-            # smee answers as a proxy DHCP server, so the stack's own address
-            # only has to be reachable by the machines it boots.
-            deployment = {
-              envs = {
-                dhcp = { mode = "auto-proxy", tftpIp = local.tinkerbell_host, syslogIp = local.tinkerbell_host, ipxeHttpBinaryHost = local.tinkerbell_host, ipxeHttpScriptHost = local.tinkerbell_host }
-                ipxe = { httpScriptOsieUrl = "http://${local.tinkerbell_host}:7080/images", scriptTinkServerAddrPort = "${local.tinkerbell_host}:42113" }
-              }
-            }
-          })
-        },
-      ]
+      # The live node's own Tinkerbell, on host networking so it answers on the
+      # node's address with no load balancer. It netboots the first
+      # control-plane machine and is uninstalled before the move; from then on
+      # the cluster's own instance (tinkerbell_proxy above) is the only one.
+      addons = {
+        helm = [
+          {
+            name      = "tinkerbell"
+            namespace = local.namespace
+            chart     = "oci://ghcr.io/tinkerbell-community/charts/tinkerbell"
+            version   = "0.23.4"
+            timeout   = "15m"
+            # Use the keys of your chart version's values.yaml.
+            values = yamlencode({
+              publicIP   = local.bootstrap_ip
+              deployment = { hostNetwork = true }
+              service    = { type = "ClusterIP" }
+            })
+          },
+        ]
+      }
     }
   }
 
-  # The cluster's CNI. With a Kairos bootstrap the live node keeps k3s's own
-  # networking; this release is installed on the new cluster as soon as its
-  # control plane initializes, and its Talos patch goes into every machine
-  # config CAPI renders. Requires control_plane["talos"].
-  cni = {
-    provider = "cilium"
-    version  = "1.20.1"
-    values = yamlencode({
-      l2announcements = { enabled = true }
-    })
+  # Applied to the live node before the cluster objects and again to the
+  # cluster after the move: the cluster's addon declarations (CAAPH brings
+  # them up on the cluster once its control plane is initialized), IPAM pools,
+  # anything the cluster objects reference.
+  manifests = {
+    management = [
+      local.cilium_proxy,
+      local.tinkerbell_network_crs,
+      local.tinkerbell_network_set,
+      local.tinkerbell_proxy,
+    ]
   }
 
   # Every machine becomes a Tinkerbell Hardware, a rufio Machine and a BMC

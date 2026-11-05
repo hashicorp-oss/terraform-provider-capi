@@ -1,5 +1,8 @@
 # In-Place Bootstrapper Completion Plan
 
+> Superseded 2026-11-04: in-place adoption and the Talos bootstrapper were removed
+> (`docs/superpowers/plans/2026-11-04-remove-talos-bootstrap.md`). Kept as history.
+
 **Goal:** Make `management.bootstrap.mode = "in_place"` adopt the Talos bootstrap node as the first
 control-plane Machine of the cluster it hosts, per the contract in
 `docs/superpowers/specs/2026-11-03-bootstrap-topologies-design.md` §4–§5.

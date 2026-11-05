@@ -185,6 +185,10 @@ func TestManager_DeleteCluster_SelfManagedReversesThePivot(t *testing.T) {
 			return (&MockApplier{}).Get(context.Background(), c, name, ns)
 		},
 	}
+	applier.PauseFunc = func(_ context.Context, c *Cluster, _, _ string) error {
+		sequence = append(sequence, "pause:"+c.KubeconfigPath)
+		return nil
+	}
 	quiescer := &MockQuiescer{WaitFunc: func(_ context.Context, c *Cluster, _ string, _ WaitOptions) error {
 		sequence = append(sequence, "quiesce:"+c.KubeconfigPath)
 		return nil
@@ -204,7 +208,7 @@ func TestManager_DeleteCluster_SelfManagedReversesThePivot(t *testing.T) {
 
 	spec := CreateClusterOptions{
 		Providers: tinkerbellProviders(), ClusterClass: true,
-		ManagementAddons:    AddonSet{Prerequisites: []string{"kind: Pool\n"}, Helm: []HelmRelease{{Name: "tinkerbell"}}},
+		BootstrapAddons:     AddonSet{Helm: []HelmRelease{{Name: "tinkerbell"}}},
 		ManagementManifests: [][]byte{[]byte("kind: ConfigMap\n")},
 		ManageInventory:     true, Inventory: inventoryTwoMachines(), BootstrapMachine: "cp-1",
 	}
@@ -222,6 +226,7 @@ func TestManager_DeleteCluster_SelfManagedReversesThePivot(t *testing.T) {
 		"addons:/tmp/bootstrap:prereqs=0",
 		"inventory:/tmp/bootstrap",
 		"manifest:/tmp/bootstrap",
+		"pause:/tmp/workload",
 		"quiesce:/tmp/workload",
 		"move:/tmp/workload->/tmp/bootstrap",
 		"delete:/tmp/bootstrap",

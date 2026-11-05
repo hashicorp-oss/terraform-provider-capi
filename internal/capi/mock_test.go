@@ -5,6 +5,7 @@ package capi
 
 import (
 	"context"
+	"fmt"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
@@ -118,6 +119,11 @@ type MockApplier struct {
 	ApplyFunc  func(ctx context.Context, cluster *Cluster, manifest []byte) error
 	DeleteFunc func(ctx context.Context, cluster *Cluster, clusterName, namespace string) error
 	GetFunc    func(ctx context.Context, cluster *Cluster, clusterName, namespace string) (*unstructured.Unstructured, error)
+	PauseFunc  func(ctx context.Context, cluster *Cluster, clusterName, namespace string) error
+	PauseCalls []struct {
+		Cluster     *Cluster
+		ClusterName string
+	}
 	ApplyCalls []struct {
 		Cluster  *Cluster
 		Manifest []byte
@@ -132,6 +138,17 @@ type MockApplier struct {
 		ClusterName string
 		Namespace   string
 	}
+}
+
+func (m *MockApplier) Pause(ctx context.Context, cluster *Cluster, clusterName, namespace string) error {
+	m.PauseCalls = append(m.PauseCalls, struct {
+		Cluster     *Cluster
+		ClusterName string
+	}{cluster, clusterName})
+	if m.PauseFunc != nil {
+		return m.PauseFunc(ctx, cluster, clusterName, namespace)
+	}
+	return nil
 }
 
 // Get returns a minimal Cluster object unless GetFunc is set.
@@ -203,10 +220,20 @@ type MockWaiter struct {
 	WaitForWorkersFunc        func(ctx context.Context, mgmtCluster *Cluster, clusterName, namespace string, opts WaitOptions) error
 	WaitForClusterReadyFunc   func(ctx context.Context, mgmtCluster *Cluster, clusterName, namespace string, opts WaitOptions) error
 	WaitForClusterDeletedFunc func(ctx context.Context, mgmtCluster *Cluster, clusterName, namespace string, opts WaitOptions) error
-	// ControlPlaneCalls, ReadyCalls and DeletedCalls record which cluster each wait ran against.
+	WaitForAddonsFunc         func(ctx context.Context, mgmtCluster *Cluster, clusterName, namespace string, opts WaitOptions) error
+	// ControlPlaneCalls, ReadyCalls, DeletedCalls and AddonsCalls record which cluster each wait ran against.
 	ControlPlaneCalls []*Cluster
 	ReadyCalls        []*Cluster
 	DeletedCalls      []*Cluster
+	AddonsCalls       []*Cluster
+}
+
+func (m *MockWaiter) WaitForAddons(ctx context.Context, mgmtCluster *Cluster, clusterName, namespace string, opts WaitOptions) error {
+	m.AddonsCalls = append(m.AddonsCalls, mgmtCluster)
+	if m.WaitForAddonsFunc != nil {
+		return m.WaitForAddonsFunc(ctx, mgmtCluster, clusterName, namespace, opts)
+	}
+	return nil
 }
 
 func (m *MockWaiter) WaitForClusterDeleted(ctx context.Context, mgmtCluster *Cluster, clusterName, namespace string, opts WaitOptions) error {
@@ -264,35 +291,44 @@ func (m *MockClusterDescriber) Describe(ctx context.Context, mgmtCluster *Cluste
 	return "NAME: test\nNAMESPACE: default\nKIND: Cluster", nil
 }
 
-// MockInPlaceBootstrapper is a MockBootstrapper that also implements
-// InPlaceTeardowner.
-type MockInPlaceBootstrapper struct {
-	MockBootstrapper
-	TeardownFunc  func(ctx context.Context, cluster *Cluster, machines []InventoryMachine) error
-	TeardownCalls []struct {
-		Cluster  *Cluster
-		Machines []InventoryMachine
+// MockAddonInstaller is a test double for AddonInstaller.
+type MockAddonInstaller struct {
+	InstallFunc   func(ctx context.Context, cluster *Cluster, addons AddonSet) error
+	UninstallFunc func(ctx context.Context, cluster *Cluster, addons AddonSet) error
+	Calls         []struct {
+		Cluster *Cluster
+		Addons  AddonSet
+	}
+	UninstallCalls []struct {
+		Cluster *Cluster
+		Addons  AddonSet
 	}
 }
 
-func (m *MockInPlaceBootstrapper) TeardownInPlace(ctx context.Context, cluster *Cluster, machines []InventoryMachine) error {
-	m.TeardownCalls = append(m.TeardownCalls, struct {
-		Cluster  *Cluster
-		Machines []InventoryMachine
-	}{cluster, machines})
-	if m.TeardownFunc != nil {
-		return m.TeardownFunc(ctx, cluster, machines)
+func (m *MockAddonInstaller) Uninstall(ctx context.Context, cluster *Cluster, addons AddonSet) error {
+	m.UninstallCalls = append(m.UninstallCalls, struct {
+		Cluster *Cluster
+		Addons  AddonSet
+	}{cluster, addons})
+	if m.UninstallFunc != nil {
+		return m.UninstallFunc(ctx, cluster, addons)
 	}
 	return nil
 }
 
-// MockAddonInstaller is a test double for AddonInstaller.
-type MockAddonInstaller struct {
-	InstallFunc func(ctx context.Context, cluster *Cluster, addons AddonSet) error
-	Calls       []struct {
-		Cluster *Cluster
-		Addons  AddonSet
+// MockSecretReader is a test double for SecretReader: Secrets maps
+// "namespace/name" to decoded data; anything else is not found.
+type MockSecretReader struct {
+	Secrets map[string]map[string]string
+	Calls   []string
+}
+
+func (m *MockSecretReader) ReadSecret(_ context.Context, cluster *Cluster, namespace, name string) (map[string]string, error) {
+	m.Calls = append(m.Calls, cluster.Name+":"+namespace+"/"+name)
+	if data, ok := m.Secrets[namespace+"/"+name]; ok {
+		return data, nil
 	}
+	return nil, &CAPIError{Operation: "read-secret", Cluster: cluster.Name, Err: fmt.Errorf("%w: secret %s/%s", ErrClusterNotFound, namespace, name)}
 }
 
 func (m *MockAddonInstaller) Install(ctx context.Context, cluster *Cluster, addons AddonSet) error {

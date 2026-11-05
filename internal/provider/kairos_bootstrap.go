@@ -6,13 +6,60 @@ package provider
 import (
 	"context"
 	"fmt"
+	"log"
+	"os"
+	"time"
 
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/types/basetypes"
 
+	"github.com/tinkerbell-community/terraform-provider-capi/internal/capi"
+	"github.com/tinkerbell-community/terraform-provider-capi/internal/capi/addons"
 	"github.com/tinkerbell-community/terraform-provider-capi/internal/capi/bmc"
 	"github.com/tinkerbell-community/terraform-provider-capi/internal/capi/kairos"
 )
+
+// managerFor returns the resource's default manager (kind bootstrap clusters),
+// or one wired with the Kairos bootstrapper when management.bootstrap.type is
+// "kairos".
+func (r *ClusterResource) managerFor(ctx context.Context, data *ClusterResourceModel) (*capi.Manager, diag.Diagnostics) {
+	if bootstrapType(ctx, data) != "kairos" {
+		return r.manager, nil
+	}
+	cfg, diags := buildKairosBootstrapConfig(ctx, data)
+	if diags.HasError() || cfg == nil {
+		return r.manager, diags
+	}
+	logger := log.New(os.Stderr, "[capi-tf] ", log.LstdFlags)
+	return capi.NewManager(
+		capi.WithLogger(logger),
+		capi.WithBootstrapper(kairos.New(*cfg, kairos.WithLogger(logger))),
+		capi.WithAddonInstaller(addons.NewInstaller(logger)),
+	), diags
+}
+
+// bootConfigFromModel converts management.bootstrap.boot; zero fields keep
+// the bootstrapper's defaults.
+func bootConfigFromModel(ctx context.Context, bs *ManagementBootstrapModel) (bmc.BootConfig, diag.Diagnostics) {
+	var cfg bmc.BootConfig
+	boot, diags := extractBoot(ctx, bs)
+	if boot == nil {
+		return cfg, diags
+	}
+	cfg.Method = bmc.BootMethod(boot.Method.ValueString())
+	if s := boot.Timeout.ValueString(); s != "" {
+		if dur, err := time.ParseDuration(s); err == nil {
+			cfg.Timeout = dur
+		}
+	}
+	if !boot.Attempts.IsNull() && !boot.Attempts.IsUnknown() {
+		cfg.Attempts = int(boot.Attempts.ValueInt64())
+	}
+	if d := boot.Device.ValueString(); d != "" {
+		cfg.Device = bmc.BootDevice(d)
+	}
+	return cfg, diags
+}
 
 // buildKairosBootstrapConfig assembles the Kairos bootstrapper configuration
 // from management.bootstrap and the referenced inventory machine. It returns
@@ -79,9 +126,8 @@ func buildKairosBootstrapConfig(ctx context.Context, data *ClusterResourceModel)
 	if a := k.Address.ValueString(); a != "" {
 		cfg.Machine.Address = a
 	}
-	boot, d := bootConfigFromModel(ctx, bs)
+	cfg.Boot, d = bootConfigFromModel(ctx, bs)
 	diags.Append(d...)
-	cfg.Boot = bmc.BootConfig{Method: bmc.BootMethod(boot.Method), Timeout: boot.Timeout, Attempts: boot.Attempts, Device: bmc.BootDevice(boot.Device)}
 
 	ad, d := extractBootstrapAddons(ctx, bs)
 	diags.Append(d...)

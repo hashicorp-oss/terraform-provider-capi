@@ -31,8 +31,8 @@ func TestClusterResource_Schema_ProviderMaps(t *testing.T) {
 	if resp.Diagnostics.HasError() {
 		t.Fatalf("schema diagnostics: %v", resp.Diagnostics)
 	}
-	if resp.Schema.Version != 3 {
-		t.Errorf("schema version = %d, want 3", resp.Schema.Version)
+	if resp.Schema.Version != 4 {
+		t.Errorf("schema version = %d, want 4", resp.Schema.Version)
 	}
 
 	var reference map[string]schema.Attribute
@@ -253,7 +253,6 @@ func TestExtractManagement_Populated(t *testing.T) {
 		SelfManaged: types.BoolValue(true),
 		Namespace:   types.StringValue("capi-system"),
 		Bootstrap:   types.ObjectNull(managementBootstrapAttrTypes()),
-		Addons:      types.ObjectNull(bootstrapAddonsAttrTypes()),
 	}
 	mgmtVal, diags := types.ObjectValueFrom(ctx, managementAttrTypes(), mgmt)
 	if diags.HasError() {
@@ -422,7 +421,6 @@ func baseModel(t *testing.T, ctx context.Context) *ClusterResourceModel {
 		IPAM:           types.MapNull(providerMapType().ElemType),
 		Addon:          types.MapNull(providerMapType().ElemType),
 		Topology:       types.ObjectNull(topologyAttrTypes()),
-		CNI:            types.ObjectNull(cniAttrTypes()),
 		ClusterClass:   types.BoolValue(false),
 		Network:        types.ObjectNull(clusterNetworkAttrTypes()),
 		Management:     types.ObjectNull(managementAttrTypes()),
@@ -437,7 +435,6 @@ func selfManaged(t *testing.T, ctx context.Context) types.Object {
 	v, d := types.ObjectValueFrom(ctx, managementAttrTypes(), ManagementModel{
 		Kubeconfig: types.StringNull(), SkipInit: types.BoolValue(false), SelfManaged: types.BoolValue(true),
 		Namespace: types.StringNull(), Bootstrap: types.ObjectNull(managementBootstrapAttrTypes()),
-		Addons: types.ObjectNull(bootstrapAddonsAttrTypes()),
 	})
 	if d.HasError() {
 		t.Fatal(d)

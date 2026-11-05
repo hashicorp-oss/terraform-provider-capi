@@ -8,14 +8,17 @@
 //
 // The core workflow follows EKS Anywhere's management/create.go task sequence:
 //
-//  1. Create bootstrap cluster (kind)
-//  2. Install CAPI providers on bootstrap (clusterctl init)
+//  1. Create bootstrap cluster (kind, or a disposable Kairos live node)
+//  2. Install CAPI providers on bootstrap (clusterctl init) and its own
+//     addon stack (a Tinkerbell on host networking)
 //  3. Generate the workload cluster manifest from the configured providers
 //  4. Apply the manifest to the bootstrap cluster (server-side apply)
-//  5. Wait for workload cluster readiness
+//  5. Wait for the control plane to initialize
 //  6. Retrieve workload cluster kubeconfig
-//  7. (Optional) Install CAPI on workload cluster + move management
-//  8. Clean up bootstrap cluster
+//  7. (Self-managed) hand over: pause the Cluster, drain provisioning,
+//     uninstall the bootstrap stack, wait for the workload's own addons
+//     (CAAPH), install CAPI on the workload cluster, move management
+//  8. Clean up bootstrap cluster, capture the root credential, wait for Ready
 package capi
 
 import (
@@ -47,6 +50,7 @@ type Manager struct {
 	describer     ClusterDescriber
 	addons        AddonInstaller
 	quiescer      Quiescer
+	secrets       SecretReader
 	logger        *log.Logger
 }
 
@@ -93,9 +97,15 @@ func WithDescriber(d ClusterDescriber) ManagerOption {
 	return func(m *Manager) { m.describer = d }
 }
 
-// WithAddonInstaller sets the installer for ManagementAddons and WorkloadAddons.
+// WithAddonInstaller sets the installer for BootstrapAddons.
 func WithAddonInstaller(a AddonInstaller) ManagerOption {
 	return func(m *Manager) { m.addons = a }
+}
+
+// WithSecretReader sets how the root credential of a self-managed cluster
+// is read after the pivot.
+func WithSecretReader(s SecretReader) ManagerOption {
+	return func(m *Manager) { m.secrets = s }
 }
 
 // WithQuiescer sets how the manager waits for provisioning to go idle before a move.
@@ -116,12 +126,14 @@ func NewManager(opts ...ManagerOption) *Manager {
 	const configPath = ""
 
 	infoRetriever := NewClusterctlInfoRetriever(configPath)
+	applier := NewDynamicApplier()
 
 	m := &Manager{
 		bootstrapper:  NewKindBootstrapper(),
 		installer:     NewClusterctlInstaller(configPath),
 		generator:     NewManifestGenerator(NewCRDKindResolver()),
-		applier:       NewDynamicApplier(),
+		applier:       applier,
+		secrets:       applier,
 		mover:         NewClusterctlMover(configPath),
 		waiter:        NewDynamicWaiter(),
 		infoRetriever: infoRetriever,
@@ -195,15 +207,15 @@ func (m *Manager) CreateCluster(ctx context.Context, opts CreateClusterOptions) 
 		}
 	}
 
-	pivot := opts.SelfManaged && !opts.InPlace && needsBootstrap
+	pivot := opts.SelfManaged && needsBootstrap
 
-	// Step 2b: management-plane addons (the Tinkerbell stack) on the cluster
-	// that manages now. With a pivot this cluster hands over later, so its
-	// prerequisites are skipped and the set is installed again on the
-	// workload cluster.
-	if err := m.installAddons(ctx, mgmtCluster, opts.ManagementAddons, !pivot); err != nil {
-		m.cleanupOnError(ctx, bootstrapCluster)
-		return nil, fmt.Errorf("installing management addons: %w", err)
+	// Step 2b: the bootstrap cluster's own stack (a Tinkerbell on host
+	// networking), uninstalled again before management moves away.
+	if needsBootstrap {
+		if err := m.installAddons(ctx, mgmtCluster, opts.BootstrapAddons); err != nil {
+			m.cleanupOnError(ctx, bootstrapCluster)
+			return nil, fmt.Errorf("installing bootstrap addons: %w", err)
+		}
 	}
 
 	// Step 3: Generate the cluster manifest from the installed provider CRDs
@@ -224,26 +236,10 @@ func (m *Manager) CreateCluster(ctx context.Context, opts CreateClusterOptions) 
 		return nil, fmt.Errorf("generating cluster manifest: %w", err)
 	}
 
-	// Step 4a: Apply any pre-template manifests (e.g. a pre-populated Talos
-	// machine-secrets Secret and cluster kubeconfig Secret) so CAPI providers
-	// adopt them instead of generating fresh ones. These must land before the
-	// generated TalosControlPlane/TalosConfig objects reconcile. Manifests come
-	// from the caller and, when a bootstrap cluster was created, from the
-	// bootstrapper (built from the bootstrap node's secrets).
-	preManifests := append([][]byte(nil), opts.PreTemplateManifests...)
-	if needsBootstrap && bootstrapCluster != nil {
-		if pm, ok := m.bootstrapper.(PreTemplateManifester); ok {
-			extra, err := pm.PreTemplateManifests(ctx, opts.Name, namespace)
-			if err != nil {
-				m.cleanupOnError(ctx, bootstrapCluster)
-				return nil, fmt.Errorf("building pre-template manifests: %w", err)
-			}
-			preManifests = append(preManifests, extra...)
-		}
-	}
-	// Step 4b: the Tinkerbell inventory (Hardware, rufio Machine, BMC Secret)
+	// Step 4a: the Tinkerbell inventory (Hardware, rufio Machine, BMC Secret)
 	// and the caller's management manifests, so CAPT has hardware to claim
 	// and IPAM pools exist before the first Machine is created.
+	var preManifests [][]byte
 	if inventory, err := inventoryManifest(opts, namespace, false); err != nil {
 		m.cleanupOnError(ctx, bootstrapCluster)
 		return nil, fmt.Errorf("rendering inventory: %w", err)
@@ -327,9 +323,8 @@ func (m *Manager) CreateCluster(ctx context.Context, opts CreateClusterOptions) 
 	}
 
 	// Step 7: Self-managed pivot. This mirrors EKS Anywhere's
-	// moveClusterManagementTask. In-place skips it entirely: the bootstrap
-	// cluster stays as the management cluster (for Talos, the bootstrap node
-	// IS the cluster via adopted secrets).
+	// moveClusterManagementTask, with a handover of the provisioning engine
+	// in between so at most one Tinkerbell answers DHCP at any time.
 	if pivot {
 		if kubeconfig == "" {
 			m.cleanupOnError(ctx, bootstrapCluster)
@@ -348,40 +343,30 @@ func (m *Manager) CreateCluster(ctx context.Context, opts CreateClusterOptions) 
 			Namespace:      namespace,
 		}
 
-		// 7a: the workload cluster's own addons (its CNI), so its nodes can
-		// become Ready at all.
-		if err := m.installAddons(ctx, workloadCluster, opts.WorkloadAddons, true); err != nil {
+		// 7a–7d: the handover. Pause the Cluster so CAPT starts no further
+		// Machines, let in-flight Workflows finish, take the bootstrap
+		// Tinkerbell down, and wait for the workload's own addons (CAAPH
+		// installs them once the control plane is initialized) so its
+		// Tinkerbell is up before anything else needs provisioning.
+		if err := m.handOver(ctx, mgmtCluster, workloadCluster, opts, namespace, waitOpts); err != nil {
 			m.cleanupOnError(ctx, bootstrapCluster)
-			return nil, fmt.Errorf("installing workload addons: %w", err)
+			return nil, err
 		}
 
-		// 7b: nothing may be mid-provision when management moves.
-		if err := m.quiescer.WaitForQuiescence(ctx, mgmtCluster, namespace, waitOpts); err != nil {
-			m.cleanupOnError(ctx, bootstrapCluster)
-			return nil, fmt.Errorf("waiting for provisioning to go idle before the move: %w", err)
-		}
-
-		// 7c: CAPI providers and the management addons on the workload
-		// cluster, this time with their prerequisites: it is the final
-		// management cluster.
+		// 7e: CAPI providers on the workload cluster, then the move. EKS
+		// Anywhere applies retry policy here to absorb transient faults.
+		// clusterctl resumes the Cluster on the target.
 		initOpts := InitOptions{Providers: opts.Providers, Variables: initVariables(opts)}
 		if err := m.installer.Init(ctx, workloadCluster, initOpts); err != nil {
 			m.cleanupOnError(ctx, bootstrapCluster)
 			return nil, fmt.Errorf("installing CAPI on workload cluster for pivot: %w", err)
 		}
-		if err := m.installAddons(ctx, workloadCluster, opts.ManagementAddons, true); err != nil {
-			m.cleanupOnError(ctx, bootstrapCluster)
-			return nil, fmt.Errorf("installing management addons on workload cluster: %w", err)
-		}
-
-		// 7d: move CAPI management from bootstrap to workload. EKS Anywhere
-		// applies retry policy here to absorb transient network faults.
 		if err := m.moveWithRetry(ctx, mgmtCluster, workloadCluster, MoveOptions{Namespace: namespace}); err != nil {
 			m.cleanupOnError(ctx, bootstrapCluster)
 			return nil, fmt.Errorf("moving CAPI management: %w", err)
 		}
 
-		// 7e: what the move does not carry: the inventory (now including the
+		// 7f: what the move does not carry: the inventory (now including the
 		// bootstrap machine as a normal netboot target; clusterctl moves
 		// Hardware and rufio Machines but not their BMC Secrets) and the
 		// caller's management manifests.
@@ -414,6 +399,13 @@ func (m *Manager) CreateCluster(ctx context.Context, opts CreateClusterOptions) 
 			} else {
 				result.BootstrapCluster = nil
 			}
+		}
+
+		// Step 8b: the root credential of a cluster that now manages itself:
+		// the secrets bundle its providers generated, which is all a later
+		// run needs to derive a kubeconfig when nothing else holds one.
+		if secrets := m.rootSecrets(ctx, workloadCluster, opts.Name, namespace); len(secrets) > 0 {
+			result.ProviderSecrets = secrets
 		}
 
 		// Phase two: full readiness on the new management cluster.
@@ -481,31 +473,6 @@ func (m *Manager) DeleteCluster(ctx context.Context, opts DeleteClusterOptions) 
 		namespace = "default"
 	}
 
-	// An in-place cluster is torn down node by node: the management plane runs
-	// on a member node, so deleting the Cluster object would power off the
-	// controllers mid-delete. The objects die with the cluster.
-	if opts.InPlace {
-		td, ok := m.bootstrapper.(InPlaceTeardowner)
-		if !ok {
-			return fmt.Errorf("deleting cluster %s: in-place teardown is not supported by the %T bootstrapper", opts.Name, m.bootstrapper)
-		}
-		bootstrap := &Cluster{Name: opts.BootstrapName, ProviderSecrets: opts.ProviderSecrets}
-		if bootstrap.Name == "" {
-			bootstrap.Name = opts.Name + "-bootstrap"
-		}
-		var others []InventoryMachine
-		for _, im := range opts.Inventory {
-			if im.Hostname != opts.BootstrapMachine {
-				others = append(others, im)
-			}
-		}
-		if err := td.TeardownInPlace(ctx, bootstrap, others); err != nil {
-			return fmt.Errorf("tearing down in-place cluster %s: %w", opts.Name, err)
-		}
-		m.logger.Printf("Cluster %s torn down", opts.Name)
-		return nil
-	}
-
 	if opts.ManagementKubeconfig == "" {
 		return fmt.Errorf("management kubeconfig is required for cluster deletion")
 	}
@@ -563,13 +530,13 @@ func (m *Manager) deleteClusterObject(ctx context.Context, mgmtCluster *Cluster,
 }
 
 // deleteSelfManaged deletes a cluster that manages itself: a bootstrap
-// cluster is created and initialised like at create time (providers,
-// management addons, inventory and management manifests, so rufio can power
-// the machines off), management is moved to it once nothing is mid-provision,
-// the Cluster object is deleted there and waited for, and the bootstrap
-// cluster is torn down. A failure after the move started leaves the
-// bootstrap cluster in place, since it may hold the only copy of the
-// management objects; the next deletion resumes from it.
+// cluster is created and initialised like at create time (providers, the
+// bootstrap addons so rufio can power the machines off, inventory and
+// management manifests), management is moved to it once the Cluster is
+// paused and nothing is mid-provision, the Cluster object is deleted there
+// and waited for, and the bootstrap cluster is torn down. A failure after
+// the move started leaves the bootstrap cluster in place, since it may hold
+// the only copy of the management objects; the next deletion resumes from it.
 func (m *Manager) deleteSelfManaged(ctx context.Context, opts DeleteClusterOptions, namespace string, waitOpts WaitOptions) error {
 	workload := &Cluster{Name: opts.Name, KubeconfigPath: opts.ManagementKubeconfig, Namespace: namespace}
 	bootstrapName := fmt.Sprintf("%s-bootstrap", opts.Name)
@@ -617,8 +584,8 @@ func (m *Manager) deleteSelfManaged(ctx context.Context, opts DeleteClusterOptio
 		if err := m.installer.Init(ctx, bootstrap, InitOptions{Providers: spec.Providers, Variables: initVariables(spec)}); err != nil {
 			return fmt.Errorf("installing CAPI providers on the bootstrap cluster: %w", err)
 		}
-		if err := m.installAddons(ctx, bootstrap, spec.ManagementAddons, false); err != nil {
-			return fmt.Errorf("installing management addons on the bootstrap cluster: %w", err)
+		if err := m.installAddons(ctx, bootstrap, spec.BootstrapAddons); err != nil {
+			return fmt.Errorf("installing bootstrap addons on the bootstrap cluster: %w", err)
 		}
 		var manifests [][]byte
 		if inventory, err := inventoryManifest(spec, namespace, true); err != nil {
@@ -634,6 +601,9 @@ func (m *Manager) deleteSelfManaged(ctx context.Context, opts DeleteClusterOptio
 			if err := m.applier.Apply(ctx, bootstrap, manifest); err != nil {
 				return fmt.Errorf("applying management manifest %d to the bootstrap cluster: %w", i, err)
 			}
+		}
+		if err := m.applier.Pause(ctx, workload, opts.Name, namespace); err != nil {
+			return fmt.Errorf("pausing cluster %s before the move: %w", opts.Name, err)
 		}
 		if err := m.quiescer.WaitForQuiescence(ctx, workload, namespace, waitOpts); err != nil {
 			return fmt.Errorf("waiting for provisioning to go idle before the move: %w", err)
@@ -757,12 +727,69 @@ func controlPlaneEndpoint(obj *unstructured.Unstructured) string {
 	return fmt.Sprintf("https://%s:%d", host, port)
 }
 
+// handOver prepares the move of management from the bootstrap cluster to the
+// workload cluster so that at most one provisioning engine runs at any time:
+// the Cluster is paused (no new Machines or Workflows), in-flight Workflows
+// drain, the bootstrap addons are uninstalled, and the workload cluster's
+// own addons, declared as CAAPH HelmChartProxies on the bootstrap cluster,
+// are waited for. From here the workload Tinkerbell is the only responder.
+func (m *Manager) handOver(ctx context.Context, bootstrap, workload *Cluster, opts CreateClusterOptions, namespace string, waitOpts WaitOptions) error {
+	m.logger.Printf("Pausing cluster %s for the handover", opts.Name)
+	if err := m.applier.Pause(ctx, bootstrap, opts.Name, namespace); err != nil {
+		return fmt.Errorf("pausing cluster %s before the move: %w", opts.Name, err)
+	}
+	if err := m.quiescer.WaitForQuiescence(ctx, bootstrap, namespace, waitOpts); err != nil {
+		return fmt.Errorf("waiting for provisioning to go idle before the move: %w", err)
+	}
+	if !opts.BootstrapAddons.Empty() {
+		m.logger.Printf("Uninstalling the bootstrap addons from %s", bootstrap.Name)
+		if m.addons == nil {
+			return fmt.Errorf("uninstalling addons on %s: no addon installer configured", bootstrap.Name)
+		}
+		if err := m.addons.Uninstall(ctx, bootstrap, opts.BootstrapAddons); err != nil {
+			return fmt.Errorf("uninstalling the bootstrap addons: %w", err)
+		}
+	}
+	m.logger.Printf("Waiting for the addons of cluster %s", workload.Name)
+	if err := m.waiter.WaitForAddons(ctx, bootstrap, opts.Name, namespace, waitOpts); err != nil {
+		return fmt.Errorf("waiting for the workload cluster's addons before the move: %w", err)
+	}
+	return nil
+}
+
+// rootSecrets reads the secrets bundle the cluster's providers generated:
+// the Talos machine secrets (<name>-talos) when CABPT is in use, else the
+// kubeadm CA key pair (<name>-ca). Keys are prefixed with the Secret name.
+// Nothing found is not an error: the caller then has no root credential to
+// persist, which is the case for clusters whose providers keep none.
+func (m *Manager) rootSecrets(ctx context.Context, cluster *Cluster, name, namespace string) map[string]string {
+	if m.secrets == nil {
+		return nil
+	}
+	for _, secret := range []string{name + "-talos", name + "-ca"} {
+		data, err := m.secrets.ReadSecret(ctx, cluster, namespace, secret)
+		if errors.Is(err, ErrClusterNotFound) {
+			continue
+		}
+		if err != nil {
+			m.logger.Printf("Warning: could not read %s/%s: %v", namespace, secret, err)
+			return nil
+		}
+		out := make(map[string]string, len(data))
+		for k, v := range data {
+			out[secret+"/"+k] = v
+		}
+		return out
+	}
+	return nil
+}
+
 // inventoryManifest renders the Tinkerbell inventory for the create options,
 // or nil when there is nothing to register: inventory management is off, the
 // infrastructure provider is not tinkerbell, or no machines are listed. With a
 // pivot the bootstrap machine still hosts the management cluster, so it is
 // left out rather than offered to CAPT until afterPivot, when it is a normal
-// netboot target; in place it is marked provisioned.
+// netboot target.
 func inventoryManifest(opts CreateClusterOptions, namespace string, afterPivot bool) ([]byte, error) {
 	infra, ok := opts.Providers.Infrastructure()
 	if !opts.ManageInventory || !ok || !strings.EqualFold(infra.Name, "tinkerbell") || len(opts.Inventory) == 0 {
@@ -770,13 +797,10 @@ func inventoryManifest(opts CreateClusterOptions, namespace string, afterPivot b
 	}
 	inv := InventoryOptions{Namespace: namespace, ClusterName: opts.Name}
 	for _, im := range opts.Inventory {
-		if im.Hostname == opts.BootstrapMachine && opts.BootstrapMachine != "" && !opts.InPlace && !afterPivot {
+		if im.Hostname == opts.BootstrapMachine && opts.BootstrapMachine != "" && !afterPivot {
 			continue
 		}
 		inv.Machines = append(inv.Machines, im)
-	}
-	if opts.InPlace {
-		inv.BootstrapMachine = opts.BootstrapMachine
 	}
 	if len(inv.Machines) == 0 {
 		return nil, nil
@@ -784,13 +808,9 @@ func inventoryManifest(opts CreateClusterOptions, namespace string, afterPivot b
 	return InventoryManifests(inv)
 }
 
-// installAddons installs an addon set on a cluster. final is false on a
-// cluster that will hand management over, which skips the set's
-// prerequisites. An empty set is a no-op; a non-empty set needs an installer.
-func (m *Manager) installAddons(ctx context.Context, cluster *Cluster, set AddonSet, final bool) error {
-	if !final {
-		set.Prerequisites = nil
-	}
+// installAddons installs an addon set on a cluster. An empty set is a no-op;
+// a non-empty set needs an installer.
+func (m *Manager) installAddons(ctx context.Context, cluster *Cluster, set AddonSet) error {
 	if set.Empty() {
 		return nil
 	}

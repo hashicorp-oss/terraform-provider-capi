@@ -175,7 +175,7 @@ func TestUpgradeV2JSON(t *testing.T) {
 	if !reflect.DeepEqual(gotTopo, wantTopoVal) {
 		t.Errorf("topology = %s\nwant %s", got["topology"], wantTopo)
 	}
-	if string(got["kubernetes_version"]) != `"v1.34.0"` || string(got["cni"]) != "null" {
+	if _, hasCNI := got["cni"]; string(got["kubernetes_version"]) != `"v1.34.0"` || hasCNI {
 		t.Error("untouched attributes must pass through")
 	}
 }

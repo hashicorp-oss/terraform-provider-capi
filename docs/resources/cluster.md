@@ -54,10 +54,9 @@ resource "capi_cluster" "example" {
 - `addon` (Attributes Map) Addon providers, keyed by name (e.g. `helm`). An empty object installs the default release. Each value is a provider object modeled after the cluster-api-operator provider CRDs (`operator.cluster.x-k8s.io/v1alpha2`); customizations are applied natively by wrapping the clusterctl repository factory, so the operator itself is not required. Entries are owned by this resource unless `management.skip_init` is set: a changed entry (version, fetch config, customizations) is upgraded in place with `clusterctl upgrade apply`, an added entry is installed, and a removed entry is deleted from the management cluster (`clusterctl delete`, keeping its CRDs). (see [below for nested schema](#nestedatt--addon))
 - `bootstrap` (Attributes Map) Bootstrap providers, keyed by name (e.g. `kubeadm`, `talos`). Each value is a provider object modeled after the cluster-api-operator provider CRDs (`operator.cluster.x-k8s.io/v1alpha2`); customizations are applied natively by wrapping the clusterctl repository factory, so the operator itself is not required. Entries are owned by this resource unless `management.skip_init` is set: a changed entry (version, fetch config, customizations) is upgraded in place with `clusterctl upgrade apply`. Adding or removing an entry changes the kinds of the generated cluster objects and recreates the cluster. (see [below for nested schema](#nestedatt--bootstrap))
 - `cluster_class` (Boolean) Generate a `ClusterClass` and a `Cluster` with `spec.topology` instead of direct objects. Every provider must ship `*Template` kinds; the `ClusterTopology` feature gate is enabled at init. Default `false`.
-- `cni` (Attributes) Container Network Interface for the workload cluster, replacing Talos's built-in flannel. Valid with a `talos` management bootstrap, or a `kairos` one whose cluster has a `control_plane["talos"]` entry; it disables the built-in CNI and kube-proxy (KubePrism handles the API server) in every Talos machine config and installs the CNI as a Helm release on the cluster. (see [below for nested schema](#nestedatt--cni))
 - `control_plane` (Attributes Map) Control plane providers, keyed by name (e.g. `kubeadm`, `talos`). Each value is a provider object modeled after the cluster-api-operator provider CRDs (`operator.cluster.x-k8s.io/v1alpha2`); customizations are applied natively by wrapping the clusterctl repository factory, so the operator itself is not required. Entries are owned by this resource unless `management.skip_init` is set: a changed entry (version, fetch config, customizations) is upgraded in place with `clusterctl upgrade apply`. Adding or removing an entry changes the kinds of the generated cluster objects and recreates the cluster. (see [below for nested schema](#nestedatt--control_plane))
 - `core` (Attributes Map) Core CAPI provider, keyed by name (`cluster-api`). Omit to let clusterctl install the default. Each value is a provider object modeled after the cluster-api-operator provider CRDs (`operator.cluster.x-k8s.io/v1alpha2`); customizations are applied natively by wrapping the clusterctl repository factory, so the operator itself is not required. Entries are owned by this resource unless `management.skip_init` is set: a changed entry (version, fetch config, customizations) is upgraded in place with `clusterctl upgrade apply`; removing the entry only stops pinning the version. (see [below for nested schema](#nestedatt--core))
-- `inventory` (Attributes) Hardware inventory for bare-metal provisioning. With the `tinkerbell` infrastructure provider each machine becomes a Tinkerbell Hardware, a rufio Machine and a BMC credentials Secret in the cluster namespace, applied before the generated cluster objects so CAPT can claim them. The `management.bootstrap.machine` entry is marked provisioned (and excluded from PXE) with `mode = "in_place"`, so CAPT adopts the running node; with a pivot it is left out until the bootstrap cluster is gone. (see [below for nested schema](#nestedatt--inventory))
+- `inventory` (Attributes) Hardware inventory for bare-metal provisioning. With the `tinkerbell` infrastructure provider each machine becomes a Tinkerbell Hardware, a rufio Machine and a BMC credentials Secret in the cluster namespace, applied before the generated cluster objects so CAPT can claim them. The `management.bootstrap.machine` entry is left out while it hosts the bootstrap cluster and registered as a netboot target after the pivot. (see [below for nested schema](#nestedatt--inventory))
 - `ipam` (Attributes Map) IPAM providers, keyed by name (e.g. `in-cluster`, `unifi`). Each value is a provider object modeled after the cluster-api-operator provider CRDs (`operator.cluster.x-k8s.io/v1alpha2`); customizations are applied natively by wrapping the clusterctl repository factory, so the operator itself is not required. Entries are owned by this resource unless `management.skip_init` is set: a changed entry (version, fetch config, customizations) is upgraded in place with `clusterctl upgrade apply`, an added entry is installed, and a removed entry is deleted from the management cluster (`clusterctl delete`, keeping its CRDs). (see [below for nested schema](#nestedatt--ipam))
 - `kubernetes_version` (String) Kubernetes version for the workload cluster (e.g., `v1.31.0`).
 - `management` (Attributes) Management cluster configuration. Controls how the CAPI lifecycle is managed. (see [below for nested schema](#nestedatt--management))
@@ -331,29 +330,6 @@ Optional:
 - `namespace` (String) Namespace of the target.
 - `version` (String) API version of the target.
 
-
-
-
-<a id="nestedatt--cni"></a>
-### Nested Schema for `cni`
-
-Required:
-
-- `provider` (String) CNI provider. Only `cilium` is supported today.
-
-Optional:
-
-- `gateway_api` (Attributes) Install the Gateway API CRDs before Cilium and enable `gatewayAPI` in the Cilium values. Cilium does not bundle the CRDs; without them the chart's GatewayClass fails to apply. (see [below for nested schema](#nestedatt--cni--gateway_api))
-- `values` (String) Extra Helm values (YAML), deep-merged over the defaults (`kubeProxyReplacement`, KubePrism host/port, Kubernetes IPAM).
-- `version` (String) CNI Helm chart version. Omit to use the chart's latest release.
-
-<a id="nestedatt--cni--gateway_api"></a>
-### Nested Schema for `cni.gateway_api`
-
-Optional:
-
-- `enabled` (Boolean) Fetch the upstream Gateway API `standard-install.yaml` and apply it before Cilium, and set `gatewayAPI.enabled=true` in the Cilium values.
-- `version` (String) Gateway API release tag for the CRDs (e.g. `v1.3.0`). Defaults to a known-good release.
 
 
 
@@ -682,54 +658,23 @@ Optional:
 
 Optional:
 
-- `addons` (Attributes) Management-plane addons, installed by the provider's own Helm and apply clients on every cluster that takes the management role, right after its CAPI providers are initialized: the bootstrap cluster, and with a pivot the workload cluster again before the move. The Tinkerbell stack lives here. `prerequisites` are applied only on the final management cluster (they are objects such as a Cilium load-balancer pool whose CRDs a transient bootstrap cluster may not have); `helm` and `manifests` are installed on both. (see [below for nested schema](#nestedatt--management--addons))
-- `bootstrap` (Attributes) Transient bootstrap cluster configuration. `type = "kind"` (default) creates a kind cluster. `type = "talos"` provisions one `inventory.machine` entry as a single-node Talos cluster through its BMC. `type = "kairos"` boots one `inventory.machine` entry from a user-built Kairos live ISO that runs k3s from RAM (see `kairos`). The bootstrap cluster is torn down after the self-managed pivot and nothing about it is kept in state. (see [below for nested schema](#nestedatt--management--bootstrap))
+- `bootstrap` (Attributes) Transient bootstrap cluster configuration, used once at create. `type = "kind"` (default) creates a kind cluster on the machine running Terraform. `type = "kairos"` boots one `inventory.machine` entry from a user-built Kairos live ISO that runs k3s from RAM (see `kairos`); nothing is written to its disk, and after the self-managed pivot it is powered off and provisioned by CAPT as an ordinary cluster member. Nothing about the bootstrap cluster is kept in state. (see [below for nested schema](#nestedatt--management--bootstrap))
 - `kubeconfig` (String) Path to the kubeconfig for an existing management cluster. If not provided, a bootstrap cluster (kind) is created automatically.
 - `namespace` (String) Namespace on the management cluster where CAPI resources are created.
 - `self_managed` (Boolean) Pivot CAPI management from bootstrap to workload cluster (clusterctl move). Required `true` for Tinkerbell provider.
 - `skip_init` (Boolean) Skip running clusterctl init on the management cluster. Use when CAPI providers are already installed and managed elsewhere: the provider maps are then never installed, upgraded or deleted by this resource.
 - `uninstall` (Boolean) On destroy, remove every CAPI provider from the management cluster once the cluster is gone (`clusterctl delete --all`, keeping CRDs and namespaces). Only for a management cluster given by `kubeconfig` that this resource initialised (`skip_init = false`); a bootstrap or self-managed cluster is deleted anyway. Leave unset when the management cluster is shared.
 
-<a id="nestedatt--management--addons"></a>
-### Nested Schema for `management.addons`
-
-Optional:
-
-- `helm` (Attributes List) Helm releases installed in order. (see [below for nested schema](#nestedatt--management--addons--helm))
-- `manifests` (List of String) Raw YAML manifests applied after the Helm releases.
-- `prerequisites` (List of String) Raw YAML manifests applied after the `cni` release and before the Helm releases, for objects the releases depend on that need the CNI's CRDs, such as a Cilium load-balancer pool and L2 announcement policy for the Tinkerbell Service.
-
-<a id="nestedatt--management--addons--helm"></a>
-### Nested Schema for `management.addons.helm`
-
-Required:
-
-- `chart` (String) `oci://` chart reference, or a chart name used with `repository`.
-- `name` (String) Release name.
-- `namespace` (String) Release namespace (created if missing).
-
-Optional:
-
-- `repository` (String) HTTP chart repository URL. Ignored for `oci://` charts.
-- `timeout` (String) Install timeout as a Go duration.
-- `values` (String) Chart values as a YAML string.
-- `version` (String) Chart version. Latest when empty.
-
-
-
 <a id="nestedatt--management--bootstrap"></a>
 ### Nested Schema for `management.bootstrap`
 
 Optional:
 
-- `addons` (Attributes) Helm releases and manifests installed on the bootstrap node before CAPI is initialized, in this order: the `cni` release, `prerequisites`, `helm`, `manifests`. For releases only the bootstrap node needs; the Tinkerbell stack belongs in `management.addons`. (see [below for nested schema](#nestedatt--management--bootstrap--addons))
-- `boot` (Attributes) How the node is booted into the Talos installer. (see [below for nested schema](#nestedatt--management--bootstrap--boot))
-- `kairos` (Attributes) Disposable live node for `type = "kairos"`: a user-built Kairos ISO (AuroraBoot's `kairos.iso.custom.iso` with the cloud-config embedded: `k3s.enabled`, the SSH key, the node's static address, `kairos.ram` on the live command line) booted from virtual media through the machine's BMC. The provider reads the k3s kubeconfig over SSH, uses the node as the management cluster until the pivot, then powers it off and ejects the media. Nothing is written to its disk, so `mode` must be `pivot` and `management.self_managed` must be true. (see [below for nested schema](#nestedatt--management--bootstrap--kairos))
-- `machine` (String) Hostname of the `inventory.machine` entry to use as the bootstrap node. Its `bmc`, `network.ip_address`, and `disk.device` are used (a `kairos` node writes nothing to disk and needs no `disk`). Required when `type` is `talos` or `kairos`.
-- `mode` (String) How the bootstrap cluster becomes the management cluster: `pivot` (default) moves CAPI to the workload cluster and tears the bootstrap cluster down; `in_place` keeps the bootstrap node as the self-managed cluster (no pivot) — for Talos, the CAPI providers adopt the bootstrap node's pre-created secrets so it is the same cluster.
-- `state_dir` (String) Optional override for where the Talos machine-secrets bundle is cached between applies. The cache lets a failed apply be retried without wiping and re-installing the node: the next `terraform apply` creates the resource but resumes from the node's current state (recognized as ours via the cached secrets), and the cache is removed on destroy. Defaults to a per-user cache directory (`os.UserCacheDir()`, falling back to the temp dir), so caching is on without configuration.
-- `talos` (Attributes) Talos version, images, and machine config patches. (see [below for nested schema](#nestedatt--management--bootstrap--talos))
-- `type` (String) Bootstrap cluster type: `kind`, `talos` or `kairos`.
+- `addons` (Attributes) The bootstrap cluster's own stack, installed right after its CAPI providers are initialized (`prerequisites`, `helm`, `manifests`, in that order) and uninstalled before management moves to the workload cluster: a Tinkerbell on host networking bound to the node's address, so the first control-plane machine can netboot. The workload cluster's own addons (its CNI, its Tinkerbell) are `HelmChartProxy` and `ClusterResourceSet` objects declared in `manifests.management`; CAAPH installs them once the control plane is initialized and they move with the cluster. (see [below for nested schema](#nestedatt--management--bootstrap--addons))
+- `boot` (Attributes) How the node is booted into the live image. (see [below for nested schema](#nestedatt--management--bootstrap--boot))
+- `kairos` (Attributes) Disposable live node for `type = "kairos"`: a user-built Kairos ISO (AuroraBoot's `kairos.iso.custom.iso` with the cloud-config embedded: `k3s.enabled`, the SSH key, the node's static address, `kairos.ram` on the live command line) booted from virtual media through the machine's BMC, or by hand with `boot.method = "manual"`. The provider reads the k3s kubeconfig over SSH, uses the node as the management cluster until the pivot, then ejects the media and powers it off. Requires `management.self_managed = true`. (see [below for nested schema](#nestedatt--management--bootstrap--kairos))
+- `machine` (String) Hostname of the `inventory.machine` entry to boot the live image on. Its `bmc` and `network.ip_address` are used; a live node writes nothing to disk and needs no `disk`. Required when `type = "kairos"`.
+- `type` (String) Bootstrap cluster type: `kind` or `kairos`.
 
 <a id="nestedatt--management--bootstrap--addons"></a>
 ### Nested Schema for `management.bootstrap.addons`
@@ -738,7 +683,7 @@ Optional:
 
 - `helm` (Attributes List) Helm releases installed in order. (see [below for nested schema](#nestedatt--management--bootstrap--addons--helm))
 - `manifests` (List of String) Raw YAML manifests applied after the Helm releases.
-- `prerequisites` (List of String) Raw YAML manifests applied after the `cni` release and before the Helm releases, for objects the releases depend on that need the CNI's CRDs, such as a Cilium load-balancer pool and L2 announcement policy for the Tinkerbell Service.
+- `prerequisites` (List of String) Raw YAML manifests applied before the Helm releases, for objects the releases depend on.
 
 <a id="nestedatt--management--bootstrap--addons--helm"></a>
 ### Nested Schema for `management.bootstrap.addons.helm`
@@ -765,8 +710,8 @@ Optional:
 
 - `attempts` (Number) Boot attempts before giving up.
 - `device` (String) Firmware boot target for attached virtual media: `cdrom` (default) or `usb`. Set `usb` for BMCs that expose virtual media as a USB device (many KVM-over-IP dongles such as NanoKVM), where a CD-ROM boot override never selects the media.
-- `method` (String) `auto` (virtual media, then UEFI HTTP boot), `virtual_media`, or `http`.
-- `timeout` (String) Per-attempt boot and install timeout as a Go duration (e.g. `15m`).
+- `method` (String) `auto` or `virtual_media` attach the ISO through the BMC (Intel AMT storage redirection, or bmclib virtual media plus a one-shot boot override) and power the node on. `manual` drives no BMC: the node is booted by hand (a USB stick and a power button) and only waited for, and powered off by hand after the pivot.
+- `timeout` (String) Per-attempt wait for the node to answer over SSH after a boot, as a Go duration (e.g. `15m`).
 
 
 <a id="nestedatt--management--bootstrap--kairos"></a>
@@ -774,7 +719,7 @@ Optional:
 
 Required:
 
-- `iso` (String) The live image: an `http(s)` URL the BMC fetches as virtual media, or with Intel AMT storage redirection also a local path.
+- `iso` (String) The live image: an `http(s)` URL the BMC fetches as virtual media, or with Intel AMT storage redirection also a local path. Informational with `boot.method = "manual"`.
 - `ssh` (Attributes) How the live node is reached. (see [below for nested schema](#nestedatt--management--bootstrap--kairos--ssh))
 
 Optional:
@@ -796,31 +741,6 @@ Optional:
 
 
 
-<a id="nestedatt--management--bootstrap--talos"></a>
-### Nested Schema for `management.bootstrap.talos`
-
-Optional:
-
-- `architecture` (String) `amd64` or `arm64`.
-- `config_patches` (List of String) Machine config patches (YAML strings) applied in order after the built-in install patch.
-- `endpoint` (String) Cluster endpoint written into the machine config. Defaults to `https://<machine ip>:6443`.
-- `image` (Attributes) Image Factory schematic or explicit image overrides. (see [below for nested schema](#nestedatt--management--bootstrap--talos--image))
-- `version` (String) Talos version (e.g. `v1.13.6`). Required when `type = "talos"`.
-
-<a id="nestedatt--management--bootstrap--talos--image"></a>
-### Nested Schema for `management.bootstrap.talos.image`
-
-Optional:
-
-- `extensions` (List of String) Official system extension names for a new schematic.
-- `factory` (String) Image Factory base URL.
-- `installer` (String) Explicit installer image reference. Must be set together with `iso`.
-- `iso` (String) Explicit ISO URL. Must be set together with `installer`; disables UEFI HTTP boot.
-- `kernel_args` (List of String) Extra kernel arguments for a new schematic.
-- `schematic` (String) Precomputed schematic id. Conflicts with `extensions`, `kernel_args`, `iso`, and `installer`.
-
-
-
 
 
 <a id="nestedatt--manifests"></a>
@@ -828,7 +748,7 @@ Optional:
 
 Optional:
 
-- `management` (List of String) Multi-document YAML strings applied to the management cluster after the providers are initialized and before the generated cluster objects: IPAM pools and their credentials, extra Secrets, anything the cluster objects reference. Applied with server-side apply on every create and update.
+- `management` (List of String) Multi-document YAML strings applied to the management cluster after the providers are initialized and before the generated cluster objects: IPAM pools and their credentials, extra Secrets, anything the cluster objects reference. Applied with server-side apply on every create and update, and again on the workload cluster after a self-managed pivot. With a pivot this is also where the workload cluster's addons go, as CAAPH `HelmChartProxy` and `ClusterResourceSet` objects (the `helm` addon provider installs CAAPH): CAAPH brings them up on the workload cluster as soon as its control plane is initialized, and the pivot waits for them before management moves.
 
 
 <a id="nestedatt--network"></a>

@@ -22,33 +22,20 @@ type Bootstrapper interface {
 	Exists(ctx context.Context, name string) (bool, error)
 }
 
-// PreTemplateManifester is an optional Bootstrapper capability. After the
-// bootstrap cluster is created, the manager calls it with the target CAPI
-// cluster name and namespace to obtain manifests to apply to the management
-// cluster BEFORE the cluster template. This lets a bootstrapper pre-create
-// resources the CAPI providers would otherwise generate — e.g. the Talos
-// machine-secrets Secret populated from the bootstrap node's bundle — so the
-// providers adopt the bootstrap node's identity and the cluster needs no pivot.
-// A bootstrapper that returns no manifests (or does not implement this) leaves
-// the providers to generate their own secrets.
-type PreTemplateManifester interface {
-	PreTemplateManifests(ctx context.Context, clusterName, namespace string) ([][]byte, error)
-}
-
-// InPlaceTeardowner is an optional Bootstrapper capability for in-place
-// self-managed clusters, where the bootstrap node is a member of the cluster
-// it manages. Deleting the Cluster object from inside such a cluster would
-// power off the node running the controllers, so the manager hands teardown to
-// the bootstrapper instead: it resets and powers off every other machine, then
-// its own node.
-type InPlaceTeardowner interface {
-	TeardownInPlace(ctx context.Context, cluster *Cluster, machines []InventoryMachine) error
-}
-
-// AddonInstaller installs an AddonSet on a cluster through the provider's own
-// Helm and apply clients (no CAPI addon provider involved).
+// AddonInstaller installs and removes an AddonSet on a cluster through the
+// provider's own Helm and apply clients (no CAPI addon provider involved).
 type AddonInstaller interface {
 	Install(ctx context.Context, cluster *Cluster, addons AddonSet) error
+	// Uninstall removes the set's Helm releases. Raw manifests are left.
+	Uninstall(ctx context.Context, cluster *Cluster, addons AddonSet) error
+}
+
+// SecretReader reads Secrets from a cluster, for the root credential of a
+// self-managed cluster (its CA key pair or Talos secrets bundle).
+type SecretReader interface {
+	// ReadSecret returns the decoded data of the named Secret, or an error
+	// wrapping ErrClusterNotFound when it does not exist.
+	ReadSecret(ctx context.Context, cluster *Cluster, namespace, name string) (map[string]string, error)
 }
 
 // Quiescer waits until the management cluster's provisioning engine is idle,
@@ -100,6 +87,11 @@ type Applier interface {
 	// Get reads the core Cluster object by name and namespace. A cluster
 	// that does not exist returns an error wrapping ErrClusterNotFound.
 	Get(ctx context.Context, cluster *Cluster, clusterName, namespace string) (*unstructured.Unstructured, error)
+
+	// Pause sets spec.paused on the Cluster, so its controllers create no
+	// further Machines or infrastructure. clusterctl move resumes the
+	// Cluster on the target cluster.
+	Pause(ctx context.Context, cluster *Cluster, clusterName, namespace string) error
 }
 
 // Mover moves CAPI management resources between clusters.
@@ -124,6 +116,11 @@ type Waiter interface {
 	// WaitForClusterDeleted waits for a deleted Cluster object to disappear,
 	// which is when every owned object (machines, infrastructure) is gone.
 	WaitForClusterDeleted(ctx context.Context, mgmtCluster *Cluster, clusterName, namespace string, opts WaitOptions) error
+
+	// WaitForAddons waits until every CAAPH HelmChartProxy on the management
+	// cluster that matches the cluster has a Ready HelmReleaseProxy for it.
+	// A management cluster without CAAPH has nothing to wait for.
+	WaitForAddons(ctx context.Context, mgmtCluster *Cluster, clusterName, namespace string, opts WaitOptions) error
 }
 
 // KubeconfigRetriever retrieves kubeconfigs for workload clusters.

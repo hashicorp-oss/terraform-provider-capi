@@ -6,6 +6,7 @@ package capi
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -14,6 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 	k8syaml "k8s.io/apimachinery/pkg/util/yaml"
 	"k8s.io/client-go/discovery"
@@ -184,6 +186,58 @@ func (a *DynamicApplier) Get(ctx context.Context, cluster *Cluster, clusterName,
 		return nil, &CAPIError{Operation: op, Cluster: cluster.Name, Err: err}
 	}
 	return obj, nil
+}
+
+// Pause sets spec.paused on the Cluster, so CAPI creates no further Machines
+// or Workflows while management is handed over. A cluster that does not
+// exist returns ErrClusterNotFound.
+func (a *DynamicApplier) Pause(ctx context.Context, cluster *Cluster, clusterName, namespace string) error {
+	const op = "pause-cluster"
+	clusters, err := a.clusters(ctx, cluster, namespace)
+	if err != nil {
+		return &CAPIError{Operation: op, Cluster: cluster.Name, Err: err}
+	}
+	patch := []byte(`{"spec":{"paused":true}}`)
+	_, err = clusters.Patch(ctx, clusterName, k8stypes.MergePatchType, patch, meta_v1.PatchOptions{})
+	if apierrors.IsNotFound(err) {
+		return &CAPIError{Operation: op, Cluster: cluster.Name, Err: fmt.Errorf("%w: %s/%s", ErrClusterNotFound, namespace, clusterName)}
+	}
+	if err != nil {
+		return &CAPIError{Operation: op, Cluster: cluster.Name, Err: err}
+	}
+	return nil
+}
+
+// ReadSecret implements SecretReader: the Secret's data, base64-decoded. A
+// Secret that does not exist returns ErrClusterNotFound, so a caller can try
+// the next candidate name.
+func (a *DynamicApplier) ReadSecret(ctx context.Context, cluster *Cluster, namespace, name string) (map[string]string, error) {
+	const op = "read-secret"
+	dynClient, err := buildDynamicClient(cluster.KubeconfigPath)
+	if err != nil {
+		return nil, &CAPIError{Operation: op, Cluster: cluster.Name, Err: err}
+	}
+	if namespace == "" {
+		namespace = "default"
+	}
+	gvr := schema.GroupVersionResource{Version: "v1", Resource: "secrets"}
+	obj, err := dynClient.Resource(gvr).Namespace(namespace).Get(ctx, name, meta_v1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil, &CAPIError{Operation: op, Cluster: cluster.Name, Err: fmt.Errorf("%w: secret %s/%s", ErrClusterNotFound, namespace, name)}
+	}
+	if err != nil {
+		return nil, &CAPIError{Operation: op, Cluster: cluster.Name, Err: err}
+	}
+	data, _, _ := unstructured.NestedStringMap(obj.Object, "data")
+	out := make(map[string]string, len(data))
+	for k, v := range data {
+		decoded, err := base64.StdEncoding.DecodeString(v)
+		if err != nil {
+			return nil, &CAPIError{Operation: op, Cluster: cluster.Name, Err: fmt.Errorf("decoding %s/%s key %s: %w", namespace, name, k, err)}
+		}
+		out[k] = string(decoded)
+	}
+	return out, nil
 }
 
 // clusters returns the namespaced client for core Cluster objects at the

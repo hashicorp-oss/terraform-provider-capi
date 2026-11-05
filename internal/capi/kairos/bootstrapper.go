@@ -137,7 +137,7 @@ func New(cfg Config, opts ...Option) *Bootstrapper {
 	if b.logger == nil {
 		b.logger = log.New(os.Stderr, "[kairos-bootstrap] ", log.LstdFlags)
 	}
-	if b.client == nil {
+	if b.client == nil && !b.manual() {
 		b.client = bmc.New(cfg.Machine.BMC, b.logger)
 	}
 	if b.newSSH == nil {
@@ -151,6 +151,10 @@ func New(cfg Config, opts ...Option) *Bootstrapper {
 	}
 	return b
 }
+
+// manual reports whether the machine is booted by hand: no BMC is driven,
+// the node is only waited for and the operator powers it off afterwards.
+func (b *Bootstrapper) manual() bool { return b.cfg.Boot.Method == bmc.BootMethodManual }
 
 // mediaBoot returns the boot layer, keeping one across Create and Delete so
 // a storage-redirection session opened by a boot is the one released later.
@@ -223,8 +227,22 @@ func (b *Bootstrapper) answers(ctx context.Context, node SSH) bool {
 }
 
 // boot boots the ISO until the node answers over SSH, up to Boot.Attempts
-// times. A BMC failure is final; a silent boot is retried.
+// times. A BMC failure is final; a silent boot is retried. With a manual boot
+// nothing is driven: the node is waited for once, for the boot timeout.
 func (b *Bootstrapper) boot(ctx context.Context, name string, node SSH) error {
+	if b.manual() {
+		b.logger.Printf("%s: boot method is manual; waiting up to %s for %s to be booted from %s by hand", name, b.timeouts.Boot, b.cfg.Machine.Address, b.cfg.ISO)
+		err := bmc.WaitFor(ctx, b.timeouts.Boot, b.timeouts.Poll, func(ctx context.Context) (bool, error) {
+			return b.answers(ctx, node), nil
+		})
+		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return ErrBootTimeout
+		}
+		return nil
+	}
 	media := b.mediaBoot()
 	for attempt := 1; attempt <= b.cfg.Boot.Attempts; attempt++ {
 		b.logger.Printf("%s: booting %s from %s (attempt %d/%d)", name, b.cfg.Machine.Hostname, b.cfg.ISO, attempt, b.cfg.Boot.Attempts)
@@ -324,16 +342,22 @@ func (b *Bootstrapper) Delete(ctx context.Context, cluster *capi.Cluster) error 
 	if cluster != nil && cluster.Name != "" {
 		name = cluster.Name
 	}
-	b.mediaBoot().Detach(ctx)
-	if err := bmc.Retry(ctx, b.timeouts.BMCRetries, b.timeouts.RetryBase, b.timeouts.RetryMax, b.client.PowerOff); err != nil {
-		return &capi.BootstrapError{ClusterName: name, Operation: "delete", Err: err}
+	if b.manual() {
+		b.logger.Printf("%s: boot method is manual; power off %s by hand", name, b.cfg.Machine.Hostname)
+	} else {
+		b.mediaBoot().Detach(ctx)
+		if err := bmc.Retry(ctx, b.timeouts.BMCRetries, b.timeouts.RetryBase, b.timeouts.RetryMax, b.client.PowerOff); err != nil {
+			return &capi.BootstrapError{ClusterName: name, Operation: "delete", Err: err}
+		}
 	}
 	if cluster != nil && cluster.KubeconfigPath != "" {
 		if err := os.Remove(cluster.KubeconfigPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 			b.logger.Printf("%s: removing kubeconfig %s: %v", name, cluster.KubeconfigPath, err)
 		}
 	}
-	b.logger.Printf("%s: live node %s powered off", name, b.cfg.Machine.Hostname)
+	if !b.manual() {
+		b.logger.Printf("%s: live node %s powered off", name, b.cfg.Machine.Hostname)
+	}
 	return nil
 }
 

@@ -240,6 +240,8 @@ func (i *fakeInstaller) Install(_ context.Context, cluster *capi.Cluster, addons
 	return nil
 }
 
+func (i *fakeInstaller) Uninstall(context.Context, *capi.Cluster, capi.AddonSet) error { return nil }
+
 func testKey(t *testing.T) string {
 	t.Helper()
 	_, priv, err := ed25519.GenerateKey(rand.Reader)
@@ -516,5 +518,47 @@ func TestRewriteServer(t *testing.T) {
 	}
 	if _, err := rewriteServer([]byte("apiVersion: v1\nkind: Config\n"), "https://x"); err == nil {
 		t.Error("a kubeconfig without clusters is rejected")
+	}
+}
+
+func TestCreate_ManualBootDrivesNoBMC(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.Boot.Method = bmc.BootMethodManual
+	cfg.Machine.BMC = bmc.Credentials{}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("a manual boot needs no BMC: %v", err)
+	}
+	node := &fakeNode{}
+	h := newHarness(t, cfg, &fakeBMC{}, node)
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		node.setUp(true) // the operator powers the node on
+	}()
+	cluster, err := h.b.Create(context.Background(), capi.BootstrapOptions{Name: "manual"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(h.bmc.calls) != 0 {
+		t.Errorf("manual boot must not touch the BMC, calls = %v", h.bmc.calls)
+	}
+	if cluster.KubeconfigPath == "" || h.installer.calls != 1 {
+		t.Errorf("the rest of the create runs as usual: %+v installs=%d", cluster, h.installer.calls)
+	}
+	if err := h.b.Delete(context.Background(), cluster); err != nil {
+		t.Fatal(err)
+	}
+	if len(h.bmc.calls) != 0 {
+		t.Errorf("manual delete must not touch the BMC, calls = %v", h.bmc.calls)
+	}
+}
+
+func TestCreate_ManualBootTimesOutWithoutANode(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.Boot.Method = bmc.BootMethodManual
+	cfg.Boot.Timeout = 50 * time.Millisecond
+	h := newHarness(t, cfg, &fakeBMC{}, &fakeNode{})
+	_, err := h.b.Create(context.Background(), capi.BootstrapOptions{Name: "manual"})
+	if !errors.Is(err, ErrBootTimeout) {
+		t.Fatalf("err = %v, want ErrBootTimeout", err)
 	}
 }

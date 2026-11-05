@@ -70,8 +70,8 @@ type InventoryOptions struct {
 	Namespace string
 	// ClusterName is stamped as the cluster-name label on every object.
 	ClusterName string
-	// BootstrapMachine is the hostname of the machine already running the
-	// cluster (in-place bootstrap). Its Hardware is marked provisioned and
+	// BootstrapMachine is the hostname of a machine already running the
+	// cluster (an adopted node). Its Hardware is marked provisioned and
 	// excluded from PXE so CAPT adopts the node rather than re-imaging it.
 	// Empty means every machine is a normal netboot target.
 	BootstrapMachine string

@@ -1,5 +1,9 @@
 # Bootstrap Topologies: In-Place Adoption and the Disposable ISO Node
 
+> Partly superseded 2026-11-04: §4 (in-place adoption) and the Talos bootstrap node were
+> removed; the Kairos disposable node (§6) is the only bare-metal bootstrap. See
+> `docs/superpowers/specs/2026-11-04-provider-design.md` §4.3. Kept as history.
+
 Date: 2026-11-03
 Status: approved for implementation (in-place half); design only (Kairos half)
 
