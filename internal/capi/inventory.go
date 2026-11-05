@@ -78,6 +78,52 @@ type InventoryOptions struct {
 	Machines         []InventoryMachine
 }
 
+// CAPT's marks on a Hardware it has claimed for a TinkerbellMachine.
+const (
+	// HardwareOwnerNameLabel names the TinkerbellMachine that claimed the Hardware.
+	HardwareOwnerNameLabel = "v1alpha1.tinkerbell.org/ownerName"
+	// HardwareOwnerNamespaceLabel is that machine's namespace.
+	HardwareOwnerNamespaceLabel = "v1alpha1.tinkerbell.org/ownerNamespace"
+	// HardwareProvisionedAnnotation is hardwareProvisionedAnnotation, exported.
+	HardwareProvisionedAnnotation = hardwareProvisionedAnnotation
+	// HardwareAPIVersion and HardwareKind identify Tinkerbell Hardware.
+	HardwareAPIVersion = tinkHardwareAPIVersion
+	HardwareKind       = tinkHardwareKind
+	// RufioMachineAPIVersion and RufioMachineKind identify a rufio Machine.
+	RufioMachineAPIVersion = rufioMachineAPIVersion
+	RufioMachineKind       = rufioMachineKind
+)
+
+// HardwareObjects renders one machine's objects in apply order: the BMC auth
+// Secret and the rufio Machine when it has a BMC, then the Hardware. With
+// adopted set, the Hardware is marked provisioned and excluded from PXE, so
+// CAPT adopts the node it already runs rather than re-imaging it.
+func HardwareObjects(namespace, clusterName string, m InventoryMachine, adopted bool) ([]unstructured.Unstructured, error) {
+	if m.Hostname == "" {
+		return nil, fmt.Errorf("hardware without a hostname")
+	}
+	opts := InventoryOptions{Namespace: namespace, ClusterName: clusterName}
+	if opts.Namespace == "" {
+		opts.Namespace = "default"
+	}
+	if adopted {
+		opts.BootstrapMachine = m.Hostname
+	}
+	var objs []unstructured.Unstructured
+	if m.BMC != nil {
+		secret, machine, err := bmcObjects(opts, m)
+		if err != nil {
+			return nil, fmt.Errorf("hardware %s: %w", m.Hostname, err)
+		}
+		objs = append(objs, secret, machine)
+	}
+	return append(objs, hardwareObject(opts, m)), nil
+}
+
+// BMCSecretName is the basic-auth Secret rufio reads a machine's BMC
+// credentials from.
+func BMCSecretName(hostname string) string { return bmcSecretName(hostname) }
+
 // InventoryManifests renders, per machine, the BMC auth Secret, the rufio
 // Machine and the Tinkerbell Hardware as one multi-document YAML stream in
 // apply order. Machines are emitted sorted by hostname so the output is stable.

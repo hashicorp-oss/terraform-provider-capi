@@ -42,7 +42,11 @@ Helm's message and revision in the diagnostic and `force_delete` for
 releases whose cluster is gone; `capi_cluster_resource_set` owning its
 ConfigMaps and Secrets, `prune` through the workload kubeconfig Secret,
 `wait.applied` on the bindings and `wait.ready` on the applied objects;
-`ObjectClient.WorkloadClient` and `capi.DecodeDocuments`).
+`ObjectClient.WorkloadClient` and `capi.DecodeDocuments`), 5 (bd8eb26 →
+`capi_hardware` with the owner-label refusal and `force` power-off,
+`capi_provider` on the clusterctl lifecycle with `NoDefaults` init and the
+inventory read, `capi_cluster_class` from template refs in both contract
+shapes with `classes` and `ref`).
 
 1. **Connection, credentials, reads.** Provider `kubeconfig` and
    `kubernetes` block; ephemeral `capi_kubeconfig` (from the management

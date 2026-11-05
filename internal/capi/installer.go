@@ -74,12 +74,72 @@ func (i *ClusterctlInstaller) Init(ctx context.Context, cluster *Cluster, opts I
 		}
 	}
 
-	initOpts := buildInitOptions(opts.Providers)
+	initOpts := initOptionsFor(opts)
 	initOpts.Kubeconfig = clusterctlclient.Kubeconfig{Path: cluster.KubeconfigPath}
 	if _, err := client.Init(ctx, initOpts); err != nil {
 		return fail(err)
 	}
 	return nil
+}
+
+// initOptionsFor builds the clusterctl init options: the configured
+// providers, and with NoDefaults the "-" provider for the bootstrap and
+// control-plane types left unset, which stops clusterctl from adding kubeadm.
+func initOptionsFor(opts InitOptions) clusterctlclient.InitOptions {
+	initOpts := buildInitOptions(opts.Providers)
+	if opts.NoDefaults {
+		if len(initOpts.BootstrapProviders) == 0 {
+			initOpts.BootstrapProviders = []string{clusterctlclient.NoopProvider}
+		}
+		if len(initOpts.ControlPlaneProviders) == 0 {
+			initOpts.ControlPlaneProviders = []string{clusterctlclient.NoopProvider}
+		}
+	}
+	return initOpts
+}
+
+// InstalledProvider is one entry of a cluster's clusterctl provider inventory.
+type InstalledProvider struct {
+	Name      string
+	Type      ProviderType
+	Version   string
+	Namespace string
+}
+
+// Installed reads a cluster's clusterctl provider inventory.
+func (i *ClusterctlInstaller) Installed(ctx context.Context, cluster *Cluster) ([]InstalledProvider, error) {
+	_, configClient, err := newClusterctlClient(ctx, i.configPath, ProviderSet{}, nil)
+	if err != nil {
+		return nil, err
+	}
+	list, err := i.inventory(ctx, configClient, cluster.KubeconfigPath)
+	if err != nil {
+		return nil, fmt.Errorf("listing installed providers: %w", err)
+	}
+	out := make([]InstalledProvider, 0, len(list.Items))
+	for _, p := range list.Items {
+		out = append(out, InstalledProvider{Name: p.ProviderName, Type: providerTypeFromClusterctl(p.GetProviderType()), Version: p.Version, Namespace: p.Namespace})
+	}
+	return out, nil
+}
+
+// providerTypeFromClusterctl maps clusterctl's provider type names to ours.
+func providerTypeFromClusterctl(t clusterctlv1.ProviderType) ProviderType {
+	switch t {
+	case clusterctlv1.CoreProviderType:
+		return ProviderTypeCore
+	case clusterctlv1.BootstrapProviderType:
+		return ProviderTypeBootstrap
+	case clusterctlv1.ControlPlaneProviderType:
+		return ProviderTypeControlPlane
+	case clusterctlv1.InfrastructureProviderType:
+		return ProviderTypeInfrastructure
+	case clusterctlv1.IPAMProviderType:
+		return ProviderTypeIPAM
+	case clusterctlv1.AddonProviderType:
+		return ProviderTypeAddon
+	}
+	return ProviderType(strings.ToLower(string(t)))
 }
 
 // Upgrade upgrades or re-renders opts.Targets in place (clusterctl upgrade

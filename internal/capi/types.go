@@ -63,6 +63,12 @@ type InitOptions struct {
 	// Variables are clusterctl variables (${VAR} in component and template
 	// YAML). They take precedence over the clusterctl config file and environment.
 	Variables map[string]string
+
+	// NoDefaults stops clusterctl from adding the kubeadm bootstrap and
+	// control-plane providers on a cluster's first init when Providers names
+	// none (clusterctl's "-" provider). The core provider is still added
+	// when missing, since nothing works without it.
+	NoDefaults bool
 }
 
 // UpgradeOptions configures an in-place provider upgrade (clusterctl upgrade
