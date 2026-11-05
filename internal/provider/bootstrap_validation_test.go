@@ -44,11 +44,12 @@ func helmRel(name, ns, chart, timeout, values string) HelmReleaseModel {
 func buildTestBootstrap(ctx context.Context, t *testing.T, typ string) types.Object {
 	t.Helper()
 	bs := ManagementBootstrapModel{
-		Type:    types.StringValue(typ),
-		Machine: types.StringNull(),
-		Boot:    types.ObjectNull(bootAttrTypes()),
-		Kairos:  types.ObjectNull(kairosAttrTypes()),
-		Addons:  types.ObjectNull(bootstrapAddonsAttrTypes()),
+		Type:      types.StringValue(typ),
+		Machine:   types.StringNull(),
+		OnFailure: types.StringNull(),
+		Boot:      types.ObjectNull(bootAttrTypes()),
+		Kairos:    types.ObjectNull(kairosAttrTypes()),
+		Addons:    types.ObjectNull(bootstrapAddonsAttrTypes()),
 	}
 	return mustObject(t, ctx, managementBootstrapAttrTypes(), bs)
 }
@@ -59,11 +60,12 @@ func tinkerbellTestData(ctx context.Context, t *testing.T, bootstrap types.Objec
 	t.Helper()
 	tink := nullProviderModel()
 	tink.Version = types.StringValue("v0.5.4")
-	infraVal := mustProviderMap(t, ctx, map[string]ProviderModel{"tinkerbell": tink})
-	mgmtVal := mustObject(t, ctx, managementAttrTypes(), ManagementModel{
-		Kubeconfig: types.StringNull(), SkipInit: types.BoolValue(false), SelfManaged: types.BoolValue(true),
-		Uninstall: types.BoolValue(false), Namespace: types.StringNull(), Bootstrap: bootstrap,
+	providers := providersValue(t, ctx, map[string]types.Map{
+		"infrastructure": mustProviderMap(t, ctx, map[string]ProviderModel{"tinkerbell": tink}),
+		"control_plane":  mustProviderMap(t, ctx, map[string]ProviderModel{"talos": nullProviderModel()}),
+		"bootstrap":      mustProviderMap(t, ctx, map[string]ProviderModel{"talos": nullProviderModel()}),
 	})
+	mgmtVal := selfManagedWith(t, ctx, providers, bootstrap)
 	inv := types.ObjectNull(inventoryAttrTypes())
 	if machines != nil {
 		inv = mustObject(t, ctx, inventoryAttrTypes(), InventoryModel{
@@ -71,7 +73,8 @@ func tinkerbellTestData(ctx context.Context, t *testing.T, bootstrap types.Objec
 		})
 	}
 	data := baseModel(t, ctx)
-	data.Infrastructure = infraVal
+	data.Infrastructure = mustObject(t, ctx, infrastructureSpecAttrTypes(), InfrastructureSpecModel{Provider: types.StringValue("tinkerbell"), Spec: types.DynamicNull()})
+	data.ControlPlane = controlPlaneValue(t, ctx, "talos", 1, templateRef(t, ctx, "TinkerbellMachineTemplate", "cp-1"), types.DynamicNull())
 	data.Management = mgmtVal
 	data.Inventory = inv
 	return data
@@ -168,8 +171,8 @@ func TestClusterResource_Schema_ManagementBootstrap(t *testing.T) {
 	if resp.Diagnostics.HasError() {
 		t.Fatalf("Schema returned errors: %v", resp.Diagnostics)
 	}
-	if resp.Schema.Version != 4 {
-		t.Errorf("schema version = %d, want 4", resp.Schema.Version)
+	if resp.Schema.Version != 5 {
+		t.Errorf("schema version = %d, want 5", resp.Schema.Version)
 	}
 
 	mgmt, ok := resp.Schema.Attributes["management"].(schema.SingleNestedAttribute)

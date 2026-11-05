@@ -25,12 +25,12 @@ func TestAccClusterResource(t *testing.T) {
 				Config: testAccClusterResourceConfig("test-cluster"),
 				Check: resource.ComposeAggregateTestCheckFunc(
 					resource.TestCheckResourceAttr("capi_cluster.test", "name", "test-cluster"),
-					resource.TestCheckResourceAttr("capi_cluster.test", "infrastructure.%", "1"),
-					resource.TestCheckResourceAttr("capi_cluster.test", "topology.control_plane.replicas", "1"),
-					resource.TestCheckResourceAttr("capi_cluster.test", "management.skip_init", "false"),
+					resource.TestCheckResourceAttr("capi_cluster.test", "infrastructure.provider", "docker"),
+					resource.TestCheckResourceAttr("capi_cluster.test", "control_plane.replicas", "1"),
 					resource.TestCheckResourceAttr("capi_cluster.test", "management.self_managed", "false"),
+					resource.TestCheckResourceAttr("capi_cluster.test", "status.phase", "ready"),
 					resource.TestCheckResourceAttrSet("capi_cluster.test", "id"),
-					resource.TestCheckResourceAttrSet("capi_cluster.test", "management.namespace"),
+					resource.TestCheckResourceAttr("capi_cluster.test", "namespace", "default"),
 				),
 			},
 			// ImportState testing
@@ -39,38 +39,39 @@ func TestAccClusterResource(t *testing.T) {
 				ImportState:       true,
 				ImportStateVerify: true,
 				ImportStateVerifyIgnore: []string{
-					// kubernetes_version and infrastructure are
-					// creation-time-only template parameters: the management
-					// cluster used to create the workload cluster is an
-					// ephemeral bootstrap cluster torn down after apply, so
-					// there is no live source to recover them from on import.
-					"management", "wait", "output",
-					"status", "kubernetes_version",
-					"infrastructure", "infrastructure.provider", "infrastructure.%",
+					// The cluster's inputs are not read back from the live
+					// objects; only the status is.
+					"management", "wait", "status", "kubernetes_version",
+					"infrastructure", "control_plane",
 				},
 			},
 		},
 	})
 }
 
+// testAccClusterResourceConfig is a direct-mode docker cluster on the
+// management cluster the provider block names, with its control-plane
+// machine template as its own resource.
 func testAccClusterResourceConfig(name string) string {
 	return `
+resource "capi_machine_template" "cp" {
+  name           = "` + name + `-cp"
+  infrastructure = "docker"
+  spec           = {}
+}
+
 resource "capi_cluster" "test" {
   name               = "` + name + `"
   kubernetes_version = "v1.31.0"
 
-  infrastructure = { docker = {} }
-
-  topology = {
-    control_plane = { replicas = 1 }
-    workers = {
-      machine_deployments = [{ name = "md-0", replicas = 1 }]
-    }
+  infrastructure = { provider = "docker" }
+  control_plane = {
+    provider       = "kubeadm"
+    replicas       = 1
+    infrastructure = capi_machine_template.cp.ref
   }
 
-  wait = {
-    enabled = false
-  }
+  wait = { conditions = [] }
 }
 `
 }
@@ -99,7 +100,8 @@ func TestAccClusterResource_KairosBootstrap(t *testing.T) {
 					// The pivot completed: the bootstrap cluster is gone and the
 					// cluster manages itself.
 					resource.TestCheckNoResourceAttr("capi_cluster.kairos", "status.bootstrap_cluster"),
-					resource.TestCheckResourceAttrSet("capi_cluster.kairos", "status.kubeconfig"),
+					resource.TestCheckResourceAttr("capi_cluster.kairos", "status.phase", "ready"),
+					resource.TestCheckResourceAttrSet("capi_cluster.kairos", "provider_secrets"),
 				),
 			},
 		},
@@ -136,23 +138,34 @@ variable "kairos_iso" {
   default = "http://files.lab.internal/kairos-bootstrap.iso"
 }
 
+resource "capi_machine_template" "cp" {
+  name           = "acc-kairos-cp"
+  infrastructure = "tinkerbell"
+  spec           = { hardwareAffinity = { required = [{ labelSelector = { matchLabels = { type = "cp" } } }] } }
+}
+
 resource "capi_cluster" "kairos" {
   name               = "acc-kairos"
   kubernetes_version = "v1.34.0"
 
   network = { control_plane_endpoint = { host = "10.0.0.160" } }
 
-  infrastructure = { tinkerbell = { version = "v0.7.9", fetch_config = { owner = "tinkerbell-community" } } }
-  bootstrap      = { talos = { version = "v0.8.2", fetch_config = { owner = "sidero-community" } } }
-  control_plane  = { talos = { version = "v0.7.1", fetch_config = { owner = "sidero-community" } } }
-  addon          = { helm = {} }
-
-  topology = {
-    control_plane = { replicas = 1 }
+  infrastructure = { provider = "tinkerbell" }
+  control_plane = {
+    provider       = "talos"
+    replicas       = 1
+    infrastructure = capi_machine_template.cp.ref
   }
 
   management = {
     self_managed = true
+
+    providers = {
+      infrastructure = { tinkerbell = { version = "v0.7.9", fetch_config = { owner = "tinkerbell-community" } } }
+      bootstrap      = { talos = { version = "v0.8.2", fetch_config = { owner = "sidero-community" } } }
+      control_plane  = { talos = { version = "v0.7.1", fetch_config = { owner = "sidero-community" } } }
+      addon          = { helm = {} }
+    }
 
     bootstrap = {
       type    = "kairos"
@@ -216,7 +229,7 @@ resource "capi_cluster" "kairos" {
     ]
   }
 
-  wait = { enabled = true, timeout = "90m" }
+  wait = { timeout = "90m" }
 }
 `
 }

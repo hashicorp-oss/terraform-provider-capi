@@ -11,7 +11,6 @@ import (
 
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
-	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-go/tftypes"
@@ -28,25 +27,29 @@ func TestProviderChanges(t *testing.T) {
 	}
 
 	state := baseModel(t, ctx)
-	state.Infrastructure = mustProviderMap(t, ctx, map[string]ProviderModel{"tinkerbell": pinned("v0.7.9")})
-	state.ControlPlane = mustProviderMap(t, ctx, map[string]ProviderModel{"talos": pinned("v0.7.1")})
-	state.Core = mustProviderMap(t, ctx, map[string]ProviderModel{"cluster-api": pinned("v1.13.0")})
-	state.IPAM = mustProviderMap(t, ctx, map[string]ProviderModel{"unifi": pinned("v0.4.1"), "in-cluster": emptyProviderModel()})
-	state.Addon = mustProviderMap(t, ctx, map[string]ProviderModel{"helm": emptyProviderModel()})
+	state.Management = selfManagedWith(t, ctx, providersValue(t, ctx, map[string]types.Map{
+		"infrastructure": mustProviderMap(t, ctx, map[string]ProviderModel{"tinkerbell": pinned("v0.7.9")}),
+		"control_plane":  mustProviderMap(t, ctx, map[string]ProviderModel{"talos": pinned("v0.7.1")}),
+		"core":           mustProviderMap(t, ctx, map[string]ProviderModel{"cluster-api": pinned("v1.13.0")}),
+		"ipam":           mustProviderMap(t, ctx, map[string]ProviderModel{"unifi": pinned("v0.4.1"), "in-cluster": emptyProviderModel()}),
+		"addon":          mustProviderMap(t, ctx, map[string]ProviderModel{"helm": emptyProviderModel()}),
+	}), types.ObjectNull(managementBootstrapAttrTypes()))
 
 	plan := baseModel(t, ctx)
-	plan.Infrastructure = mustProviderMap(t, ctx, map[string]ProviderModel{"tinkerbell": pinned("v0.8.0")}) // upgrade
 	cp := pinned("v0.7.1")
 	cp.ResourceConfig = types.StringValue("controlPlaneConfig: {}") // not a provider change
-	plan.ControlPlane = mustProviderMap(t, ctx, map[string]ProviderModel{"talos": cp})
-	plan.Core = types.MapNull(providerMapType().ElemType)                                    // unpinned, never removed
-	plan.IPAM = mustProviderMap(t, ctx, map[string]ProviderModel{"unifi": pinned("v0.4.1")}) // in-cluster removed
 	helm := emptyProviderModel()
 	fetch, _ := types.ObjectValueFrom(ctx, fetchConfigAttrTypes(), FetchConfigModel{
 		Owner: types.StringValue("me"), Repository: types.StringNull(), URL: types.StringNull(), OCI: types.StringNull(),
 	})
-	helm.FetchConfig = fetch                                                                                    // upgrade: same version, other source
-	plan.Addon = mustProviderMap(t, ctx, map[string]ProviderModel{"helm": helm, "other": emptyProviderModel()}) // other added
+	helm.FetchConfig = fetch // upgrade: same version, other source
+	plan.Management = selfManagedWith(t, ctx, providersValue(t, ctx, map[string]types.Map{
+		"infrastructure": mustProviderMap(t, ctx, map[string]ProviderModel{"tinkerbell": pinned("v0.8.0")}), // upgrade
+		"control_plane":  mustProviderMap(t, ctx, map[string]ProviderModel{"talos": cp}),
+		// core unpinned: never removed
+		"ipam":  mustProviderMap(t, ctx, map[string]ProviderModel{"unifi": pinned("v0.4.1")}),                   // in-cluster removed
+		"addon": mustProviderMap(t, ctx, map[string]ProviderModel{"helm": helm, "other": emptyProviderModel()}), // other added
+	}), types.ObjectNull(managementBootstrapAttrTypes()))
 
 	upgrade, removed, added, diags := providerChanges(ctx, state, plan)
 	if diags.HasError() {
@@ -107,49 +110,38 @@ func TestClusterResource_ImportState(t *testing.T) {
 		return out, out.State
 	}
 
-	out, st := importInto("/tmp/mgmt:capi-system/prod")
+	out, st := importInto("capi-system/prod")
 	if out.Diagnostics.HasError() {
 		t.Fatal(out.Diagnostics)
 	}
-	var name, id string
+	var name, id, namespace string
 	_ = st.GetAttribute(ctx, path.Root("name"), &name)
 	_ = st.GetAttribute(ctx, path.Root("id"), &id)
-	if name != "prod" || id != "prod" {
-		t.Errorf("name %q id %q", name, id)
+	_ = st.GetAttribute(ctx, path.Root("namespace"), &namespace)
+	if name != "prod" || id != "prod" || namespace != "capi-system" {
+		t.Errorf("name %q id %q namespace %q", name, id, namespace)
 	}
-	var mgmt ManagementModel
-	if d := st.GetAttribute(ctx, path.Root("management"), &mgmt); d.HasError() {
+	var status StatusModel
+	if d := st.GetAttribute(ctx, path.Root("status"), &status); d.HasError() {
 		t.Fatal(d)
 	}
-	if mgmt.Kubeconfig.ValueString() != "/tmp/mgmt" || mgmt.Namespace.ValueString() != "capi-system" || !mgmt.SkipInit.IsNull() {
-		t.Errorf("management = %+v", mgmt)
+	if status.Phase.ValueString() != "ready" {
+		t.Errorf("an imported cluster is ready: %+v", status)
 	}
 
 	out, st = importInto("prod")
 	if out.Diagnostics.HasError() {
 		t.Fatal(out.Diagnostics)
 	}
-	var mgmtObj types.Object
-	_ = st.GetAttribute(ctx, path.Root("management"), &mgmtObj)
-	if !mgmtObj.IsNull() {
-		t.Error("a bare name leaves management unset")
+	_ = st.GetAttribute(ctx, path.Root("namespace"), &namespace)
+	if namespace != "default" {
+		t.Errorf("a bare name imports from the default namespace, got %q", namespace)
 	}
 
-	if out, _ := importInto("ns/"); !out.Diagnostics.HasError() {
-		t.Error("an ID without a name is invalid")
-	}
-}
-
-func TestClusterResource_Schema_ManagementUninstall(t *testing.T) {
-	resp := &resource.SchemaResponse{}
-	NewClusterResource().Schema(context.Background(), resource.SchemaRequest{}, resp)
-	if resp.Diagnostics.HasError() {
-		t.Fatal(resp.Diagnostics)
-	}
-	mgmt, _ := resp.Schema.Attributes["management"].(schema.SingleNestedAttribute)
-	attr, ok := mgmt.Attributes["uninstall"].(schema.BoolAttribute)
-	if !ok || !attr.Optional || !attr.Computed || attr.Default == nil || len(attr.PlanModifiers) != 0 {
-		t.Errorf("management.uninstall must be an optional, computed, defaulted, mutable bool: %+v", attr)
+	for _, bad := range []string{"ns/", "/tmp/kubeconfig:ns/prod"} {
+		if out, _ := importInto(bad); !out.Diagnostics.HasError() {
+			t.Errorf("%q is not a valid import ID", bad)
+		}
 	}
 }
 

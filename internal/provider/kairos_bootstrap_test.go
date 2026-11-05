@@ -31,7 +31,7 @@ func kairosData(ctx context.Context, t *testing.T, withKairos bool, mutate func(
 	s := KairosSSHModel{User: types.StringValue("kairos"), Port: types.Int64Value(22), PrivateKey: types.StringValue("-----BEGIN OPENSSH PRIVATE KEY-----\nx\n-----END OPENSSH PRIVATE KEY-----\n"), HostKey: types.StringNull()}
 	k := KairosModel{ISO: types.StringValue("http://files.example/kairos.iso.custom.iso"), Address: types.StringNull(), SSH: types.ObjectNull(kairosSSHAttrTypes())}
 	bs := ManagementBootstrapModel{
-		Type: types.StringValue("kairos"), Machine: types.StringValue("nuc"),
+		Type: types.StringValue("kairos"), Machine: types.StringValue("nuc"), OnFailure: types.StringNull(),
 		Boot: types.ObjectNull(bootAttrTypes()), Kairos: types.ObjectNull(kairosAttrTypes()),
 		Addons: types.ObjectNull(bootstrapAddonsAttrTypes()),
 	}

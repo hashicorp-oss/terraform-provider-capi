@@ -51,49 +51,66 @@ func providerSecretsFromDynamic(ctx context.Context, d types.Dynamic) (map[strin
 	return out, diags
 }
 
-// ClusterResourceModel describes the resource data model using nested attributes.
-// This is the v1 schema model (nested-first design per terraform.instructions.md).
+// ClusterResourceModel is the capi_cluster model (schema version 5).
 type ClusterResourceModel struct {
 	Name              types.String `tfsdk:"name"`
+	Namespace         types.String `tfsdk:"namespace"`
 	KubernetesVersion types.String `tfsdk:"kubernetes_version"`
-	ClusterClass      types.Bool   `tfsdk:"cluster_class"`
 	Id                types.String `tfsdk:"id"`
 
 	ProviderSecrets types.Dynamic `tfsdk:"provider_secrets"`
 
-	Management     types.Object `tfsdk:"management"`
-	Core           types.Map    `tfsdk:"core"`
-	Infrastructure types.Map    `tfsdk:"infrastructure"`
-	Bootstrap      types.Map    `tfsdk:"bootstrap"`
-	ControlPlane   types.Map    `tfsdk:"control_plane"`
-	IPAM           types.Map    `tfsdk:"ipam"`
-	Addon          types.Map    `tfsdk:"addon"`
-	Topology       types.Object `tfsdk:"topology"`
-	Network        types.Object `tfsdk:"network"`   // ClusterNetworkModel
-	Manifests      types.Object `tfsdk:"manifests"` // ManifestsModel
+	Network        types.Object `tfsdk:"network"`        // ClusterNetworkModel
+	Infrastructure types.Object `tfsdk:"infrastructure"` // InfrastructureSpecModel
+	ControlPlane   types.Object `tfsdk:"control_plane"`  // ControlPlaneSpecModel
+	Class          types.Object `tfsdk:"class"`          // ClassRefModel
+	Management     types.Object `tfsdk:"management"`     // ManagementModel
+	Manifests      types.Object `tfsdk:"manifests"`      // ManifestsModel
 	Inventory      types.Object `tfsdk:"inventory"`
 	Wait           types.Object `tfsdk:"wait"`
-	Output         types.Object `tfsdk:"output"`
 	Status         types.Object `tfsdk:"status"`
 }
 
-// ManagementModel groups attributes related to cluster management configuration.
+// InfrastructureSpecModel is the infrastructure block: the <Infra>Cluster.
+type InfrastructureSpecModel struct {
+	Provider types.String  `tfsdk:"provider"`
+	Spec     types.Dynamic `tfsdk:"spec"`
+}
+
+// ControlPlaneSpecModel is the control_plane block.
+type ControlPlaneSpecModel struct {
+	Provider       types.String  `tfsdk:"provider"`
+	Replicas       types.Int64   `tfsdk:"replicas"`
+	Infrastructure types.Object  `tfsdk:"infrastructure"` // TemplateRefModel
+	MachineSpec    types.Dynamic `tfsdk:"machine_spec"`
+	Spec           types.Dynamic `tfsdk:"spec"`
+}
+
+// ManagementModel groups how the cluster is managed.
 type ManagementModel struct {
-	Kubeconfig  types.String `tfsdk:"kubeconfig"`
-	SkipInit    types.Bool   `tfsdk:"skip_init"`
 	SelfManaged types.Bool   `tfsdk:"self_managed"`
-	Uninstall   types.Bool   `tfsdk:"uninstall"`
-	Namespace   types.String `tfsdk:"namespace"`
+	Providers   types.Object `tfsdk:"providers"` // ProvidersModel
 	Bootstrap   types.Object `tfsdk:"bootstrap"` // ManagementBootstrapModel
+}
+
+// ProvidersModel is management.providers: the six provider maps.
+type ProvidersModel struct {
+	Core           types.Map `tfsdk:"core"`
+	Infrastructure types.Map `tfsdk:"infrastructure"`
+	Bootstrap      types.Map `tfsdk:"bootstrap"`
+	ControlPlane   types.Map `tfsdk:"control_plane"`
+	IPAM           types.Map `tfsdk:"ipam"`
+	Addon          types.Map `tfsdk:"addon"`
 }
 
 // ManagementBootstrapModel configures the transient bootstrap cluster.
 type ManagementBootstrapModel struct {
-	Type    types.String `tfsdk:"type"`
-	Machine types.String `tfsdk:"machine"`
-	Boot    types.Object `tfsdk:"boot"`   // BootModel
-	Kairos  types.Object `tfsdk:"kairos"` // KairosModel
-	Addons  types.Object `tfsdk:"addons"` // BootstrapAddonsModel
+	Type      types.String `tfsdk:"type"`
+	Machine   types.String `tfsdk:"machine"`
+	OnFailure types.String `tfsdk:"on_failure"`
+	Boot      types.Object `tfsdk:"boot"`   // BootModel
+	Kairos    types.Object `tfsdk:"kairos"` // KairosModel
+	Addons    types.Object `tfsdk:"addons"` // BootstrapAddonsModel
 }
 
 // BootModel controls how the bootstrap node boots the live image.
@@ -203,35 +220,6 @@ type PatchSelectorModel struct {
 	LabelSelector types.String `tfsdk:"label_selector"`
 }
 
-// TopologyModel mirrors Cluster.spec.topology.
-type TopologyModel struct {
-	ControlPlane types.Object `tfsdk:"control_plane"` // ControlPlaneTopologyModel
-	Workers      types.Object `tfsdk:"workers"`       // WorkersTopologyModel
-}
-
-// ControlPlaneTopologyModel mirrors Cluster.spec.topology.controlPlane plus
-// the control plane's machine template spec.
-type ControlPlaneTopologyModel struct {
-	Replicas       types.Int64  `tfsdk:"replicas"`
-	Infrastructure types.String `tfsdk:"infrastructure"` // YAML/JSON <Infra>MachineTemplate spec
-}
-
-// WorkersTopologyModel mirrors Cluster.spec.topology.workers.
-type WorkersTopologyModel struct {
-	MachineDeployments types.List `tfsdk:"machine_deployments"` // []MachineDeploymentModel
-}
-
-// MachineDeploymentModel mirrors Cluster.spec.topology.workers.machineDeployments[].
-type MachineDeploymentModel struct {
-	Name           types.String `tfsdk:"name"`
-	Class          types.String `tfsdk:"class"`
-	Replicas       types.Int64  `tfsdk:"replicas"`
-	FailureDomain  types.String `tfsdk:"failure_domain"`
-	Metadata       types.Object `tfsdk:"metadata"`       // TopologyMetadataModel
-	Infrastructure types.String `tfsdk:"infrastructure"` // YAML/JSON <Infra>MachineTemplate spec
-	Bootstrap      types.String `tfsdk:"bootstrap"`      // YAML/JSON <Bootstrap>ConfigTemplate spec
-}
-
 // ClusterNetworkModel mirrors Cluster.spec.clusterNetwork and controlPlaneEndpoint.
 type ClusterNetworkModel struct {
 	ControlPlaneEndpoint types.Object `tfsdk:"control_plane_endpoint"` // EndpointModel
@@ -249,12 +237,6 @@ type EndpointModel struct {
 // NetworkRangesModel is Cluster.spec.clusterNetwork.pods / services.
 type NetworkRangesModel struct {
 	CIDRBlocks types.List `tfsdk:"cidr_blocks"`
-}
-
-// TopologyMetadataModel holds labels and annotations for topology machines.
-type TopologyMetadataModel struct {
-	Labels      types.Map `tfsdk:"labels"`
-	Annotations types.Map `tfsdk:"annotations"`
 }
 
 // InventoryModel groups attributes for hardware inventory.
@@ -302,22 +284,19 @@ type BMCModel struct {
 
 // WaitModel groups attributes for readiness wait configuration.
 type WaitModel struct {
-	Enabled types.Bool   `tfsdk:"enabled"`
-	Timeout types.String `tfsdk:"timeout"`
-}
-
-// OutputModel groups attributes for output configuration.
-type OutputModel struct {
-	KubeconfigPath types.String `tfsdk:"kubeconfig_path"`
+	Conditions types.List   `tfsdk:"conditions"`
+	Timeout    types.String `tfsdk:"timeout"`
 }
 
 // StatusModel groups all computed cluster status outputs.
 type StatusModel struct {
+	Phase            types.String `tfsdk:"phase"`
+	Error            types.String `tfsdk:"error"`
 	Endpoint         types.String `tfsdk:"endpoint"`
-	Kubeconfig       types.String `tfsdk:"kubeconfig"`
 	CACertificate    types.String `tfsdk:"ca_certificate"`
 	Description      types.String `tfsdk:"description"`
 	BootstrapCluster types.String `tfsdk:"bootstrap_cluster"`
+	Conditions       types.List   `tfsdk:"conditions"` // []ConditionModel
 }
 
 // --- Attribute Type Maps ---
@@ -325,22 +304,38 @@ type StatusModel struct {
 
 func managementAttrTypes() map[string]attr.Type {
 	return map[string]attr.Type{
-		"kubeconfig":   types.StringType,
-		"skip_init":    types.BoolType,
 		"self_managed": types.BoolType,
-		"uninstall":    types.BoolType,
-		"namespace":    types.StringType,
+		"providers":    types.ObjectType{AttrTypes: providersAttrTypes()},
 		"bootstrap":    types.ObjectType{AttrTypes: managementBootstrapAttrTypes()},
+	}
+}
+
+func providersAttrTypes() map[string]attr.Type {
+	return map[string]attr.Type{
+		"core": providerMapType(), "infrastructure": providerMapType(), "bootstrap": providerMapType(),
+		"control_plane": providerMapType(), "ipam": providerMapType(), "addon": providerMapType(),
+	}
+}
+
+func infrastructureSpecAttrTypes() map[string]attr.Type {
+	return map[string]attr.Type{"provider": types.StringType, "spec": types.DynamicType}
+}
+
+func controlPlaneSpecAttrTypes() map[string]attr.Type {
+	return map[string]attr.Type{
+		"provider": types.StringType, "replicas": types.Int64Type,
+		"infrastructure": types.ObjectType{AttrTypes: templateRefAttrTypes()}, "machine_spec": types.DynamicType, "spec": types.DynamicType,
 	}
 }
 
 func managementBootstrapAttrTypes() map[string]attr.Type {
 	return map[string]attr.Type{
-		"type":    types.StringType,
-		"machine": types.StringType,
-		"boot":    types.ObjectType{AttrTypes: bootAttrTypes()},
-		"kairos":  types.ObjectType{AttrTypes: kairosAttrTypes()},
-		"addons":  types.ObjectType{AttrTypes: bootstrapAddonsAttrTypes()},
+		"type":       types.StringType,
+		"machine":    types.StringType,
+		"on_failure": types.StringType,
+		"boot":       types.ObjectType{AttrTypes: bootAttrTypes()},
+		"kairos":     types.ObjectType{AttrTypes: kairosAttrTypes()},
+		"addons":     types.ObjectType{AttrTypes: bootstrapAddonsAttrTypes()},
 	}
 }
 
@@ -419,35 +414,6 @@ func fetchConfigAttrTypes() map[string]attr.Type {
 	}
 }
 
-func topologyAttrTypes() map[string]attr.Type {
-	return map[string]attr.Type{
-		"control_plane": types.ObjectType{AttrTypes: controlPlaneTopologyAttrTypes()},
-		"workers":       types.ObjectType{AttrTypes: workersTopologyAttrTypes()},
-	}
-}
-
-func controlPlaneTopologyAttrTypes() map[string]attr.Type {
-	return map[string]attr.Type{"replicas": types.Int64Type, "infrastructure": types.StringType}
-}
-
-func workersTopologyAttrTypes() map[string]attr.Type {
-	return map[string]attr.Type{
-		"machine_deployments": types.ListType{ElemType: types.ObjectType{AttrTypes: machineDeploymentAttrTypes()}},
-	}
-}
-
-func machineDeploymentAttrTypes() map[string]attr.Type {
-	return map[string]attr.Type{
-		"name":           types.StringType,
-		"class":          types.StringType,
-		"replicas":       types.Int64Type,
-		"failure_domain": types.StringType,
-		"metadata":       types.ObjectType{AttrTypes: topologyMetadataAttrTypes()},
-		"infrastructure": types.StringType,
-		"bootstrap":      types.StringType,
-	}
-}
-
 func clusterNetworkAttrTypes() map[string]attr.Type {
 	return map[string]attr.Type{
 		"control_plane_endpoint": types.ObjectType{AttrTypes: endpointAttrTypes()},
@@ -463,13 +429,6 @@ func endpointAttrTypes() map[string]attr.Type {
 
 func networkRangesAttrTypes() map[string]attr.Type {
 	return map[string]attr.Type{"cidr_blocks": types.ListType{ElemType: types.StringType}}
-}
-
-func topologyMetadataAttrTypes() map[string]attr.Type {
-	return map[string]attr.Type{
-		"labels":      types.MapType{ElemType: types.StringType},
-		"annotations": types.MapType{ElemType: types.StringType},
-	}
 }
 
 func deploymentAttrTypes() map[string]attr.Type {
@@ -569,24 +528,20 @@ func bmcAttrTypes() map[string]attr.Type {
 
 func waitAttrTypes() map[string]attr.Type {
 	return map[string]attr.Type{
-		"enabled": types.BoolType,
-		"timeout": types.StringType,
-	}
-}
-
-func outputAttrTypes() map[string]attr.Type {
-	return map[string]attr.Type{
-		"kubeconfig_path": types.StringType,
+		"conditions": types.ListType{ElemType: types.StringType},
+		"timeout":    types.StringType,
 	}
 }
 
 func statusAttrTypes() map[string]attr.Type {
 	return map[string]attr.Type{
+		"phase":             types.StringType,
+		"error":             types.StringType,
 		"endpoint":          types.StringType,
-		"kubeconfig":        types.StringType,
 		"ca_certificate":    types.StringType,
 		"description":       types.StringType,
 		"bootstrap_cluster": types.StringType,
+		"conditions":        types.ListType{ElemType: types.ObjectType{AttrTypes: conditionAttrTypes()}},
 	}
 }
 
@@ -743,14 +698,19 @@ type typedProviderMap struct {
 }
 
 // providerMaps lists the six provider map attributes in clusterctl install order.
-func (data *ClusterResourceModel) providerMaps() []typedProviderMap {
+func (data *ClusterResourceModel) providerMaps(ctx context.Context) []typedProviderMap {
+	null := types.MapNull(providerMapType().ElemType)
+	pv := ProvidersModel{Core: null, Infrastructure: null, Bootstrap: null, ControlPlane: null, IPAM: null, Addon: null}
+	if mgmt, _ := extractManagement(ctx, data); mgmt != nil && !mgmt.Providers.IsNull() && !mgmt.Providers.IsUnknown() {
+		_ = mgmt.Providers.As(ctx, &pv, basetypes.ObjectAsOptions{})
+	}
 	return []typedProviderMap{
-		{capi.ProviderTypeCore, data.Core},
-		{capi.ProviderTypeBootstrap, data.Bootstrap},
-		{capi.ProviderTypeControlPlane, data.ControlPlane},
-		{capi.ProviderTypeInfrastructure, data.Infrastructure},
-		{capi.ProviderTypeIPAM, data.IPAM},
-		{capi.ProviderTypeAddon, data.Addon},
+		{capi.ProviderTypeCore, pv.Core},
+		{capi.ProviderTypeBootstrap, pv.Bootstrap},
+		{capi.ProviderTypeControlPlane, pv.ControlPlane},
+		{capi.ProviderTypeInfrastructure, pv.Infrastructure},
+		{capi.ProviderTypeIPAM, pv.IPAM},
+		{capi.ProviderTypeAddon, pv.Addon},
 	}
 }
 
@@ -758,7 +718,7 @@ func (data *ClusterResourceModel) providerMaps() []typedProviderMap {
 func extractProviderSet(ctx context.Context, data *ClusterResourceModel) (capi.ProviderSet, diag.Diagnostics) {
 	var diags diag.Diagnostics
 	set := capi.ProviderSet{}
-	for _, pm := range data.providerMaps() {
+	for _, pm := range data.providerMaps(ctx) {
 		entries, d := extractProviders(ctx, pm.Map)
 		diags.Append(d...)
 		for _, name := range sortedProviderNames(entries) {
@@ -770,67 +730,34 @@ func extractProviderSet(ctx context.Context, data *ClusterResourceModel) (capi.P
 	return set, diags
 }
 
-// extractTopology returns the control plane topology and the machine deployments.
-func extractTopology(ctx context.Context, data *ClusterResourceModel) (cp capi.ControlPlaneTopology, mds []capi.MachineDeploymentTopology, diags diag.Diagnostics) {
-	if data.Topology.IsNull() || data.Topology.IsUnknown() {
-		return cp, nil, nil
+// extractInfrastructure reads the infrastructure block, nil when unset.
+func extractInfrastructure(ctx context.Context, data *ClusterResourceModel) (*InfrastructureSpecModel, diag.Diagnostics) {
+	if data.Infrastructure.IsNull() || data.Infrastructure.IsUnknown() {
+		return nil, nil
 	}
-	var topo TopologyModel
-	diags.Append(data.Topology.As(ctx, &topo, basetypes.ObjectAsOptions{})...)
-	if diags.HasError() {
-		return cp, nil, diags
+	var spec InfrastructureSpecModel
+	diags := data.Infrastructure.As(ctx, &spec, basetypes.ObjectAsOptions{})
+	return &spec, diags
+}
+
+// extractControlPlane reads the control_plane block, nil when unset.
+func extractControlPlane(ctx context.Context, data *ClusterResourceModel) (*ControlPlaneSpecModel, diag.Diagnostics) {
+	if data.ControlPlane.IsNull() || data.ControlPlane.IsUnknown() {
+		return nil, nil
 	}
-	if !topo.ControlPlane.IsNull() && !topo.ControlPlane.IsUnknown() {
-		var c ControlPlaneTopologyModel
-		diags.Append(topo.ControlPlane.As(ctx, &c, basetypes.ObjectAsOptions{})...)
-		if !c.Replicas.IsNull() && !c.Replicas.IsUnknown() {
-			v := c.Replicas.ValueInt64()
-			cp.Replicas = &v
-		}
-		infra, d := yamlObject(c.Infrastructure, "topology.control_plane.infrastructure")
-		diags.Append(d...)
-		cp.Infrastructure = infra
+	var spec ControlPlaneSpecModel
+	diags := data.ControlPlane.As(ctx, &spec, basetypes.ObjectAsOptions{})
+	return &spec, diags
+}
+
+// extractClass reads the class block, nil when unset.
+func extractClass(ctx context.Context, data *ClusterResourceModel) (*capi.ClassRef, diag.Diagnostics) {
+	if data.Class.IsNull() || data.Class.IsUnknown() {
+		return nil, nil
 	}
-	if !topo.Workers.IsNull() && !topo.Workers.IsUnknown() {
-		var w WorkersTopologyModel
-		diags.Append(topo.Workers.As(ctx, &w, basetypes.ObjectAsOptions{})...)
-		if !w.MachineDeployments.IsNull() && !w.MachineDeployments.IsUnknown() {
-			var models []MachineDeploymentModel
-			diags.Append(w.MachineDeployments.ElementsAs(ctx, &models, false)...)
-			for i, m := range models {
-				md := capi.MachineDeploymentTopology{Name: m.Name.ValueString()}
-				var d diag.Diagnostics
-				md.Infrastructure, d = yamlObject(m.Infrastructure, fmt.Sprintf("topology.workers.machine_deployments[%d].infrastructure", i))
-				diags.Append(d...)
-				md.Bootstrap, d = yamlObject(m.Bootstrap, fmt.Sprintf("topology.workers.machine_deployments[%d].bootstrap", i))
-				diags.Append(d...)
-				if !m.Class.IsNull() {
-					md.Class = m.Class.ValueString()
-				}
-				if !m.Replicas.IsNull() && !m.Replicas.IsUnknown() {
-					v := m.Replicas.ValueInt64()
-					md.Replicas = &v
-				}
-				if !m.FailureDomain.IsNull() {
-					md.FailureDomain = m.FailureDomain.ValueString()
-				}
-				if !m.Metadata.IsNull() && !m.Metadata.IsUnknown() {
-					var meta TopologyMetadataModel
-					diags.Append(m.Metadata.As(ctx, &meta, basetypes.ObjectAsOptions{})...)
-					if !meta.Labels.IsNull() {
-						md.Labels = map[string]string{}
-						diags.Append(meta.Labels.ElementsAs(ctx, &md.Labels, false)...)
-					}
-					if !meta.Annotations.IsNull() {
-						md.Annotations = map[string]string{}
-						diags.Append(meta.Annotations.ElementsAs(ctx, &md.Annotations, false)...)
-					}
-				}
-				mds = append(mds, md)
-			}
-		}
-	}
-	return cp, mds, diags
+	var ref ClassRefModel
+	diags := data.Class.As(ctx, &ref, basetypes.ObjectAsOptions{})
+	return &capi.ClassRef{Name: ref.Name.ValueString(), Namespace: ref.Namespace.ValueString()}, diags
 }
 
 // extractNetwork returns the Cluster.spec network settings (zero when unset).
@@ -921,36 +848,6 @@ func normalizeJSON(v any) any {
 	return v
 }
 
-// legacyTopologyObject builds a topology from the pre-v2 two counts: the
-// worker count becomes one MachineDeployment named "md-0". Used by upgraders.
-func legacyTopologyObject(ctx context.Context, cpCount, workerCount types.Int64) (types.Object, diag.Diagnostics) {
-	var diags diag.Diagnostics
-	cpObj := types.ObjectNull(controlPlaneTopologyAttrTypes())
-	if !cpCount.IsNull() && !cpCount.IsUnknown() {
-		var d diag.Diagnostics
-		cpObj, d = types.ObjectValueFrom(ctx, controlPlaneTopologyAttrTypes(), ControlPlaneTopologyModel{Replicas: cpCount, Infrastructure: types.StringNull()})
-		diags.Append(d...)
-	}
-	wObj := types.ObjectNull(workersTopologyAttrTypes())
-	if !workerCount.IsNull() && !workerCount.IsUnknown() {
-		md := MachineDeploymentModel{
-			Name: types.StringValue("md-0"), Class: types.StringNull(), Replicas: workerCount,
-			FailureDomain: types.StringNull(), Metadata: types.ObjectNull(topologyMetadataAttrTypes()),
-			Infrastructure: types.StringNull(), Bootstrap: types.StringNull(),
-		}
-		list, d := types.ListValueFrom(ctx, types.ObjectType{AttrTypes: machineDeploymentAttrTypes()}, []MachineDeploymentModel{md})
-		diags.Append(d...)
-		wObj, d = types.ObjectValueFrom(ctx, workersTopologyAttrTypes(), WorkersTopologyModel{MachineDeployments: list})
-		diags.Append(d...)
-	}
-	if cpObj.IsNull() && wObj.IsNull() {
-		return types.ObjectNull(topologyAttrTypes()), diags
-	}
-	obj, d := types.ObjectValueFrom(ctx, topologyAttrTypes(), TopologyModel{ControlPlane: cpObj, Workers: wObj})
-	diags.Append(d...)
-	return obj, diags
-}
-
 // splitNameVersion splits "name:version" (version optional).
 func splitNameVersion(s string) (string, string) {
 	parts := strings.SplitN(s, ":", 2)
@@ -977,17 +874,6 @@ func nullProviderModel() ProviderModel {
 	}
 }
 
-// providerMapValue builds a one-entry provider map from a legacy
-// "name:version" string. Used by the state upgraders.
-func providerMapValue(ctx context.Context, nameVersion string) (types.Map, diag.Diagnostics) {
-	name, version := splitNameVersion(nameVersion)
-	pm := nullProviderModel()
-	if version != "" {
-		pm.Version = types.StringValue(version)
-	}
-	return types.MapValueFrom(ctx, providerMapType().ElemType, map[string]ProviderModel{name: pm})
-}
-
 func extractInventory(ctx context.Context, data *ClusterResourceModel) (*InventoryModel, diag.Diagnostics) {
 	if data.Inventory.IsNull() || data.Inventory.IsUnknown() {
 		return nil, nil
@@ -1006,22 +892,15 @@ func extractWait(ctx context.Context, data *ClusterResourceModel) (*WaitModel, d
 	return &w, diags
 }
 
-func extractOutput(ctx context.Context, data *ClusterResourceModel) (*OutputModel, diag.Diagnostics) {
-	if data.Output.IsNull() || data.Output.IsUnknown() {
-		return nil, nil
-	}
-	var out OutputModel
-	diags := data.Output.As(ctx, &out, basetypes.ObjectAsOptions{})
-	return &out, diags
-}
-
-func extractStatus(ctx context.Context, data *ClusterResourceModel) (*StatusModel, diag.Diagnostics) {
+func extractStatus(ctx context.Context, data *ClusterResourceModel) *StatusModel {
 	if data.Status.IsNull() || data.Status.IsUnknown() {
-		return nil, nil
+		return nil
 	}
 	var st StatusModel
-	diags := data.Status.As(ctx, &st, basetypes.ObjectAsOptions{})
-	return &st, diags
+	if d := data.Status.As(ctx, &st, basetypes.ObjectAsOptions{}); d.HasError() {
+		return nil
+	}
+	return &st
 }
 
 // --- State Population Helpers ---
@@ -1033,64 +912,74 @@ func stringOrNull(s string) types.String {
 	return types.StringValue(s)
 }
 
-func setStatus(ctx context.Context, data *ClusterResourceModel, result *capi.ClusterResult) diag.Diagnostics {
+// setStatusWithFallback writes status from a result, keeping the previous
+// value of anything the result does not carry.
+func setStatusWithFallback(ctx context.Context, data *ClusterResourceModel, result *capi.ClusterResult, prevStatus *StatusModel, phase capi.Phase) diag.Diagnostics {
+	var diags diag.Diagnostics
 	bootstrapName := ""
 	if result.BootstrapCluster != nil {
 		bootstrapName = result.BootstrapCluster.Name
 	}
-
-	status := StatusModel{
-		Endpoint:         stringOrNull(result.Endpoint),
-		Kubeconfig:       stringOrNull(result.Kubeconfig),
-		CACertificate:    stringOrNull(result.CACertificate),
-		Description:      stringOrNull(result.ClusterDescription),
-		BootstrapCluster: stringOrNull(bootstrapName),
+	keep := func(got string, prev types.String) string {
+		if got == "" && prevStatus != nil && !prev.IsNull() {
+			return prev.ValueString()
+		}
+		return got
 	}
-
-	val, diags := types.ObjectValueFrom(ctx, statusAttrTypes(), status)
+	var prevEndpoint, prevCA, prevDesc types.String
+	if prevStatus != nil {
+		prevEndpoint, prevCA, prevDesc = prevStatus.Endpoint, prevStatus.CACertificate, prevStatus.Description
+	}
+	conditions := types.ListNull(types.ObjectType{AttrTypes: conditionAttrTypes()})
+	if len(result.Conditions) > 0 {
+		models := make([]ConditionModel, 0, len(result.Conditions))
+		for _, c := range result.Conditions {
+			models = append(models, ConditionModel{Type: types.StringValue(c.Type), Status: types.StringValue(c.Status), Reason: stringOrNull(c.Reason), Message: stringOrNull(c.Message)})
+		}
+		list, d := types.ListValueFrom(ctx, types.ObjectType{AttrTypes: conditionAttrTypes()}, models)
+		diags.Append(d...)
+		conditions = list
+	} else if prevStatus != nil && !prevStatus.Conditions.IsNull() {
+		conditions = prevStatus.Conditions
+	}
+	status := StatusModel{
+		Phase:            types.StringValue(string(phase)),
+		Error:            types.StringNull(),
+		Endpoint:         stringOrNull(keep(result.Endpoint, prevEndpoint)),
+		CACertificate:    stringOrNull(keep(result.CACertificate, prevCA)),
+		Description:      stringOrNull(keep(result.ClusterDescription, prevDesc)),
+		BootstrapCluster: stringOrNull(bootstrapName),
+		Conditions:       conditions,
+	}
+	val, d := types.ObjectValueFrom(ctx, statusAttrTypes(), status)
+	diags.Append(d...)
 	if diags.HasError() {
 		return diags
 	}
 	data.Status = val
-	return nil
+	return diags
 }
 
-func setStatusWithFallback(ctx context.Context, data *ClusterResourceModel, result *capi.ClusterResult, prevStatus *StatusModel) diag.Diagnostics {
-	bootstrapName := ""
-	if result.BootstrapCluster != nil {
-		bootstrapName = result.BootstrapCluster.Name
-	} else if prevStatus != nil && !prevStatus.BootstrapCluster.IsNull() {
-		bootstrapName = prevStatus.BootstrapCluster.ValueString()
-	}
-
-	endpoint := result.Endpoint
-	if endpoint == "" && prevStatus != nil && !prevStatus.Endpoint.IsNull() {
-		endpoint = prevStatus.Endpoint.ValueString()
-	}
-
-	kubeconfig := result.Kubeconfig
-	if kubeconfig == "" && prevStatus != nil && !prevStatus.Kubeconfig.IsNull() {
-		kubeconfig = prevStatus.Kubeconfig.ValueString()
-	}
-
-	caCert := result.CACertificate
-	if caCert == "" && prevStatus != nil && !prevStatus.CACertificate.IsNull() {
-		caCert = prevStatus.CACertificate.ValueString()
-	}
-
-	desc := result.ClusterDescription
-	if desc == "" && prevStatus != nil && !prevStatus.Description.IsNull() {
-		desc = prevStatus.Description.ValueString()
-	}
-
+// setPartialStatus records where a create stopped: the phase, the error and
+// the bootstrap cluster left in place.
+func setPartialStatus(ctx context.Context, data *ClusterResourceModel, pe *capi.PhaseError, prevStatus *StatusModel) diag.Diagnostics {
 	status := StatusModel{
-		Endpoint:         stringOrNull(endpoint),
-		Kubeconfig:       stringOrNull(kubeconfig),
-		CACertificate:    stringOrNull(caCert),
-		Description:      stringOrNull(desc),
-		BootstrapCluster: stringOrNull(bootstrapName),
+		Phase:            types.StringValue(string(pe.Phase)),
+		Error:            types.StringValue(pe.Err.Error()),
+		Endpoint:         types.StringNull(),
+		CACertificate:    types.StringNull(),
+		Description:      types.StringNull(),
+		BootstrapCluster: types.StringNull(),
+		Conditions:       types.ListNull(types.ObjectType{AttrTypes: conditionAttrTypes()}),
 	}
-
+	if pe.Bootstrap != nil {
+		status.BootstrapCluster = types.StringValue(pe.Bootstrap.Name)
+	} else if prevStatus != nil {
+		status.BootstrapCluster = prevStatus.BootstrapCluster
+	}
+	if prevStatus != nil {
+		status.Endpoint, status.CACertificate = prevStatus.Endpoint, prevStatus.CACertificate
+	}
 	val, diags := types.ObjectValueFrom(ctx, statusAttrTypes(), status)
 	if diags.HasError() {
 		return diags
@@ -1101,11 +990,13 @@ func setStatusWithFallback(ctx context.Context, data *ClusterResourceModel, resu
 
 func nullStatus(ctx context.Context, data *ClusterResourceModel) diag.Diagnostics {
 	status := StatusModel{
+		Phase:            types.StringNull(),
+		Error:            types.StringNull(),
 		Endpoint:         types.StringNull(),
-		Kubeconfig:       types.StringNull(),
 		CACertificate:    types.StringNull(),
 		Description:      types.StringNull(),
 		BootstrapCluster: types.StringNull(),
+		Conditions:       types.ListNull(types.ObjectType{AttrTypes: conditionAttrTypes()}),
 	}
 	val, diags := types.ObjectValueFrom(ctx, statusAttrTypes(), status)
 	if diags.HasError() {
@@ -1120,50 +1011,79 @@ func nullStatus(ctx context.Context, data *ClusterResourceModel) diag.Diagnostic
 func buildCreateOptions(ctx context.Context, data *ClusterResourceModel) (*capi.CreateClusterOptions, diag.Diagnostics) {
 	var diags diag.Diagnostics
 	opts := &capi.CreateClusterOptions{
-		Name: data.Name.ValueString(),
-		Wait: capi.DefaultWaitOptions(),
+		Name:      data.Name.ValueString(),
+		Namespace: data.Namespace.ValueString(),
+		Wait:      capi.DefaultWaitOptions(),
 	}
-
-	if !data.KubernetesVersion.IsNull() {
+	if opts.Namespace == "" {
+		opts.Namespace = "default"
+	}
+	if !data.KubernetesVersion.IsNull() && !data.KubernetesVersion.IsUnknown() {
 		opts.KubernetesVersion = data.KubernetesVersion.ValueString()
 	}
-	// Management
+
+	// Management: a self-managed cluster installs management.providers on
+	// its bootstrap cluster and on itself; the caller decides the
+	// management kubeconfig.
 	mgmt, d := extractManagement(ctx, data)
 	diags.Append(d...)
 	if mgmt != nil {
-		if !mgmt.Kubeconfig.IsNull() {
-			opts.ManagementKubeconfig = mgmt.Kubeconfig.ValueString()
-		}
-		opts.SkipInit = mgmt.SkipInit.ValueBool()
 		opts.SelfManaged = mgmt.SelfManaged.ValueBool()
-		if !mgmt.Namespace.IsNull() {
-			opts.Namespace = mgmt.Namespace.ValueString()
-		}
 	}
-
-	// Providers
 	providers, d := extractProviderSet(ctx, data)
 	diags.Append(d...)
 	opts.Providers = providers
 
-	// Generation mode and Cluster.spec network settings
-	opts.ClusterClass = data.ClusterClass.ValueBool()
+	// Cluster.spec network settings
 	network, d := extractNetwork(ctx, data)
 	diags.Append(d...)
 	opts.Network = network
 
-	// Topology
-	cp, mds, d := extractTopology(ctx, data)
+	// Direct mode: the infrastructure object and the control plane; topology
+	// mode: the class. Replicas apply to both.
+	if infra, d := extractInfrastructure(ctx, data); infra != nil {
+		diags.Append(d...)
+		opts.Infrastructure.Provider = infra.Provider.ValueString()
+		spec, d := dynamicToMap(infra.Spec)
+		diags.Append(d...)
+		opts.Infrastructure.Spec = spec
+	}
+	if cp, d := extractControlPlane(ctx, data); cp != nil {
+		diags.Append(d...)
+		opts.ControlPlane.Provider = cp.Provider.ValueString()
+		if !cp.Replicas.IsNull() && !cp.Replicas.IsUnknown() {
+			v := cp.Replicas.ValueInt64()
+			opts.ControlPlane.Replicas = &v
+		}
+		if ref := refFromModel(ctx, cp.Infrastructure, &diags); ref != nil {
+			opts.ControlPlane.Template = &capi.TemplateRef{APIVersion: ref.APIVersion, Kind: ref.Kind, Name: ref.Name}
+		}
+		machineSpec, d := dynamicToMap(cp.MachineSpec)
+		diags.Append(d...)
+		if !cp.MachineSpec.IsNull() && !cp.MachineSpec.IsUnknown() && machineSpec == nil {
+			machineSpec = map[string]any{}
+		}
+		opts.ControlPlane.TemplateSpec = machineSpec
+		spec, d := dynamicToMap(cp.Spec)
+		diags.Append(d...)
+		opts.ControlPlane.Spec = spec
+	}
+	class, d := extractClass(ctx, data)
 	diags.Append(d...)
-	opts.ControlPlane = cp
-	opts.MachineDeployments = mds
+	opts.Class = class
 
 	// Wait
 	wait, d := extractWait(ctx, data)
 	diags.Append(d...)
+	opts.WaitForReady = true
 	if wait != nil {
-		opts.WaitForReady = wait.Enabled.ValueBool()
-		if !wait.Timeout.IsNull() && wait.Timeout.ValueString() != "" {
+		conditions, d := stringList(ctx, wait.Conditions)
+		diags.Append(d...)
+		if !wait.Conditions.IsNull() && !wait.Conditions.IsUnknown() {
+			opts.WaitForReady = len(conditions) > 0
+			opts.Wait.Conditions = conditions
+		}
+		if !wait.Timeout.IsNull() && !wait.Timeout.IsUnknown() && wait.Timeout.ValueString() != "" {
 			timeout, err := time.ParseDuration(wait.Timeout.ValueString())
 			if err != nil {
 				diags.AddError("Invalid wait timeout", fmt.Sprintf("Cannot parse timeout %q: %s", wait.Timeout.ValueString(), err))
@@ -1171,15 +1091,6 @@ func buildCreateOptions(ctx context.Context, data *ClusterResourceModel) (*capi.
 				opts.Wait.Timeout = timeout
 			}
 		}
-	} else {
-		opts.WaitForReady = true
-	}
-
-	// Output
-	out, d := extractOutput(ctx, data)
-	diags.Append(d...)
-	if out != nil && !out.KubeconfigPath.IsNull() {
-		opts.KubeconfigOutputPath = out.KubeconfigPath.ValueString()
 	}
 
 	// Inventory: the machines CAPT may claim, and which of them hosts the

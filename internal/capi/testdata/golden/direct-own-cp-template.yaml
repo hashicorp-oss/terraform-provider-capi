@@ -1,0 +1,85 @@
+---
+apiVersion: cluster.x-k8s.io/v1beta2
+kind: Cluster
+metadata:
+  labels:
+    cluster.x-k8s.io/cluster-name: acc
+  name: acc
+  namespace: capi
+spec:
+  clusterNetwork:
+    pods:
+      cidrBlocks:
+      - 10.244.0.0/16
+    serviceDomain: cluster.local
+    services:
+      cidrBlocks:
+      - 10.96.0.0/12
+  controlPlaneEndpoint:
+    host: 10.0.0.160
+    port: 6443
+  controlPlaneRef:
+    apiGroup: controlplane.cluster.x-k8s.io
+    kind: TalosControlPlane
+    name: acc-control-plane
+  infrastructureRef:
+    apiGroup: infrastructure.cluster.x-k8s.io
+    kind: TinkerbellCluster
+    name: acc
+---
+apiVersion: infrastructure.cluster.x-k8s.io/v1beta2
+kind: TinkerbellCluster
+metadata:
+  labels:
+    cluster.x-k8s.io/cluster-name: acc
+  name: acc
+  namespace: capi
+spec:
+  imageLookupFormat: '{{.BaseRegistry}}/talos:{{.KubernetesVersion}}'
+  templateInline: |
+    version: "0.1"
+    name: talos
+---
+apiVersion: infrastructure.cluster.x-k8s.io/v1beta2
+kind: TinkerbellMachineTemplate
+metadata:
+  labels:
+    cluster.x-k8s.io/cluster-name: acc
+  name: acc-control-plane-06d80c2f
+  namespace: capi
+spec:
+  template:
+    spec:
+      hardwareAffinity:
+        required:
+        - labelSelector:
+            matchLabels:
+              type: cp
+---
+apiVersion: controlplane.cluster.x-k8s.io/v1beta1
+kind: TalosControlPlane
+metadata:
+  labels:
+    cluster.x-k8s.io/cluster-name: acc
+  name: acc-control-plane
+  namespace: capi
+spec:
+  controlPlaneConfig:
+    controlplane:
+      generateType: controlplane
+      strategicPatches:
+      - |
+        machine:
+          network:
+            hostname: cp
+      talosVersion: v1.13
+  machineTemplate:
+    spec:
+      infrastructureRef:
+        apiGroup: infrastructure.cluster.x-k8s.io
+        kind: TinkerbellMachineTemplate
+        name: acc-control-plane-06d80c2f
+  replicas: 1
+  rolloutStrategy:
+    type: OnDelete
+  version: v1.34.0

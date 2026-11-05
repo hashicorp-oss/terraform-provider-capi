@@ -24,15 +24,11 @@ const (
 
 	// DefaultControlPlaneCount is the default number of control plane nodes.
 	DefaultControlPlaneCount int64 = 1
-
-	// DefaultWorkerCount is the default number of worker nodes.
-	DefaultWorkerCount int64 = 1
 )
 
 // DefaultCreateOptions returns sensible defaults for creating a Docker-based CAPI cluster.
 func DefaultCreateOptions(name string) capi.CreateClusterOptions {
 	cpCount := DefaultControlPlaneCount
-	workerCount := DefaultWorkerCount
 
 	return capi.CreateClusterOptions{
 		Name:      name,
@@ -42,11 +38,15 @@ func DefaultCreateOptions(name string) capi.CreateClusterOptions {
 			capi.ProviderTypeBootstrap:      {{Type: capi.ProviderTypeBootstrap, Name: BootstrapProviderName}},
 			capi.ProviderTypeControlPlane:   {{Type: capi.ProviderTypeControlPlane, Name: ControlPlaneProviderName}},
 		},
-		KubernetesVersion:  DefaultKubernetesVersion,
-		ControlPlane:       capi.ControlPlaneTopology{Replicas: &cpCount},
-		MachineDeployments: []capi.MachineDeploymentTopology{{Name: "md-0", Replicas: &workerCount}},
-		WaitForReady:       true,
-		SelfManaged:        false,
-		Wait:               capi.DefaultWaitOptions(),
+		KubernetesVersion: DefaultKubernetesVersion,
+		Infrastructure:    capi.InfrastructureSpec{Provider: InfrastructureProviderName},
+		ControlPlane: capi.ControlPlaneSpec{
+			Provider: ControlPlaneProviderName,
+			Replicas: &cpCount,
+			Template: &capi.TemplateRef{APIVersion: "infrastructure.cluster.x-k8s.io/v1beta1", Kind: "DockerMachineTemplate", Name: name + "-control-plane"},
+		},
+		WaitForReady: true,
+		SelfManaged:  false,
+		Wait:         capi.DefaultWaitOptions(),
 	}
 }

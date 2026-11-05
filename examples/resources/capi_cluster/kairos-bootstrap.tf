@@ -139,6 +139,7 @@ locals {
 
 resource "capi_cluster" "kairos" {
   name               = local.cluster_name
+  namespace          = local.namespace
   kubernetes_version = "v1.34.0"
 
   network = {
@@ -147,112 +148,113 @@ resource "capi_cluster" "kairos" {
     services               = { cidr_blocks = ["10.96.0.0/12"] }
   }
 
+  # TinkerbellCluster.spec: stream the Talos image to disk and reboot.
   infrastructure = {
-    tinkerbell = {
-      version      = "v0.7.9"
-      fetch_config = { owner = "tinkerbell-community" }
-
-      # TinkerbellCluster.spec: stream the Talos image to disk and reboot.
-      resource_config = yamlencode({
-        templateInline = <<-EOT
-          version: "0.1"
-          name: talos
-          global_timeout: 6000
-          tasks:
-            - name: talos
-              worker: "{{.device_1}}"
-              volumes:
-                - /dev:/dev
-                - /dev/console:/dev/console
-                - /lib/firmware:/lib/firmware:ro
-              actions:
-                - name: stream-talos-image
-                  image: quay.io/tinkerbell/actions/image2disk
-                  timeout: 1200
-                  environment:
-                    IMG_URL: ${local.talos_image_url}
-                    DEST_DISK: {{ index .Hardware.Disks 0 }}
-                    COMPRESSED: true
-                - name: reboot
-                  image: ghcr.io/jacobweinstock/waitdaemon:latest
-                  timeout: 90
-                  pid: host
-                  environment:
-                    IMAGE: quay.io/tinkerbell/actions/reboot
-                    WAIT_SECONDS: 5
-                  volumes:
-                    - /var/run/docker.sock:/var/run/docker.sock
-        EOT
-      })
+    provider = "tinkerbell"
+    spec = {
+      templateInline = <<-EOT
+        version: "0.1"
+        name: talos
+        global_timeout: 6000
+        tasks:
+          - name: talos
+            worker: "{{.device_1}}"
+            volumes:
+              - /dev:/dev
+              - /dev/console:/dev/console
+              - /lib/firmware:/lib/firmware:ro
+            actions:
+              - name: stream-talos-image
+                image: quay.io/tinkerbell/actions/image2disk
+                timeout: 1200
+                environment:
+                  IMG_URL: ${local.talos_image_url}
+                  DEST_DISK: {{ index .Hardware.Disks 0 }}
+                  COMPRESSED: true
+              - name: reboot
+                image: ghcr.io/jacobweinstock/waitdaemon:latest
+                timeout: 90
+                pid: host
+                environment:
+                  IMAGE: quay.io/tinkerbell/actions/reboot
+                  WAIT_SECONDS: 5
+                volumes:
+                  - /var/run/docker.sock:/var/run/docker.sock
+      EOT
     }
   }
 
-  bootstrap = {
-    talos = {
-      version      = "v0.8.2"
-      fetch_config = { owner = "sidero-community" }
-      resource_config = yamlencode({
-        talosVersion     = local.talos_version
-        strategicPatches = [local.talos_cni_patch, local.talos_common_patch]
-      })
-    }
-  }
-
+  # TalosControlPlane.spec.
   control_plane = {
-    talos = {
-      version      = "v0.8.0"
-      fetch_config = { owner = "sidero-community" }
-      resource_config = yamlencode({
-        controlPlaneConfig = {
-          controlplane = {
-            talosVersion = local.talos_version
-            strategicPatches = [
-              local.talos_cni_patch,
-              local.talos_common_patch,
-              yamlencode({
-                machine = {
-                  network = {
-                    interfaces = [{
-                      deviceSelector = { physical = true }
-                      dhcp           = true
-                      vip            = { ip = "192.168.1.100" }
-                    }]
-                  }
+    provider = "talos"
+    replicas = 3
+    # The cluster renders its own control-plane machine template: a
+    # capi_machine_template cannot precede the cluster whose bootstrap installs
+    # the CRDs. A change is a new hash-named template and a rollout.
+    machine_spec = { hardwareAffinity = { required = [{ labelSelector = { matchLabels = { type = "cp" } } }] } }
+    spec = {
+      controlPlaneConfig = {
+        controlplane = {
+          talosVersion = local.talos_version
+          strategicPatches = [
+            local.talos_cni_patch,
+            local.talos_common_patch,
+            yamlencode({
+              machine = {
+                network = {
+                  interfaces = [{
+                    deviceSelector = { physical = true }
+                    dhcp           = true
+                    vip            = { ip = "192.168.1.100" }
+                  }]
                 }
-              }),
-            ]
-          }
+              }
+            }),
+          ]
         }
-      })
-    }
-  }
-
-  # CAAPH, which installs the HelmChartProxies in manifests.management.
-  addon = { helm = {} }
-
-  topology = {
-    control_plane = {
-      replicas       = 3
-      infrastructure = yamlencode({ hardwareAffinity = { required = [{ labelSelector = { matchLabels = { type = "cp" } } }] } })
-    }
-    workers = {
-      machine_deployments = [
-        {
-          name           = "md-0"
-          replicas       = 1
-          infrastructure = yamlencode({ hardwareAffinity = { required = [{ labelSelector = { matchLabels = { type = "worker" } } }] } })
-        }
-      ]
+      }
     }
   }
 
   management = {
     self_managed = true # required: the live node is disposable, CAPI must move off it
-    namespace    = local.namespace
+
+    # The providers of a self-managed cluster: installed on the live node and
+    # again on the cluster before the move. On an external management cluster
+    # these are capi_provider resources instead.
+    providers = {
+      infrastructure = {
+        tinkerbell = {
+          version      = "v0.7.9"
+          fetch_config = { owner = "tinkerbell-community" }
+        }
+      }
+      bootstrap = {
+        talos = {
+          version      = "v0.8.2"
+          fetch_config = { owner = "sidero-community" }
+          # Default worker TalosConfigTemplate.spec for capi_bootstrap_template
+          # resources that leave it to the provider.
+          resource_config = yamlencode({
+            talosVersion     = local.talos_version
+            strategicPatches = [local.talos_cni_patch, local.talos_common_patch]
+          })
+        }
+      }
+      control_plane = {
+        talos = {
+          version      = "v0.8.0"
+          fetch_config = { owner = "sidero-community" }
+        }
+      }
+      # CAAPH, which installs the HelmChartProxies in manifests.management.
+      addon = { helm = {} }
+    }
 
     bootstrap = {
-      type    = "kairos"
-      machine = "nuc" # inventory.machine[].hostname: its bmc boots the ISO; no disk is needed
+      type       = "kairos"
+      machine    = "nuc"    # inventory.machine[].hostname: its bmc boots the ISO; no disk is needed
+      on_failure = "resume" # keep what exists on a failure and continue from status.phase next apply
 
       boot = {
         method   = "virtual_media" # or "manual": boot the node from a USB stick yourself; no BMC is driven
@@ -298,7 +300,8 @@ resource "capi_cluster" "kairos" {
   # Applied to the live node before the cluster objects and again to the
   # cluster after the move: the cluster's addon declarations (CAAPH brings
   # them up on the cluster once its control plane is initialized), IPAM pools,
-  # anything the cluster objects reference.
+  # anything the cluster objects reference. After the pivot, more addons are
+  # capi_helm_chart_proxy and capi_cluster_resource_set resources.
   manifests = {
     management = [
       local.cilium_proxy,
@@ -308,9 +311,10 @@ resource "capi_cluster" "kairos" {
     ]
   }
 
-  # Every machine becomes a Tinkerbell Hardware, a rufio Machine and a BMC
-  # Secret on whichever cluster manages. The bootstrap machine is left out
-  # while it hosts the management cluster and added after the pivot.
+  # The seed inventory: every machine becomes a Tinkerbell Hardware, a rufio
+  # Machine and a BMC Secret on whichever cluster manages. The bootstrap
+  # machine is left out while it hosts the management cluster and added after
+  # the pivot. Machines added later are capi_hardware resources.
   inventory = {
     machine = [
       {
@@ -349,12 +353,45 @@ resource "capi_cluster" "kairos" {
   }
 
   wait = {
-    enabled = true
-    timeout = "90m"
+    conditions = ["Available"]
+    timeout    = "90m"
   }
+}
 
-  output = {
-    kubeconfig_path = "~/.kube/${local.cluster_name}.kubeconfig"
+# Workers join after the pivot as node groups on the cluster, which now
+# manages itself: point the provider block at it through the kubeconfig
+# ephemeral.capi_kubeconfig derives from provider_secrets.
+resource "capi_machine_template" "worker" {
+  name           = "${local.cluster_name}-worker"
+  namespace      = local.namespace
+  infrastructure = "tinkerbell"
+  api_version    = "infrastructure.cluster.x-k8s.io/v1beta1"
+  spec           = { hardwareAffinity = { required = [{ labelSelector = { matchLabels = { type = "worker" } } }] } }
+  depends_on     = [capi_cluster.kairos]
+}
+
+resource "capi_bootstrap_template" "worker" {
+  name        = "${local.cluster_name}-worker"
+  namespace   = local.namespace
+  bootstrap   = "talos"
+  api_version = "bootstrap.cluster.x-k8s.io/v1alpha3"
+  spec = {
+    generateType     = "worker"
+    talosVersion     = local.talos_version
+    strategicPatches = [local.talos_cni_patch, local.talos_common_patch]
+  }
+  depends_on = [capi_cluster.kairos]
+}
+
+resource "capi_machine_deployment" "md_0" {
+  cluster   = capi_cluster.kairos.name
+  namespace = local.namespace
+  name      = "md-0"
+  replicas  = 1
+  version   = "v1.34.0"
+  template = {
+    infrastructure = capi_machine_template.worker.ref
+    bootstrap      = capi_bootstrap_template.worker.ref
   }
 }
 

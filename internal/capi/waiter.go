@@ -13,6 +13,7 @@ import (
 	meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/version"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/tools/clientcmd"
 )
@@ -92,11 +93,32 @@ func (w *DynamicWaiter) WaitForClusterReady(ctx context.Context, mgmtCluster *Cl
 	if err != nil {
 		return &CAPIError{Operation: op, Cluster: clusterName, Err: fmt.Errorf("%w: %v", ErrClusterNotReady, err)}
 	}
-	err = w.waitForAnyCondition(ctx, dynClient, clustersGVR(coreVersion), clusterName, namespace, clusterReadyConditions, timeout, pollInterval)
+	if len(opts.Conditions) > 0 {
+		err = w.waitForAllConditions(ctx, dynClient, clustersGVR(coreVersion), clusterName, namespace, readinessConditions(opts.Conditions, coreVersion), timeout, pollInterval)
+	} else {
+		err = w.waitForAnyCondition(ctx, dynClient, clustersGVR(coreVersion), clusterName, namespace, clusterReadyConditions, timeout, pollInterval)
+	}
 	if err != nil {
 		return &CAPIError{Operation: op, Cluster: clusterName, Err: fmt.Errorf("%w: waiting for cluster readiness: %v", ErrClusterNotReady, err)}
 	}
 	return nil
+}
+
+// readinessConditions maps the caller's condition names onto the contract
+// in use: the v1beta2 Available is the legacy Ready, and the other way round.
+func readinessConditions(conditions []string, coreVersion string) []string {
+	legacy := version.CompareKubeAwareVersionStrings(coreVersion, "v1beta2") < 0
+	out := make([]string, 0, len(conditions))
+	for _, c := range conditions {
+		switch {
+		case legacy && c == "Available":
+			c = "Ready"
+		case !legacy && c == "Ready":
+			c = "Available"
+		}
+		out = append(out, c)
+	}
+	return out
 }
 
 // WaitForClusterDeleted waits for a deleted Cluster object to disappear. CAPI
@@ -332,6 +354,35 @@ func (w *DynamicWaiter) waitForAnyCondition(ctx context.Context, dynClient dynam
 	}
 
 	return fmt.Errorf("timed out waiting for %s/%s condition %v", gvr.Resource, resourceName, conditionTypes)
+}
+
+// waitForAllConditions polls until every named condition is True on the
+// resource; a timeout names the ones still missing.
+func (w *DynamicWaiter) waitForAllConditions(ctx context.Context, dynClient dynamic.Interface, gvr schema.GroupVersionResource, resourceName, namespace string, conditionTypes []string, timeout, pollInterval time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	var missing []string
+	for time.Now().Before(deadline) {
+		missing = missing[:0]
+		obj, getErr := dynClient.Resource(gvr).Namespace(namespace).Get(ctx, resourceName, meta_v1.GetOptions{})
+		if getErr == nil {
+			for _, conditionType := range conditionTypes {
+				if !hasCondition(obj, conditionType, "True") {
+					missing = append(missing, conditionType)
+				}
+			}
+			if len(missing) == 0 {
+				return nil
+			}
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(pollInterval):
+		}
+	}
+
+	return fmt.Errorf("timed out waiting for %s/%s conditions %v (not True: %v)", gvr.Resource, resourceName, conditionTypes, missing)
 }
 
 // areMachineDeploymentsReady checks if all machine deployments for the cluster have desired replicas ready.

@@ -4,7 +4,6 @@
 package capi
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -14,7 +13,6 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
-	apiextv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
@@ -102,7 +100,13 @@ func generatorFor(t *testing.T, crdFiles ...string) *CatalogManifestGenerator {
 // testdata/golden/<name>.yaml object by object, in order, ignoring formatting.
 func assertManifestMatchesGolden(t *testing.T, name string, got []byte) {
 	t.Helper()
-	want, err := os.ReadFile(filepath.Join("testdata", "golden", name+".yaml"))
+	path := filepath.Join("testdata", "golden", name+".yaml")
+	if os.Getenv("UPDATE_GOLDEN") != "" {
+		if err := os.WriteFile(path, got, 0o600); err != nil {
+			t.Fatalf("writing golden: %v", err)
+		}
+	}
+	want, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("reading golden: %v", err)
 	}
@@ -147,23 +151,13 @@ func tinkerbellTalosOptions() GenerateOptions {
 			ServiceCIDRs:         []string{"10.96.0.0/12"},
 			ServiceDomain:        "cluster.local",
 		},
-		ControlPlane: ControlPlaneTopology{
+		Infrastructure: InfrastructureSpec{Provider: "tinkerbell", Spec: map[string]any{"imageLookupFormat": "{{.BaseRegistry}}/talos:{{.KubernetesVersion}}"}},
+		ControlPlane: ControlPlaneSpec{
+			Provider: "talos",
 			Replicas: ptrInt64(1),
-			Infrastructure: map[string]any{
-				"hardwareAffinity": map[string]any{"required": []any{map[string]any{"labelSelector": map[string]any{"matchLabels": map[string]any{"type": "cp"}}}}},
-			},
-		},
-		MachineDeployments: []MachineDeploymentTopology{
-			{
-				Name: "md-0", Replicas: ptrInt64(2), FailureDomain: "rack-1",
-				Labels: map[string]string{"tier": "worker"}, Annotations: map[string]string{"note": "x"},
-				Infrastructure: map[string]any{
-					"hardwareAffinity": map[string]any{"required": []any{map[string]any{"labelSelector": map[string]any{"matchLabels": map[string]any{"type": "worker"}}}}},
-				},
-			},
-			{
-				Name: "gpu", Replicas: ptrInt64(1),
-				Bootstrap: map[string]any{"generateType": "worker", "talosVersion": "v1.14"},
+			Template: &TemplateRef{APIVersion: "infrastructure.cluster.x-k8s.io/v1beta1", Kind: "TinkerbellMachineTemplate", Name: "cp-1a2b3c4d"},
+			Spec: map[string]any{
+				"controlPlaneConfig": map[string]any{"controlplane": map[string]any{"strategicPatches": []any{"machine:\n  network:\n    hostname: cp\n"}}},
 			},
 		},
 	}
@@ -176,17 +170,52 @@ func TestGenerate_Direct_TinkerbellTalos(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertManifestMatchesGolden(t, "direct-tinkerbell-talos", got)
+	objs, err := parseMultiDocYAML(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Only the cluster's own objects: templates and node groups are other resources.
+	var kinds []string
+	for _, o := range objs {
+		kinds = append(kinds, o.GetKind())
+	}
+	if strings.Join(kinds, ",") != "Cluster,TinkerbellCluster,TalosControlPlane" {
+		t.Errorf("kinds = %v", kinds)
+	}
+	cp := findObject(t, got, "TalosControlPlane", "acc-control-plane")
+	ref, _, _ := unstructured.NestedMap(cp.Object, "spec", "machineTemplate", "spec", "infrastructureRef")
+	if ref["name"] != "cp-1a2b3c4d" || ref["apiGroup"] != "infrastructure.cluster.x-k8s.io" || ref["kind"] != "TinkerbellMachineTemplate" {
+		t.Errorf("machine template ref = %v", ref)
+	}
+	// The cluster's own spec layers over the provider entry's resource_config and the defaults.
+	patches, _, _ := unstructured.NestedSlice(cp.Object, "spec", "controlPlaneConfig", "controlplane", "strategicPatches")
+	if len(patches) != 1 || patches[0] != "machine:\n  network:\n    hostname: cp\n" {
+		t.Errorf("control_plane.spec must replace the provider entry's list: %v", patches)
+	}
+	if v, _, _ := unstructured.NestedString(cp.Object, "spec", "controlPlaneConfig", "controlplane", "talosVersion"); v != "v1.13" {
+		t.Errorf("the provider entry's resource_config must survive the merge: %q", v)
+	}
+	if v, _, _ := unstructured.NestedString(cp.Object, "spec", "controlPlaneConfig", "controlplane", "generateType"); v != "controlplane" {
+		t.Errorf("provider defaults must survive: %q", v)
+	}
+	infra := findObject(t, got, "TinkerbellCluster", "acc")
+	if v, _, _ := unstructured.NestedString(infra.Object, "spec", "templateInline"); !strings.HasPrefix(v, "version:") {
+		t.Errorf("infrastructure resource_config missing: %v", infra.Object["spec"])
+	}
+	if v, _, _ := unstructured.NestedString(infra.Object, "spec", "imageLookupFormat"); v == "" {
+		t.Errorf("infrastructure.spec missing: %v", infra.Object["spec"])
+	}
 }
 
-// The minimal `infrastructure = { docker = {} }` configuration: clusterctl
-// installs the kubeadm bootstrap and control-plane providers by default, so
-// generation defaults to them too.
+// The minimal `infrastructure = { provider = "docker" }` configuration on a
+// management cluster whose providers are managed elsewhere: no provider set,
+// the control plane defaults to kubeadm.
 func TestGenerate_Direct_DockerKubeadmMinimal(t *testing.T) {
-	providers := ProviderSet{}
-	providers.Add(ProviderConfig{Name: "docker", Type: ProviderTypeInfrastructure})
 	gen := generatorFor(t, "core.yaml", "docker-kubeadm.yaml")
 	got, err := gen.Generate(context.Background(), &Cluster{Name: "mgmt"}, GenerateOptions{
-		ClusterName: "dev", Namespace: "default", KubernetesVersion: "v1.31.0", Providers: providers,
+		ClusterName: "dev", Namespace: "default", KubernetesVersion: "v1.31.0",
+		Infrastructure: InfrastructureSpec{Provider: "docker"},
+		ControlPlane:   ControlPlaneSpec{Template: &TemplateRef{APIVersion: "infrastructure.cluster.x-k8s.io/v1beta1", Kind: "DockerMachineTemplate", Name: "dev-cp-aaaaaaaa"}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -194,80 +223,94 @@ func TestGenerate_Direct_DockerKubeadmMinimal(t *testing.T) {
 	assertManifestMatchesGolden(t, "direct-docker-kubeadm", got)
 }
 
-func TestGenerate_Direct_LegacyV1beta1Contract(t *testing.T) {
-	providers := ProviderSet{}
-	providers.Add(ProviderConfig{Name: "docker", Type: ProviderTypeInfrastructure})
-	providers.Add(ProviderConfig{Name: "kubeadm", Type: ProviderTypeControlPlane})
-	providers.Add(ProviderConfig{Name: "kubeadm", Type: ProviderTypeBootstrap})
-	gen := generatorFor(t, "legacy-v1beta1.yaml")
-	got, err := gen.Generate(context.Background(), &Cluster{Name: "mgmt"}, GenerateOptions{
-		ClusterName: "old", Namespace: "default", KubernetesVersion: "v1.29.0", Providers: providers,
-		Network:            NetworkConfig{ControlPlaneEndpoint: &APIEndpoint{Host: "192.168.1.100"}},
-		MachineDeployments: []MachineDeploymentTopology{{Name: "md-0", Replicas: ptrInt64(1)}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	assertManifestMatchesGolden(t, "direct-legacy-v1beta1", got)
-}
-
-func TestGenerate_Direct_TemplateRotationFollowsSpecChanges(t *testing.T) {
-	gen := generatorFor(t, "core.yaml", "capt.yaml", "cacppt.yaml", "cabpt.yaml")
-	first, err := gen.Generate(context.Background(), &Cluster{}, tinkerbellTalosOptions())
-	if err != nil {
-		t.Fatal(err)
-	}
-	again, err := gen.Generate(context.Background(), &Cluster{}, tinkerbellTalosOptions())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(first, again) {
-		t.Fatal("generation is not deterministic for identical input")
-	}
-
-	changed := tinkerbellTalosOptions()
-	changed.ControlPlane.Infrastructure = map[string]any{"hardwareName": "cp-1"}
-	rotated, err := gen.Generate(context.Background(), &Cluster{}, changed)
-	if err != nil {
-		t.Fatal(err)
-	}
-	before := findObject(t, first, "TalosControlPlane", "acc-control-plane")
-	after := findObject(t, rotated, "TalosControlPlane", "acc-control-plane")
-	refBefore, _, _ := unstructured.NestedString(before.Object, "spec", "machineTemplate", "spec", "infrastructureRef", "name")
-	refAfter, _, _ := unstructured.NestedString(after.Object, "spec", "machineTemplate", "spec", "infrastructureRef", "name")
-	if refBefore == refAfter {
-		t.Errorf("control-plane machine template ref did not rotate: %q", refAfter)
-	}
-	if findObject(t, rotated, "TinkerbellMachineTemplate", refAfter) == nil {
-		t.Errorf("rotated manifest lacks the machine template %q the control plane references", refAfter)
-	}
-	if o := findObject(t, rotated, "TinkerbellMachineTemplate", refBefore); o != nil {
-		t.Errorf("stale machine template %q is still emitted", refBefore)
-	}
-}
-
-func TestGenerate_Direct_DefaultsBootstrapToKubeadmForMachineDeployments(t *testing.T) {
+// The infrastructure provider comes from the provider set when the cluster
+// names none (a self-managed cluster's management.providers).
+func TestGenerate_Direct_InfrastructureFromProviderSet(t *testing.T) {
 	providers := ProviderSet{}
 	providers.Add(ProviderConfig{Name: "docker", Type: ProviderTypeInfrastructure})
 	gen := generatorFor(t, "core.yaml", "docker-kubeadm.yaml")
 	got, err := gen.Generate(context.Background(), &Cluster{}, GenerateOptions{
 		ClusterName: "dev", Namespace: "default", KubernetesVersion: "v1.31.0", Providers: providers,
-		MachineDeployments: []MachineDeploymentTopology{{Name: "md-0"}},
+		ControlPlane: ControlPlaneSpec{Template: &TemplateRef{APIVersion: "infrastructure.cluster.x-k8s.io/v1beta1", Kind: "DockerMachineTemplate", Name: "dev-cp-aaaaaaaa"}},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if findObject(t, got, "KubeadmConfigTemplate", "dev-md-0-9e458ff9") == nil {
-		t.Errorf("expected a kubeadm config template for the deployment:\n%s", got)
+	if findObject(t, got, "DockerCluster", "dev") == nil {
+		t.Errorf("expected a DockerCluster:\n%s", got)
+	}
+}
+
+func TestGenerate_Direct_LegacyV1beta1Contract(t *testing.T) {
+	gen := generatorFor(t, "legacy-v1beta1.yaml")
+	got, err := gen.Generate(context.Background(), &Cluster{Name: "mgmt"}, GenerateOptions{
+		ClusterName: "old", Namespace: "default", KubernetesVersion: "v1.29.0",
+		Network:        NetworkConfig{ControlPlaneEndpoint: &APIEndpoint{Host: "192.168.1.100"}},
+		Infrastructure: InfrastructureSpec{Provider: "docker"},
+		ControlPlane:   ControlPlaneSpec{Provider: "kubeadm", Replicas: ptrInt64(1), Template: &TemplateRef{APIVersion: "infrastructure.cluster.x-k8s.io/v1beta1", Kind: "DockerMachineTemplate", Name: "old-cp-bbbbbbbb"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertManifestMatchesGolden(t, "direct-legacy-v1beta1", got)
+	cp := findObject(t, got, "KubeadmControlPlane", "old-control-plane")
+	ref, _, _ := unstructured.NestedMap(cp.Object, "spec", "machineTemplate", "infrastructureRef")
+	if ref["name"] != "old-cp-bbbbbbbb" || ref["apiVersion"] != "infrastructure.cluster.x-k8s.io/v1beta1" || ref["namespace"] != "default" {
+		t.Errorf("legacy machine template ref = %v", ref)
+	}
+}
+
+// A self-managed cluster renders its own control-plane machine template
+// from control_plane.machine_spec, hash-named so a spec change rolls the
+// control plane, as the generator did before templates became resources.
+func TestGenerate_Direct_OwnControlPlaneTemplate(t *testing.T) {
+	gen := generatorFor(t, "core.yaml", "capt.yaml", "cacppt.yaml", "cabpt.yaml")
+	opts := tinkerbellTalosOptions()
+	opts.ControlPlane.Template = nil
+	opts.ControlPlane.TemplateSpec = map[string]any{"hardwareAffinity": map[string]any{"required": []any{map[string]any{"labelSelector": map[string]any{"matchLabels": map[string]any{"type": "cp"}}}}}}
+	got, err := gen.Generate(context.Background(), &Cluster{}, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertManifestMatchesGolden(t, "direct-own-cp-template", got)
+	cp := findObject(t, got, "TalosControlPlane", "acc-control-plane")
+	ref, _, _ := unstructured.NestedString(cp.Object, "spec", "machineTemplate", "spec", "infrastructureRef", "name")
+	if !strings.HasPrefix(ref, "acc-control-plane-") || len(ref) != len("acc-control-plane-")+8 {
+		t.Errorf("own template ref = %q", ref)
+	}
+	if findObject(t, got, "TinkerbellMachineTemplate", ref) == nil {
+		t.Errorf("manifest lacks the machine template %q the control plane references", ref)
+	}
+	opts.ControlPlane.TemplateSpec = map[string]any{"hardwareName": "cp-1"}
+	rotated, _ := gen.Generate(context.Background(), &Cluster{}, opts)
+	after := findObject(t, rotated, "TalosControlPlane", "acc-control-plane")
+	refAfter, _, _ := unstructured.NestedString(after.Object, "spec", "machineTemplate", "spec", "infrastructureRef", "name")
+	if refAfter == ref {
+		t.Error("a spec change must rotate the template")
+	}
+}
+
+func TestGenerate_Direct_RequiresControlPlaneTemplate(t *testing.T) {
+	gen := generatorFor(t, "core.yaml", "docker-kubeadm.yaml")
+	_, err := gen.Generate(context.Background(), &Cluster{}, GenerateOptions{
+		ClusterName: "dev", Namespace: "default", Infrastructure: InfrastructureSpec{Provider: "docker"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "control_plane.infrastructure") {
+		t.Fatalf("expected an error naming control_plane.infrastructure, got %v", err)
+	}
+	_, err = gen.Generate(context.Background(), &Cluster{}, GenerateOptions{ClusterName: "dev", Namespace: "default"})
+	if err == nil || !strings.Contains(err.Error(), "no infrastructure provider") {
+		t.Fatalf("expected an error about the infrastructure provider, got %v", err)
 	}
 }
 
 func TestGenerate_Direct_MissingKindWrapsErrKindNotFound(t *testing.T) {
-	providers := ProviderSet{}
-	providers.Add(ProviderConfig{Name: "docker", Type: ProviderTypeInfrastructure})
-	providers.Add(ProviderConfig{Name: "talos", Type: ProviderTypeControlPlane})
 	gen := generatorFor(t, "core.yaml", "cacppt.yaml") // no docker CRDs installed
-	_, err := gen.Generate(context.Background(), &Cluster{}, GenerateOptions{ClusterName: "dev", Namespace: "default", Providers: providers})
+	_, err := gen.Generate(context.Background(), &Cluster{}, GenerateOptions{
+		ClusterName: "dev", Namespace: "default",
+		Infrastructure: InfrastructureSpec{Provider: "docker"},
+		ControlPlane:   ControlPlaneSpec{Provider: "talos", Template: &TemplateRef{APIVersion: "infrastructure.cluster.x-k8s.io/v1beta1", Kind: "DockerMachineTemplate", Name: "x"}},
+	})
 	if !errors.Is(err, ErrKindNotFound) {
 		t.Fatalf("expected ErrKindNotFound, got %v", err)
 	}
@@ -288,108 +331,71 @@ func findObject(t *testing.T, manifest []byte, kind, name string) *unstructured.
 	return nil
 }
 
-func TestGenerate_ClusterClass_TinkerbellTalos(t *testing.T) {
+func TestGenerate_Topology_ClassRef(t *testing.T) {
 	gen := generatorFor(t, "core.yaml", "capt.yaml", "cacppt.yaml", "cabpt.yaml")
 	opts := tinkerbellTalosOptions()
-	opts.ClusterClass = true
+	opts.Class = &ClassRef{Name: "prod", Namespace: "capi"}
 	got, err := gen.Generate(context.Background(), &Cluster{Name: "mgmt"}, opts)
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertManifestMatchesGolden(t, "clusterclass-tinkerbell-talos", got)
-}
-
-func TestGenerate_ClusterClass_SharedClassEmitsOneTemplateSet(t *testing.T) {
-	gen := generatorFor(t, "core.yaml", "capt.yaml", "cacppt.yaml", "cabpt.yaml")
-	opts := tinkerbellTalosOptions()
-	opts.ClusterClass = true
-	shared := map[string]any{"hardwareName": "shared"}
-	opts.MachineDeployments = []MachineDeploymentTopology{
-		{Name: "md-a", Class: "worker", Replicas: ptrInt64(1), Infrastructure: shared},
-		{Name: "md-b", Class: "worker", Replicas: ptrInt64(2), Infrastructure: shared},
-	}
-	got, err := gen.Generate(context.Background(), &Cluster{}, opts)
-	if err != nil {
-		t.Fatal(err)
-	}
+	assertManifestMatchesGolden(t, "topology-classref", got)
 	objs, err := parseMultiDocYAML(got)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var machineTemplates []string
-	for _, o := range objs {
-		if o.GetKind() == "TinkerbellMachineTemplate" && strings.HasPrefix(o.GetName(), "acc-worker-") {
-			machineTemplates = append(machineTemplates, o.GetName())
-		}
+	if len(objs) != 1 || objs[0].GetKind() != "Cluster" {
+		t.Fatalf("a class cluster is one object: %v", objs)
 	}
-	if len(machineTemplates) != 1 {
-		t.Errorf("want one machine template for class worker, got %v", machineTemplates)
+	topology, _, _ := unstructured.NestedMap(objs[0].Object, "spec", "topology")
+	if ref, _, _ := unstructured.NestedMap(topology, "classRef"); ref["name"] != "prod" || ref["namespace"] != nil {
+		t.Errorf("classRef = %v (the class namespace equals the cluster's, so it is omitted)", ref)
 	}
-	cc := findObject(t, got, "ClusterClass", "acc")
+	if topology["version"] != "v1.34.0" {
+		t.Errorf("version = %v", topology["version"])
+	}
+	if r, _, _ := unstructured.NestedInt64(topology, "controlPlane", "replicas"); r != 1 {
+		t.Errorf("replicas = %d", r)
+	}
+	if _, ok := objs[0].Object["spec"].(map[string]any)["infrastructureRef"]; ok {
+		t.Error("a topology cluster has no infrastructureRef")
+	}
+
+	// A class in another namespace is named.
+	opts.Class = &ClassRef{Name: "prod", Namespace: "classes"}
+	got, _ = gen.Generate(context.Background(), &Cluster{}, opts)
 	cluster := findObject(t, got, "Cluster", "acc")
-	if cc == nil || cluster == nil {
-		t.Fatalf("manifest lacks the ClusterClass or Cluster:\n%s", got)
-	}
-	classes, _, _ := unstructured.NestedSlice(cc.Object, "spec", "workers", "machineDeployments")
-	if len(classes) != 1 {
-		t.Errorf("want one worker class, got %d", len(classes))
-	}
-	mds, _, _ := unstructured.NestedSlice(cluster.Object, "spec", "topology", "workers", "machineDeployments")
-	if len(mds) != 2 {
-		t.Errorf("want two topology machine deployments, got %d", len(mds))
+	if ns, _, _ := unstructured.NestedString(cluster.Object, "spec", "topology", "classRef", "namespace"); ns != "classes" {
+		t.Errorf("classRef.namespace = %q", ns)
 	}
 }
 
-func TestGenerate_ClusterClass_ConflictingSharedClassFails(t *testing.T) {
+func TestGenerate_Topology_LegacyClass(t *testing.T) {
+	gen := generatorFor(t, "legacy-v1beta1.yaml")
+	got, err := gen.Generate(context.Background(), &Cluster{}, GenerateOptions{
+		ClusterName: "old", Namespace: "default", KubernetesVersion: "v1.29.0",
+		Class: &ClassRef{Name: "main", Namespace: "classes"}, ControlPlane: ControlPlaneSpec{Replicas: ptrInt64(3)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cluster := findObject(t, got, "Cluster", "old")
+	topology, _, _ := unstructured.NestedMap(cluster.Object, "spec", "topology")
+	if topology["class"] != "main" || topology["classNamespace"] != "classes" || topology["version"] != "v1.29.0" {
+		t.Errorf("legacy topology = %v", topology)
+	}
+	if _, ok := topology["classRef"]; ok {
+		t.Error("legacy topology uses class, not classRef")
+	}
+}
+
+func TestGenerate_Topology_RequiresKubernetesVersion(t *testing.T) {
 	gen := generatorFor(t, "core.yaml", "capt.yaml", "cacppt.yaml", "cabpt.yaml")
 	opts := tinkerbellTalosOptions()
-	opts.ClusterClass = true
-	opts.MachineDeployments = []MachineDeploymentTopology{
-		{Name: "md-a", Class: "worker", Infrastructure: map[string]any{"hardwareName": "a"}},
-		{Name: "md-b", Class: "worker", Infrastructure: map[string]any{"hardwareName": "b"}},
-	}
-	_, err := gen.Generate(context.Background(), &Cluster{}, opts)
-	if err == nil || !strings.Contains(err.Error(), `class "worker"`) {
-		t.Fatalf("expected an error naming the conflicting class, got %v", err)
-	}
-}
-
-func TestGenerate_ClusterClass_ProviderWithoutTemplateKindFails(t *testing.T) {
-	var crds []apiextv1.CustomResourceDefinition
-	for _, crd := range loadTestCRDs(t, "core.yaml", "capt.yaml", "cacppt.yaml", "cabpt.yaml") {
-		if crd.Spec.Names.Kind != "TinkerbellClusterTemplate" {
-			crds = append(crds, crd)
-		}
-	}
-	gen := NewManifestGenerator(staticKindResolver{NewKindCatalog(crds)})
-	opts := tinkerbellTalosOptions()
-	opts.ClusterClass = true
-	_, err := gen.Generate(context.Background(), &Cluster{}, opts)
-	if !errors.Is(err, ErrKindNotFound) || !strings.Contains(err.Error(), "ClusterTemplate") {
-		t.Fatalf("expected ErrKindNotFound naming ClusterTemplate, got %v", err)
-	}
-}
-
-func TestGenerate_ClusterClass_RequiresKubernetesVersion(t *testing.T) {
-	gen := generatorFor(t, "core.yaml", "capt.yaml", "cacppt.yaml", "cabpt.yaml")
-	opts := tinkerbellTalosOptions()
-	opts.ClusterClass = true
+	opts.Class = &ClassRef{Name: "prod"}
 	opts.KubernetesVersion = ""
 	_, err := gen.Generate(context.Background(), &Cluster{}, opts)
 	if err == nil || !strings.Contains(err.Error(), "kubernetes_version") {
 		t.Fatalf("expected an error about kubernetes_version, got %v", err)
-	}
-}
-
-func TestGenerate_ClusterClass_RequiresV1beta2Core(t *testing.T) {
-	gen := generatorFor(t, "legacy-v1beta1.yaml")
-	providers := ProviderSet{}
-	providers.Add(ProviderConfig{Name: "docker", Type: ProviderTypeInfrastructure})
-	providers.Add(ProviderConfig{Name: "kubeadm", Type: ProviderTypeControlPlane})
-	_, err := gen.Generate(context.Background(), &Cluster{}, GenerateOptions{
-		ClusterName: "old", Namespace: "default", KubernetesVersion: "v1.29.0", Providers: providers, ClusterClass: true,
-	})
-	if err == nil || !strings.Contains(err.Error(), "v1beta2") {
-		t.Fatalf("expected an error about the v1beta2 core contract, got %v", err)
 	}
 }

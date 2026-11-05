@@ -4,6 +4,7 @@
 package capi
 
 import (
+	"fmt"
 	"time"
 
 	clusterctlv1 "sigs.k8s.io/cluster-api/cmd/clusterctl/api/v1alpha3"
@@ -112,6 +113,11 @@ type MoveOptions struct {
 
 // WaitOptions configures cluster readiness waiting.
 type WaitOptions struct {
+	// Conditions, when set, are the Cluster conditions a readiness wait
+	// requires to be True, all of them. Empty means the cluster's own
+	// readiness condition (Available, or Ready on the legacy contract).
+	Conditions []string
+
 	// Timeout is the maximum time to wait for readiness.
 	Timeout time.Duration
 
@@ -129,6 +135,12 @@ func DefaultWaitOptions() WaitOptions {
 
 // ClusterResult contains the result of a cluster creation operation.
 type ClusterResult struct {
+	// Phase is the phase the workflow finished in: PhaseReady.
+	Phase Phase
+
+	// Conditions are the Cluster object's status conditions.
+	Conditions []Condition
+
 	// Cluster is the workload cluster information.
 	Cluster *Cluster
 
@@ -173,15 +185,21 @@ type CreateClusterOptions struct {
 
 	// ControlPlane is the control plane topology (replicas and machine
 	// template spec).
-	ControlPlane ControlPlaneTopology
+	ControlPlane ControlPlaneSpec
 
-	// MachineDeployments are the worker MachineDeployments
-	// (Cluster.spec.topology.workers.machineDeployments).
-	MachineDeployments []MachineDeploymentTopology
+	// Infrastructure is the <Infra>Cluster in direct mode: provider name
+	// (default: the one in Providers) and spec.
+	Infrastructure InfrastructureSpec
 
-	// ClusterClass generates a ClusterClass and a topology Cluster instead of
-	// direct objects, enabling the ClusterTopology gate at init.
-	ClusterClass bool
+	// Class, when set, makes the Cluster a topology of this ClusterClass.
+	Class *ClassRef
+
+	// OnPhase, when set, is called as the creation workflow advances.
+	OnPhase func(Phase)
+
+	// KeepBootstrapOnFailure leaves the bootstrap cluster in place when
+	// creation fails, so the next run resumes on it.
+	KeepBootstrapOnFailure bool
 
 	// Variables are clusterctl variables (${VAR}) substituted into provider
 	// component YAML at init.
@@ -204,9 +222,6 @@ type CreateClusterOptions struct {
 
 	// Wait configures timeout and poll options.
 	Wait WaitOptions
-
-	// KubeconfigOutputPath is where to write the workload cluster kubeconfig.
-	KubeconfigOutputPath string
 
 	// ProviderSecrets seeds provider-specific secrets persisted from a prior
 	// apply (see Cluster.ProviderSecrets), so the bootstrapper can recognize a
@@ -284,30 +299,6 @@ func (a AddonSet) Empty() bool {
 	return len(a.PreHelmManifestURLs) == 0 && len(a.Prerequisites) == 0 && len(a.Helm) == 0 && len(a.Manifests) == 0
 }
 
-// MachineDeploymentTopology mirrors Cluster.spec.topology.workers.machineDeployments[].
-type MachineDeploymentTopology struct {
-	Name          string
-	Class         string
-	Replicas      *int64
-	FailureDomain string
-	Labels        map[string]string
-	Annotations   map[string]string
-
-	// Infrastructure is the spec of this deployment's <Infra>MachineTemplate.
-	Infrastructure map[string]any
-
-	// Bootstrap is the spec of this deployment's <Bootstrap>ConfigTemplate.
-	// Nil uses the bootstrap provider's ResourceConfig.
-	Bootstrap map[string]any
-}
-
-// ControlPlaneTopology mirrors Cluster.spec.topology.controlPlane plus the
-// spec of the control plane's <Infra>MachineTemplate.
-type ControlPlaneTopology struct {
-	Replicas       *int64
-	Infrastructure map[string]any
-}
-
 // APIEndpoint is Cluster.spec.controlPlaneEndpoint.
 type APIEndpoint struct {
 	Host string
@@ -341,17 +332,99 @@ type GenerateOptions struct {
 	// Network fills Cluster.spec.clusterNetwork and controlPlaneEndpoint.
 	Network NetworkConfig
 
-	// ControlPlane sets the control plane replicas and machine template spec.
-	ControlPlane ControlPlaneTopology
+	// Infrastructure names the infrastructure provider (default: the one in
+	// Providers) and carries the <Infra>Cluster spec. Direct mode only.
+	Infrastructure InfrastructureSpec
 
-	// MachineDeployments are the worker MachineDeployments (or worker classes
-	// and topology entries when ClusterClass is set).
-	MachineDeployments []MachineDeploymentTopology
+	// ControlPlane names the control-plane provider, the machine template
+	// the control plane runs on, its replicas and spec. Replicas apply in
+	// both modes; the rest is direct mode only.
+	ControlPlane ControlPlaneSpec
 
-	// ClusterClass generates a ClusterClass and a topology Cluster instead of
-	// direct objects.
-	ClusterClass bool
+	// Class, when set, generates a Cluster whose spec.topology refers to
+	// an existing ClusterClass instead of the direct objects.
+	Class *ClassRef
 }
+
+// InfrastructureSpec is the cluster's infrastructure object in direct mode.
+type InfrastructureSpec struct {
+	// Provider is the infrastructure provider name (tinkerbell, docker).
+	Provider string
+	// Spec is merged into the <Infra>Cluster spec over the provider
+	// defaults and the provider entry's ResourceConfig (RFC 7396).
+	Spec map[string]any
+}
+
+// ControlPlaneSpec is the cluster's control plane.
+type ControlPlaneSpec struct {
+	// Provider is the control-plane provider name (talos, kubeadm).
+	Provider string
+	// Replicas is the control plane size; nil leaves the provider default.
+	Replicas *int64
+	// Template is the <Infra>MachineTemplate the control-plane machines are
+	// created from, as a capi_machine_template ref.
+	Template *TemplateRef
+	// TemplateSpec, when Template is nil, is the spec of an
+	// <Infra>MachineTemplate the generator renders itself, named
+	// <cluster>-control-plane-<hash of the spec>: for a self-managed
+	// cluster, whose CRDs only exist once it is bootstrapped. One of the
+	// two is required in direct mode.
+	TemplateSpec map[string]any
+	// Spec is merged into the <CP>ControlPlane spec over the provider
+	// defaults and the provider entry's ResourceConfig.
+	Spec map[string]any
+}
+
+// TemplateRef names a template object.
+type TemplateRef struct {
+	APIVersion string
+	Kind       string
+	Name       string
+}
+
+// ClassRef names a ClusterClass.
+type ClassRef struct {
+	Name      string
+	Namespace string
+}
+
+// Phase is how far a cluster's creation workflow has come, recorded in the
+// resource's status so a failed run can be resumed.
+type Phase string
+
+const (
+	// PhaseBootstrapping: the bootstrap cluster is being stood up.
+	PhaseBootstrapping Phase = "bootstrapping"
+	// PhaseInitialized: the management cluster has its providers (and the
+	// bootstrap cluster its addons).
+	PhaseInitialized Phase = "initialized"
+	// PhaseControlPlaneInitialized: the cluster objects are applied and the
+	// first control-plane machine is up.
+	PhaseControlPlaneInitialized Phase = "control_plane_initialized"
+	// PhasePaused: the Cluster is paused and provisioning has gone idle.
+	PhasePaused Phase = "paused"
+	// PhaseHandedOver: the bootstrap stack is down and the workload's addons
+	// are up; the workload cluster is the only provisioning engine.
+	PhaseHandedOver Phase = "handed_over"
+	// PhasePivoted: management moved to the workload cluster and the
+	// bootstrap cluster is gone.
+	PhasePivoted Phase = "pivoted"
+	// PhaseReady: the workflow finished.
+	PhaseReady Phase = "ready"
+)
+
+// PhaseError is a creation failure with the phase it happened in and the
+// bootstrap cluster that was left in place, so the caller can record both
+// and resume.
+type PhaseError struct {
+	Phase     Phase
+	Bootstrap *Cluster
+	Err       error
+}
+
+func (e *PhaseError) Error() string { return fmt.Sprintf("%s (phase %s)", e.Err, e.Phase) }
+
+func (e *PhaseError) Unwrap() error { return e.Err }
 
 // ProviderType is a CAPI provider category, spelled the way clusterctl names
 // component files (e.g. "control-plane" -> control-plane-components.yaml).
@@ -663,4 +736,12 @@ type DeleteClusterOptions struct {
 	// (clusterctl delete --all, keeping CRDs and namespaces) once the cluster
 	// is gone. Meant for a management cluster this resource initialised.
 	UninstallProviders bool
+}
+
+// Condition is one status condition of a Kubernetes object.
+type Condition struct {
+	Type    string
+	Status  string
+	Reason  string
+	Message string
 }

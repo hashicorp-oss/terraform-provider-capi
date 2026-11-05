@@ -1,5 +1,3 @@
-# Direct mode, the minimal `infrastructure = { docker = {} }` shape: no network,
-# no topology, no resource_config. Only known-provider defaults and wiring.
 ---
 apiVersion: cluster.x-k8s.io/v1beta2
 kind: Cluster
@@ -27,17 +25,6 @@ metadata:
   namespace: default
 spec: {}
 ---
-apiVersion: infrastructure.cluster.x-k8s.io/v1beta2
-kind: DockerMachineTemplate
-metadata:
-  labels:
-    cluster.x-k8s.io/cluster-name: dev
-  name: dev-control-plane-9e458ff9
-  namespace: default
-spec:
-  template:
-    spec: {}
----
 apiVersion: controlplane.cluster.x-k8s.io/v1beta2
 kind: KubeadmControlPlane
 metadata:
@@ -52,5 +39,5 @@ spec:
       infrastructureRef:
         apiGroup: infrastructure.cluster.x-k8s.io
         kind: DockerMachineTemplate
-        name: dev-control-plane-9e458ff9
+        name: dev-cp-aaaaaaaa
   version: v1.31.0

@@ -4,6 +4,7 @@
 package capi
 
 import (
+	"errors"
 	"testing"
 	"time"
 )
@@ -37,7 +38,6 @@ func TestCluster_Fields(t *testing.T) {
 
 func TestCreateClusterOptions_Fields(t *testing.T) {
 	cpCount := int64(3)
-	workerCount := int64(5)
 	opts := CreateClusterOptions{
 		Name:      "prod",
 		Namespace: "prod-ns",
@@ -46,8 +46,8 @@ func TestCreateClusterOptions_Fields(t *testing.T) {
 			ProviderTypeCore:           {{Type: ProviderTypeCore, Name: "cluster-api", Version: "v1.7.0"}},
 		},
 		KubernetesVersion:    "v1.31.0",
-		ControlPlane:         ControlPlaneTopology{Replicas: &cpCount},
-		MachineDeployments:   []MachineDeploymentTopology{{Name: "md-0", Replicas: &workerCount}},
+		Infrastructure:       InfrastructureSpec{Provider: "docker"},
+		ControlPlane:         ControlPlaneSpec{Provider: "kubeadm", Replicas: &cpCount, Template: &TemplateRef{Kind: "DockerMachineTemplate", Name: "cp"}},
 		ManagementKubeconfig: "/tmp/kubeconfig",
 		SkipInit:             false,
 		WaitForReady:         true,
@@ -57,11 +57,11 @@ func TestCreateClusterOptions_Fields(t *testing.T) {
 	if opts.Name != "prod" {
 		t.Error("name mismatch")
 	}
-	if *opts.ControlPlane.Replicas != 3 {
-		t.Errorf("cp count mismatch: got %d", *opts.ControlPlane.Replicas)
+	if *opts.ControlPlane.Replicas != 3 || opts.ControlPlane.Template.Name != "cp" {
+		t.Errorf("control plane mismatch: %+v", opts.ControlPlane)
 	}
-	if *opts.MachineDeployments[0].Replicas != 5 {
-		t.Errorf("worker count mismatch: got %d", *opts.MachineDeployments[0].Replicas)
+	if (&PhaseError{Phase: PhasePaused, Err: errors.New("boom")}).Error() != "boom (phase paused)" {
+		t.Error("PhaseError message")
 	}
 }
 

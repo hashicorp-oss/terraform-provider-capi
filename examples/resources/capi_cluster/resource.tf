@@ -1,26 +1,54 @@
+# A docker cluster on the management cluster the provider block names. Its
+# control-plane machine template is a resource of its own; node groups are
+# capi_machine_deployment resources.
+resource "capi_machine_template" "cp" {
+  name           = "my-cluster-cp"
+  infrastructure = "docker"
+  spec           = {}
+}
+
 resource "capi_cluster" "example" {
   name               = "my-cluster"
   kubernetes_version = "v1.31.0"
 
-  infrastructure = { docker = {} }
-  bootstrap      = { kubeadm = {} }
-  control_plane  = { kubeadm = {} }
+  infrastructure = { provider = "docker" }
 
-  topology = {
-    control_plane = { replicas = 1 }
-    workers = {
-      machine_deployments = [
-        { name = "md-0", replicas = 2 }
-      ]
-    }
+  control_plane = {
+    provider       = "kubeadm"
+    replicas       = 1
+    infrastructure = capi_machine_template.cp.ref
   }
 
-  wait = {
-    enabled = true
-    timeout = "30m"
-  }
+  wait = { timeout = "30m" }
+}
 
-  output = {
-    kubeconfig_path = "/tmp/my-cluster-kubeconfig"
+resource "capi_machine_template" "worker" {
+  name           = "my-cluster-worker"
+  infrastructure = "docker"
+  spec           = {}
+}
+
+resource "capi_bootstrap_template" "worker" {
+  name      = "my-cluster-worker"
+  bootstrap = "kubeadm"
+  spec      = {}
+}
+
+resource "capi_machine_deployment" "md_0" {
+  cluster  = capi_cluster.example.name
+  name     = "md-0"
+  replicas = 2
+  version  = "v1.31.0"
+  template = {
+    infrastructure = capi_machine_template.worker.ref
+    bootstrap      = capi_bootstrap_template.worker.ref
   }
+}
+
+# A cluster instantiating a ClusterClass.
+resource "capi_cluster" "classy" {
+  name               = "classy"
+  kubernetes_version = "v1.31.0"
+  class              = capi_cluster_class.main.ref
+  control_plane      = { replicas = 3 }
 }

@@ -1,6 +1,3 @@
-# Direct mode against a v1beta1-contract management cluster: legacy object
-# references (apiVersion + namespace) everywhere, and a control-plane endpoint
-# whose port defaults to 6443.
 ---
 apiVersion: cluster.x-k8s.io/v1beta1
 kind: Cluster
@@ -33,17 +30,6 @@ metadata:
   namespace: default
 spec: {}
 ---
-apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
-kind: DockerMachineTemplate
-metadata:
-  labels:
-    cluster.x-k8s.io/cluster-name: old
-  name: old-control-plane-9e458ff9
-  namespace: default
-spec:
-  template:
-    spec: {}
----
 apiVersion: controlplane.cluster.x-k8s.io/v1beta1
 kind: KubeadmControlPlane
 metadata:
@@ -57,62 +43,7 @@ spec:
     infrastructureRef:
       apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
       kind: DockerMachineTemplate
-      name: old-control-plane-9e458ff9
+      name: old-cp-bbbbbbbb
       namespace: default
-  version: v1.29.0
----
-apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
-kind: DockerMachineTemplate
-metadata:
-  labels:
-    cluster.x-k8s.io/cluster-name: old
-  name: old-md-0-9e458ff9
-  namespace: default
-spec:
-  template:
-    spec: {}
----
-apiVersion: bootstrap.cluster.x-k8s.io/v1beta1
-kind: KubeadmConfigTemplate
-metadata:
-  labels:
-    cluster.x-k8s.io/cluster-name: old
-  name: old-md-0-9e458ff9
-  namespace: default
-spec:
-  template:
-    spec: {}
----
-apiVersion: cluster.x-k8s.io/v1beta1
-kind: MachineDeployment
-metadata:
-  labels:
-    cluster.x-k8s.io/cluster-name: old
-  name: old-md-0
-  namespace: default
-spec:
-  clusterName: old
   replicas: 1
-  selector:
-    matchLabels:
-      cluster.x-k8s.io/cluster-name: old
-      cluster.x-k8s.io/deployment-name: old-md-0
-  template:
-    metadata:
-      labels:
-        cluster.x-k8s.io/cluster-name: old
-        cluster.x-k8s.io/deployment-name: old-md-0
-    spec:
-      bootstrap:
-        configRef:
-          apiVersion: bootstrap.cluster.x-k8s.io/v1beta1
-          kind: KubeadmConfigTemplate
-          name: old-md-0-9e458ff9
-          namespace: default
-      clusterName: old
-      infrastructureRef:
-        apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
-        kind: DockerMachineTemplate
-        name: old-md-0-9e458ff9
-        namespace: default
-      version: v1.29.0
+  version: v1.29.0

@@ -207,7 +207,7 @@ func TestManager_DeleteCluster_SelfManagedReversesThePivot(t *testing.T) {
 	)
 
 	spec := CreateClusterOptions{
-		Providers: tinkerbellProviders(), ClusterClass: true,
+		Providers: tinkerbellProviders(), Class: &ClassRef{Name: "test"},
 		BootstrapAddons:     AddonSet{Helm: []HelmRelease{{Name: "tinkerbell"}}},
 		ManagementManifests: [][]byte{[]byte("kind: ConfigMap\n")},
 		ManageInventory:     true, Inventory: inventoryTwoMachines(), BootstrapMachine: "cp-1",

@@ -162,8 +162,10 @@ func NewManager(opts ...ManagerOption) *Manager {
 func (m *Manager) CreateCluster(ctx context.Context, opts CreateClusterOptions) (*ClusterResult, error) {
 	m.logger.Printf("Starting cluster creation: %s", opts.Name)
 
-	if _, ok := opts.Providers.Infrastructure(); !ok {
-		return nil, fmt.Errorf("creating cluster %s: no infrastructure provider configured", opts.Name)
+	if opts.Class == nil && opts.Infrastructure.Provider == "" {
+		if _, ok := opts.Providers.Infrastructure(); !ok {
+			return nil, fmt.Errorf("creating cluster %s: no infrastructure provider configured", opts.Name)
+		}
 	}
 
 	// Determine the management cluster to use
@@ -171,8 +173,26 @@ func (m *Manager) CreateCluster(ctx context.Context, opts CreateClusterOptions) 
 	var bootstrapCluster *Cluster
 	needsBootstrap := opts.ManagementKubeconfig == ""
 
+	// The workflow's progress, reported to the caller and carried by every
+	// error so a failed run can be recorded and resumed.
+	phase := PhaseBootstrapping
+	advance := func(p Phase) {
+		phase = p
+		if opts.OnPhase != nil {
+			opts.OnPhase(p)
+		}
+	}
+	fail := func(err error) (*ClusterResult, error) {
+		if !opts.KeepBootstrapOnFailure {
+			m.cleanupOnError(ctx, bootstrapCluster)
+			return nil, &PhaseError{Phase: phase, Err: err}
+		}
+		return nil, &PhaseError{Phase: phase, Bootstrap: bootstrapCluster, Err: err}
+	}
+
 	// Step 1: Create or use existing management cluster
 	if needsBootstrap {
+		advance(PhaseBootstrapping)
 		m.logger.Printf("Creating bootstrap cluster for %s", opts.Name)
 		var err error
 		bootstrapCluster, err = m.bootstrapper.Create(ctx, BootstrapOptions{
@@ -181,7 +201,7 @@ func (m *Manager) CreateCluster(ctx context.Context, opts CreateClusterOptions) 
 			ProviderSecrets:   opts.ProviderSecrets,
 		})
 		if err != nil {
-			return nil, fmt.Errorf("creating bootstrap cluster: %w", err)
+			return fail(fmt.Errorf("creating bootstrap cluster: %w", err))
 		}
 		mgmtCluster = bootstrapCluster
 		m.logger.Printf("Bootstrap cluster created: %s (kubeconfig: %s)", bootstrapCluster.Name, bootstrapCluster.KubeconfigPath)
@@ -202,8 +222,7 @@ func (m *Manager) CreateCluster(ctx context.Context, opts CreateClusterOptions) 
 	}
 	if !opts.SkipInit {
 		if err := m.reconcileProviders(ctx, mgmtCluster, opts); err != nil {
-			m.cleanupOnError(ctx, bootstrapCluster)
-			return nil, err
+			return fail(err)
 		}
 	}
 
@@ -213,27 +232,26 @@ func (m *Manager) CreateCluster(ctx context.Context, opts CreateClusterOptions) 
 	// networking), uninstalled again before management moves away.
 	if needsBootstrap {
 		if err := m.installAddons(ctx, mgmtCluster, opts.BootstrapAddons); err != nil {
-			m.cleanupOnError(ctx, bootstrapCluster)
-			return nil, fmt.Errorf("installing bootstrap addons: %w", err)
+			return fail(fmt.Errorf("installing bootstrap addons: %w", err))
 		}
 	}
+	advance(PhaseInitialized)
 
 	// Step 3: Generate the cluster manifest from the installed provider CRDs
 	m.logger.Printf("Generating cluster manifest for %s", opts.Name)
 
 	manifest, err := m.generator.Generate(ctx, mgmtCluster, GenerateOptions{
-		ClusterName:        opts.Name,
-		Namespace:          namespace,
-		KubernetesVersion:  opts.KubernetesVersion,
-		Providers:          opts.Providers,
-		Network:            opts.Network,
-		ControlPlane:       opts.ControlPlane,
-		MachineDeployments: opts.MachineDeployments,
-		ClusterClass:       opts.ClusterClass,
+		ClusterName:       opts.Name,
+		Namespace:         namespace,
+		KubernetesVersion: opts.KubernetesVersion,
+		Providers:         opts.Providers,
+		Network:           opts.Network,
+		Infrastructure:    opts.Infrastructure,
+		ControlPlane:      opts.ControlPlane,
+		Class:             opts.Class,
 	})
 	if err != nil {
-		m.cleanupOnError(ctx, bootstrapCluster)
-		return nil, fmt.Errorf("generating cluster manifest: %w", err)
+		return fail(fmt.Errorf("generating cluster manifest: %w", err))
 	}
 
 	// Step 4a: the Tinkerbell inventory (Hardware, rufio Machine, BMC Secret)
@@ -241,8 +259,7 @@ func (m *Manager) CreateCluster(ctx context.Context, opts CreateClusterOptions) 
 	// and IPAM pools exist before the first Machine is created.
 	var preManifests [][]byte
 	if inventory, err := inventoryManifest(opts, namespace, false); err != nil {
-		m.cleanupOnError(ctx, bootstrapCluster)
-		return nil, fmt.Errorf("rendering inventory: %w", err)
+		return fail(fmt.Errorf("rendering inventory: %w", err))
 	} else if inventory != nil {
 		preManifests = append(preManifests, inventory)
 	}
@@ -252,16 +269,14 @@ func (m *Manager) CreateCluster(ctx context.Context, opts CreateClusterOptions) 
 			continue
 		}
 		if err := m.applier.Apply(ctx, mgmtCluster, pre); err != nil {
-			m.cleanupOnError(ctx, bootstrapCluster)
-			return nil, fmt.Errorf("applying pre-template manifest %d: %w", i, err)
+			return fail(fmt.Errorf("applying pre-template manifest %d: %w", i, err))
 		}
 	}
 
 	// Step 4: Apply the manifest to the management cluster
 	m.logger.Printf("Applying cluster manifest for %s", opts.Name)
 	if err := m.applier.Apply(ctx, mgmtCluster, manifest); err != nil {
-		m.cleanupOnError(ctx, bootstrapCluster)
-		return nil, fmt.Errorf("applying cluster manifest: %w", err)
+		return fail(fmt.Errorf("applying cluster manifest: %w", err))
 	}
 
 	result := &ClusterResult{
@@ -290,14 +305,13 @@ func (m *Manager) CreateCluster(ctx context.Context, opts CreateClusterOptions) 
 	case pivot:
 		m.logger.Printf("Waiting for cluster %s control plane to initialize", opts.Name)
 		if err := m.waiter.WaitForControlPlane(ctx, mgmtCluster, opts.Name, namespace, waitOpts); err != nil {
-			m.cleanupOnError(ctx, bootstrapCluster)
-			return nil, fmt.Errorf("waiting for control plane: %w", err)
+			return fail(fmt.Errorf("waiting for control plane: %w", err))
 		}
+		advance(PhaseControlPlaneInitialized)
 	case opts.WaitForReady:
 		m.logger.Printf("Waiting for cluster %s to become ready", opts.Name)
 		if err := m.waiter.WaitForClusterReady(ctx, mgmtCluster, opts.Name, namespace, waitOpts); err != nil {
-			m.cleanupOnError(ctx, bootstrapCluster)
-			return nil, fmt.Errorf("waiting for cluster readiness: %w", err)
+			return fail(fmt.Errorf("waiting for cluster readiness: %w", err))
 		}
 		m.logger.Printf("Cluster %s is ready", opts.Name)
 	}
@@ -310,16 +324,6 @@ func (m *Manager) CreateCluster(ctx context.Context, opts CreateClusterOptions) 
 	} else {
 		result.Kubeconfig = kubeconfig
 		result.Endpoint, result.CACertificate = kubeconfigEndpoint(kubeconfig)
-
-		// Write kubeconfig to disk if requested
-		if opts.KubeconfigOutputPath != "" {
-			retriever, ok := m.infoRetriever.(*ClusterctlInfoRetriever)
-			if ok {
-				if wErr := retriever.WriteKubeconfig(ctx, mgmtCluster, opts.Name, namespace, opts.KubeconfigOutputPath); wErr != nil {
-					m.logger.Printf("Warning: could not write kubeconfig to %s: %v", opts.KubeconfigOutputPath, wErr)
-				}
-			}
-		}
 	}
 
 	// Step 7: Self-managed pivot. This mirrors EKS Anywhere's
@@ -327,15 +331,13 @@ func (m *Manager) CreateCluster(ctx context.Context, opts CreateClusterOptions) 
 	// in between so at most one Tinkerbell answers DHCP at any time.
 	if pivot {
 		if kubeconfig == "" {
-			m.cleanupOnError(ctx, bootstrapCluster)
-			return nil, fmt.Errorf("pivoting CAPI management: no kubeconfig for cluster %s", opts.Name)
+			return fail(fmt.Errorf("pivoting CAPI management: no kubeconfig for cluster %s", opts.Name))
 		}
 		m.logger.Printf("Pivoting CAPI management to workload cluster %s", opts.Name)
 
 		workloadKubeconfigPath := filepath.Join(os.TempDir(), fmt.Sprintf("%s-workload-kubeconfig", opts.Name))
 		if err := os.WriteFile(workloadKubeconfigPath, []byte(kubeconfig), 0600); err != nil {
-			m.cleanupOnError(ctx, bootstrapCluster)
-			return nil, fmt.Errorf("writing workload kubeconfig: %w", err)
+			return fail(fmt.Errorf("writing workload kubeconfig: %w", err))
 		}
 		workloadCluster := &Cluster{
 			Name:           opts.Name,
@@ -348,9 +350,8 @@ func (m *Manager) CreateCluster(ctx context.Context, opts CreateClusterOptions) 
 		// Tinkerbell down, and wait for the workload's own addons (CAAPH
 		// installs them once the control plane is initialized) so its
 		// Tinkerbell is up before anything else needs provisioning.
-		if err := m.handOver(ctx, mgmtCluster, workloadCluster, opts, namespace, waitOpts); err != nil {
-			m.cleanupOnError(ctx, bootstrapCluster)
-			return nil, err
+		if err := m.handOver(ctx, mgmtCluster, workloadCluster, opts, namespace, waitOpts, advance); err != nil {
+			return fail(err)
 		}
 
 		// 7e: CAPI providers on the workload cluster, then the move. EKS
@@ -358,12 +359,10 @@ func (m *Manager) CreateCluster(ctx context.Context, opts CreateClusterOptions) 
 		// clusterctl resumes the Cluster on the target.
 		initOpts := InitOptions{Providers: opts.Providers, Variables: initVariables(opts)}
 		if err := m.installer.Init(ctx, workloadCluster, initOpts); err != nil {
-			m.cleanupOnError(ctx, bootstrapCluster)
-			return nil, fmt.Errorf("installing CAPI on workload cluster for pivot: %w", err)
+			return fail(fmt.Errorf("installing CAPI on workload cluster for pivot: %w", err))
 		}
 		if err := m.moveWithRetry(ctx, mgmtCluster, workloadCluster, MoveOptions{Namespace: namespace}); err != nil {
-			m.cleanupOnError(ctx, bootstrapCluster)
-			return nil, fmt.Errorf("moving CAPI management: %w", err)
+			return fail(fmt.Errorf("moving CAPI management: %w", err))
 		}
 
 		// 7f: what the move does not carry: the inventory (now including the
@@ -372,16 +371,14 @@ func (m *Manager) CreateCluster(ctx context.Context, opts CreateClusterOptions) 
 		// caller's management manifests.
 		var post [][]byte
 		if inventory, err := inventoryManifest(opts, namespace, true); err != nil {
-			m.cleanupOnError(ctx, bootstrapCluster)
-			return nil, fmt.Errorf("rendering inventory for the workload cluster: %w", err)
+			return fail(fmt.Errorf("rendering inventory for the workload cluster: %w", err))
 		} else if inventory != nil {
 			post = append(post, inventory)
 		}
 		post = append(post, opts.ManagementManifests...)
 		for i, manifest := range post {
 			if err := m.applier.Apply(ctx, workloadCluster, manifest); err != nil {
-				m.cleanupOnError(ctx, bootstrapCluster)
-				return nil, fmt.Errorf("applying post-move manifest %d to the workload cluster: %w", i, err)
+				return fail(fmt.Errorf("applying post-move manifest %d to the workload cluster: %w", i, err))
 			}
 		}
 
@@ -407,25 +404,33 @@ func (m *Manager) CreateCluster(ctx context.Context, opts CreateClusterOptions) 
 		if secrets := m.rootSecrets(ctx, workloadCluster, opts.Name, namespace); len(secrets) > 0 {
 			result.ProviderSecrets = secrets
 		}
+		advance(PhasePivoted)
 
-		// Phase two: full readiness on the new management cluster.
+		// Phase two: full readiness on the new management cluster. The
+		// bootstrap cluster is gone, so a failure here leaves nothing to
+		// clean up and the next run resumes against the cluster itself.
 		if opts.WaitForReady {
 			m.logger.Printf("Waiting for cluster %s to become ready", opts.Name)
 			if err := m.waiter.WaitForClusterReady(ctx, workloadCluster, opts.Name, namespace, waitOpts); err != nil {
-				return nil, fmt.Errorf("waiting for cluster readiness after the pivot: %w", err)
+				return nil, &PhaseError{Phase: phase, Bootstrap: result.BootstrapCluster, Err: fmt.Errorf("waiting for cluster readiness after the pivot: %w", err)}
 			}
 			m.logger.Printf("Cluster %s is ready", opts.Name)
 		}
 	}
 
-	// Step 9: Get cluster description
+	// Step 9: Get cluster description and conditions
 	description, err := m.describer.Describe(ctx, mgmtCluster, opts.Name, namespace)
 	if err != nil {
 		m.logger.Printf("Warning: could not describe cluster: %v", err)
 	} else {
 		result.ClusterDescription = description
 	}
+	if obj, err := m.applier.Get(ctx, mgmtCluster, opts.Name, namespace); err == nil {
+		result.Conditions = ClusterConditions(obj)
+	}
 
+	advance(PhaseReady)
+	result.Phase = PhaseReady
 	m.logger.Printf("Cluster %s creation completed successfully", opts.Name)
 	return result, nil
 }
@@ -681,8 +686,32 @@ func (m *Manager) GetClusterInfo(ctx context.Context, mgmtKubeconfig, clusterNam
 	} else {
 		result.ClusterDescription = description
 	}
+	result.Conditions = ClusterConditions(obj)
+	result.Phase = PhaseReady
 
 	return result, nil
+}
+
+// ClusterConditions flattens an object's status.conditions.
+func ClusterConditions(obj *unstructured.Unstructured) []Condition {
+	if obj == nil {
+		return nil
+	}
+	raw, _, _ := unstructured.NestedSlice(obj.Object, "status", "conditions")
+	out := make([]Condition, 0, len(raw))
+	for _, c := range raw {
+		m, ok := c.(map[string]any)
+		if !ok {
+			continue
+		}
+		cond := Condition{}
+		cond.Type, _, _ = unstructured.NestedString(m, "type")
+		cond.Status, _, _ = unstructured.NestedString(m, "status")
+		cond.Reason, _, _ = unstructured.NestedString(m, "reason")
+		cond.Message, _, _ = unstructured.NestedString(m, "message")
+		out = append(out, cond)
+	}
+	return out
 }
 
 // kubeconfigEndpoint returns the API server URL and the PEM CA certificate
@@ -733,7 +762,7 @@ func controlPlaneEndpoint(obj *unstructured.Unstructured) string {
 // drain, the bootstrap addons are uninstalled, and the workload cluster's
 // own addons, declared as CAAPH HelmChartProxies on the bootstrap cluster,
 // are waited for. From here the workload Tinkerbell is the only responder.
-func (m *Manager) handOver(ctx context.Context, bootstrap, workload *Cluster, opts CreateClusterOptions, namespace string, waitOpts WaitOptions) error {
+func (m *Manager) handOver(ctx context.Context, bootstrap, workload *Cluster, opts CreateClusterOptions, namespace string, waitOpts WaitOptions, advance func(Phase)) error {
 	m.logger.Printf("Pausing cluster %s for the handover", opts.Name)
 	if err := m.applier.Pause(ctx, bootstrap, opts.Name, namespace); err != nil {
 		return fmt.Errorf("pausing cluster %s before the move: %w", opts.Name, err)
@@ -741,6 +770,7 @@ func (m *Manager) handOver(ctx context.Context, bootstrap, workload *Cluster, op
 	if err := m.quiescer.WaitForQuiescence(ctx, bootstrap, namespace, waitOpts); err != nil {
 		return fmt.Errorf("waiting for provisioning to go idle before the move: %w", err)
 	}
+	advance(PhasePaused)
 	if !opts.BootstrapAddons.Empty() {
 		m.logger.Printf("Uninstalling the bootstrap addons from %s", bootstrap.Name)
 		if m.addons == nil {
@@ -754,6 +784,7 @@ func (m *Manager) handOver(ctx context.Context, bootstrap, workload *Cluster, op
 	if err := m.waiter.WaitForAddons(ctx, bootstrap, opts.Name, namespace, waitOpts); err != nil {
 		return fmt.Errorf("waiting for the workload cluster's addons before the move: %w", err)
 	}
+	advance(PhaseHandedOver)
 	return nil
 }
 
@@ -791,8 +822,15 @@ func (m *Manager) rootSecrets(ctx context.Context, cluster *Cluster, name, names
 // left out rather than offered to CAPT until afterPivot, when it is a normal
 // netboot target.
 func inventoryManifest(opts CreateClusterOptions, namespace string, afterPivot bool) ([]byte, error) {
-	infra, ok := opts.Providers.Infrastructure()
-	if !opts.ManageInventory || !ok || !strings.EqualFold(infra.Name, "tinkerbell") || len(opts.Inventory) == 0 {
+	infra := opts.Infrastructure.Provider
+	if infra == "" {
+		if p, ok := opts.Providers.Infrastructure(); ok {
+			infra = p.Name
+		}
+	}
+	// Only Tinkerbell has an inventory; a class cluster that names no
+	// provider is given the benefit of the doubt.
+	if !opts.ManageInventory || len(opts.Inventory) == 0 || (infra != "" && !strings.EqualFold(infra, "tinkerbell")) {
 		return nil, nil
 	}
 	inv := InventoryOptions{Namespace: namespace, ClusterName: opts.Name}
@@ -825,7 +863,7 @@ func (m *Manager) installAddons(ctx context.Context, cluster *Cluster, set Addon
 // CLUSTER_TOPOLOGY=true when a ClusterClass is generated, since the gate is
 // off by default in cluster-api.
 func initVariables(opts CreateClusterOptions) map[string]string {
-	if !opts.ClusterClass {
+	if opts.Class == nil {
 		return opts.Variables
 	}
 	vars := make(map[string]string, len(opts.Variables)+1)

@@ -11,7 +11,6 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"time"
 
@@ -24,6 +23,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/boolplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/dynamicplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64default"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/listdefault"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/mapplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/objectplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
@@ -43,6 +43,8 @@ import (
 var _ resource.Resource = &ClusterResource{}
 var _ resource.ResourceWithImportState = &ClusterResource{}
 var _ resource.ResourceWithUpgradeState = &ClusterResource{}
+var _ resource.ResourceWithModifyPlan = &ClusterResource{}
+var _ resource.ResourceWithValidateConfig = &ClusterResource{}
 
 func NewClusterResource() resource.Resource {
 	return &ClusterResource{}
@@ -58,13 +60,21 @@ func (r *ClusterResource) Metadata(ctx context.Context, req resource.MetadataReq
 	resp.TypeName = req.ProviderTypeName + "_cluster"
 }
 
+// Defaults the schema applies.
+const (
+	defaultWaitTimeout       = "60m"
+	defaultWaitCondition     = "Available"
+	onFailureResume          = "resume"
+	onFailureFail            = "fail"
+	defaultDerivedCredential = time.Hour
+)
+
 func (r *ClusterResource) Schema(ctx context.Context, req resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		Version:             4,
-		MarkdownDescription: "Manages a Cluster API cluster using the CAPI management workflow (bootstrap -> init -> apply -> wait -> move).",
+		Version:             5,
+		MarkdownDescription: "A Cluster API cluster, the way `aws_eks_cluster` is an EKS cluster: identity, version, network, the control plane, and, for a cluster that manages itself, the create-only bootstrap that stands it up. On the management cluster the provider block names, create applies the `Cluster`, the `<Infra>Cluster` and the `<CP>ControlPlane` (or a `Cluster` with a topology on `class`) and waits. With `management.self_managed`, create runs the pivot: a bootstrap cluster (kind on the runner, or a disposable Kairos live node), `management.providers`, the seed `inventory` and `manifests.management`, the first control plane, the Tinkerbell handover, `clusterctl move`, and the bootstrap's teardown; progress is recorded in `status.phase` and a failed run resumes from it. Node groups are `capi_machine_deployment`, templates `capi_machine_template`, addons `capi_helm_chart_proxy` and `capi_cluster_resource_set`, machines `capi_hardware`. Import with `[namespace/]name`.",
 
 		Attributes: map[string]schema.Attribute{
-			// --- Top-level identity attributes ---
 			"name": schema.StringAttribute{
 				MarkdownDescription: "The name of the cluster. Must be a valid DNS-1123 subdomain.",
 				Required:            true,
@@ -72,18 +82,16 @@ func (r *ClusterResource) Schema(ctx context.Context, req resource.SchemaRequest
 					stringplanmodifier.RequiresReplace(),
 				},
 			},
-			"kubernetes_version": schema.StringAttribute{
-				MarkdownDescription: "Kubernetes version for the workload cluster (e.g., `v1.31.0`).",
-				Optional:            true,
-			},
-			"cluster_class": schema.BoolAttribute{
-				MarkdownDescription: "Generate a `ClusterClass` and a `Cluster` with `spec.topology` instead of direct objects. Every provider must ship `*Template` kinds; the `ClusterTopology` feature gate is enabled at init. Default `false`.",
+			"namespace": schema.StringAttribute{
+				MarkdownDescription: "Namespace on the management cluster where the cluster's objects live. Default `default`.",
 				Optional:            true,
 				Computed:            true,
-				Default:             booldefault.StaticBool(false),
-				PlanModifiers: []planmodifier.Bool{
-					boolplanmodifier.RequiresReplace(),
-				},
+				Default:             stringdefault.StaticString("default"),
+				PlanModifiers:       []planmodifier.String{stringplanmodifier.RequiresReplace()},
+			},
+			"kubernetes_version": schema.StringAttribute{
+				MarkdownDescription: "Kubernetes version of the cluster (`v1.34.0`): the control plane's `version`, or `spec.topology.version` with a class, where it is required. Changed in place.",
+				Optional:            true,
 			},
 			"network": schema.SingleNestedAttribute{
 				MarkdownDescription: "Cluster networking, as in `Cluster.spec.clusterNetwork` and `Cluster.spec.controlPlaneEndpoint`. Omit for providers that fill the endpoint themselves (e.g. Docker).",
@@ -126,11 +134,61 @@ func (r *ClusterResource) Schema(ctx context.Context, req resource.SchemaRequest
 						},
 					},
 					"service_domain": schema.StringAttribute{
-						MarkdownDescription: "Cluster DNS domain (`clusterNetwork.serviceDomain`), e.g. `cluster.local`.",
+						MarkdownDescription: "Cluster DNS domain (`clusterNetwork.serviceDomain`).",
 						Optional:            true,
 					},
 				},
 			},
+
+			// --- direct mode: the infrastructure object and the control plane ---
+			"infrastructure": schema.SingleNestedAttribute{
+				MarkdownDescription: "The cluster's `<Infra>Cluster` (direct mode; exclusive with `class`). The kind comes from the provider's CRDs.",
+				Optional:            true,
+				Attributes: map[string]schema.Attribute{
+					"provider": schema.StringAttribute{
+						MarkdownDescription: "Infrastructure provider name as clusterctl knows it (`tinkerbell`, `docker`). Changing it replaces the cluster.",
+						Required:            true,
+						PlanModifiers:       []planmodifier.String{stringplanmodifier.RequiresReplace()},
+					},
+					"spec": schema.DynamicAttribute{
+						MarkdownDescription: "The `<Infra>Cluster` spec as an object with the CRD's camelCase keys (Tinkerbell `templateInline`), merged over the provider's defaults and, for a self-managed cluster, over `management.providers.infrastructure.<name>.resource_config` (RFC 7396: nested maps merge, lists and scalars replace, `null` deletes). Applied in place.",
+						Optional:            true,
+					},
+				},
+			},
+			"control_plane": schema.SingleNestedAttribute{
+				MarkdownDescription: "The control plane. With a `class` only `replicas` applies; otherwise `provider` and `infrastructure` are required and the `<CP>ControlPlane` is rendered from them.",
+				Optional:            true,
+				Attributes: map[string]schema.Attribute{
+					"provider": schema.StringAttribute{
+						MarkdownDescription: "Control-plane provider name (`talos`, `kubeadm`). Changing it replaces the cluster.",
+						Optional:            true,
+						PlanModifiers:       []planmodifier.String{stringplanmodifier.RequiresReplace()},
+					},
+					"replicas": schema.Int64Attribute{
+						MarkdownDescription: "Number of control plane machines. Use an odd number for HA (1, 3, 5). Scaled in place.",
+						Optional:            true,
+					},
+					"infrastructure": templateRefOptional("The control-plane machines' `<Infra>MachineTemplate`, as a `capi_machine_template` ref. A new revision rolls the control plane. Exclusive with `machine_spec`."),
+					"machine_spec": schema.DynamicAttribute{
+						MarkdownDescription: "The control-plane `<Infra>MachineTemplate` spec (Tinkerbell `hardwareAffinity`) as an object with the CRD's camelCase keys, for a cluster that renders its own template: a self-managed cluster, whose CRDs exist only once it is bootstrapped, so a `capi_machine_template` cannot precede it. The template is named `<name>-control-plane-<hash of the spec>`; a change is a new template and a control-plane rollout. Exclusive with `infrastructure`.",
+						Optional:            true,
+					},
+					"spec": schema.DynamicAttribute{
+						MarkdownDescription: "The `<CP>ControlPlane` spec as an object with the CRD's camelCase keys (Talos `controlPlaneConfig`, kubeadm `kubeadmConfigSpec`), merged over the provider's defaults and `management.providers.control_plane.<name>.resource_config`. `version`, `replicas` and the machine template ref are set by the provider. Applied in place.",
+						Optional:            true,
+					},
+				},
+			},
+			"class": schema.SingleNestedAttribute{
+				MarkdownDescription: "Topology mode: the ClusterClass the cluster instantiates, as a `capi_cluster_class` ref (exclusive with `infrastructure`). `kubernetes_version` is required. Switching between a class and a direct control plane replaces the cluster.",
+				Optional:            true,
+				Attributes: map[string]schema.Attribute{
+					"name":      schema.StringAttribute{MarkdownDescription: "ClusterClass name.", Required: true},
+					"namespace": schema.StringAttribute{MarkdownDescription: "ClusterClass namespace, when not the cluster's.", Optional: true},
+				},
+			},
+
 			"id": schema.StringAttribute{
 				Computed:            true,
 				MarkdownDescription: "Cluster identifier.",
@@ -139,7 +197,7 @@ func (r *ClusterResource) Schema(ctx context.Context, req resource.SchemaRequest
 				},
 			},
 			"provider_secrets": schema.DynamicAttribute{
-				MarkdownDescription: "Opaque, provider-specific secrets persisted so later operations can recognize and manage what this provider created — for the Talos bootstrapper, the machine-secrets bundle keyed by provider. Computed and sensitive; never set by practitioners.",
+				MarkdownDescription: "The root credential of a self-managed cluster, captured after the pivot (the Talos machine-secrets bundle, or the kubeadm CA): what later runs derive their connection from, and what `ephemeral.capi_kubeconfig` takes as `secrets`. Computed and sensitive; never set by practitioners.",
 				Computed:            true,
 				Sensitive:           true,
 				PlanModifiers: []planmodifier.Dynamic{
@@ -149,31 +207,12 @@ func (r *ClusterResource) Schema(ctx context.Context, req resource.SchemaRequest
 
 			// --- management ---
 			"management": schema.SingleNestedAttribute{
-				MarkdownDescription: "Management cluster configuration. Controls how the CAPI lifecycle is managed.",
+				MarkdownDescription: "How the cluster is managed. Leave it out for a cluster on the management cluster the provider block names (its providers are `capi_provider` resources). Set `self_managed` for a cluster that becomes its own management cluster: everything under `bootstrap` and `providers` is used at create and never diffed afterwards.",
 				Optional:            true,
 				Computed:            true,
 				Attributes: map[string]schema.Attribute{
-					"kubeconfig": schema.StringAttribute{
-						MarkdownDescription: "Path to the kubeconfig for an existing management cluster. If not provided, a bootstrap cluster (kind) is created automatically.",
-						Optional:            true,
-						PlanModifiers: []planmodifier.String{
-							stringplanmodifier.RequiresReplace(),
-						},
-					},
-					"skip_init": schema.BoolAttribute{
-						MarkdownDescription: "Skip running clusterctl init on the management cluster. Use when CAPI providers are already installed and managed elsewhere: the provider maps are then never installed, upgraded or deleted by this resource.",
-						Optional:            true,
-						Computed:            true,
-						Default:             booldefault.StaticBool(false),
-					},
-					"uninstall": schema.BoolAttribute{
-						MarkdownDescription: "On destroy, remove every CAPI provider from the management cluster once the cluster is gone (`clusterctl delete --all`, keeping CRDs and namespaces). Only for a management cluster given by `kubeconfig` that this resource initialised (`skip_init = false`); a bootstrap or self-managed cluster is deleted anyway. Leave unset when the management cluster is shared.",
-						Optional:            true,
-						Computed:            true,
-						Default:             booldefault.StaticBool(false),
-					},
 					"self_managed": schema.BoolAttribute{
-						MarkdownDescription: "Pivot CAPI management from bootstrap to workload cluster (clusterctl move). Required `true` for Tinkerbell provider.",
+						MarkdownDescription: "Stand the cluster up through a bootstrap cluster and pivot CAPI management into it (`clusterctl move`). Required for Tinkerbell. Immutable.",
 						Optional:            true,
 						Computed:            true,
 						Default:             booldefault.StaticBool(false),
@@ -181,21 +220,21 @@ func (r *ClusterResource) Schema(ctx context.Context, req resource.SchemaRequest
 							boolplanmodifier.RequiresReplace(),
 						},
 					},
-					"namespace": schema.StringAttribute{
-						MarkdownDescription: "Namespace on the management cluster where CAPI resources are created.",
+					"providers": schema.SingleNestedAttribute{
+						MarkdownDescription: "The CAPI providers of a self-managed cluster, installed on the bootstrap cluster and again on the cluster before the move (`clusterctl init`), keyed by provider name per type. Changes after create are applied in place (`clusterctl upgrade apply`, init, delete). On an external management cluster use `capi_provider` instead.",
 						Optional:            true,
-						Computed:            true,
-						PlanModifiers: []planmodifier.String{
-							// Keep the computed value across updates; without this it
-							// recomputes to unknown on any in-place change and, being
-							// RequiresReplace, forces a spurious full rebuild.
-							stringplanmodifier.UseStateForUnknown(),
-							stringplanmodifier.RequiresReplace(),
+						Attributes: map[string]schema.Attribute{
+							"core":           providerMapAttribute("Core CAPI provider, keyed by name (`cluster-api`). Omit to let clusterctl install the default.", providerMapPinned),
+							"infrastructure": providerMapAttribute("Infrastructure provider, keyed by name (`docker`, `tinkerbell`). Exactly one entry; it is the cluster's `infrastructure.provider` by default.", providerMapStructural),
+							"bootstrap":      providerMapAttribute("Bootstrap providers, keyed by name (`kubeadm`, `talos`).", providerMapStructural),
+							"control_plane":  providerMapAttribute("Control plane providers, keyed by name (`kubeadm`, `talos`).", providerMapStructural),
+							"ipam":           providerMapAttribute("IPAM providers, keyed by name (`in-cluster`, `unifi`).", providerMapConverged),
+							"addon":          providerMapAttribute("Addon providers, keyed by name (`helm`). An empty object installs the default release.", providerMapConverged),
 						},
 					},
 
 					"bootstrap": schema.SingleNestedAttribute{
-						MarkdownDescription: "Transient bootstrap cluster configuration, used once at create. `type = \"kind\"` (default) creates a kind cluster on the machine running Terraform. `type = \"kairos\"` boots one `inventory.machine` entry from a user-built Kairos live ISO that runs k3s from RAM (see `kairos`); nothing is written to its disk, and after the self-managed pivot it is powered off and provisioned by CAPT as an ordinary cluster member. Nothing about the bootstrap cluster is kept in state.",
+						MarkdownDescription: "Transient bootstrap cluster configuration, used once at create. `type = \"kind\"` (default) creates a kind cluster on the machine running Terraform. `type = \"kairos\"` boots one `inventory.machine` entry from a user-built Kairos live ISO that runs k3s from RAM (see `kairos`); nothing is written to its disk, and after the self-managed pivot it is powered off and provisioned by CAPT as an ordinary cluster member. Nothing about the bootstrap cluster is kept in state beyond `status.bootstrap_cluster` while it is in use.",
 						Optional:            true,
 						PlanModifiers: []planmodifier.Object{
 							objectplanmodifier.RequiresReplace(),
@@ -210,6 +249,12 @@ func (r *ClusterResource) Schema(ctx context.Context, req resource.SchemaRequest
 							"machine": schema.StringAttribute{
 								MarkdownDescription: "Hostname of the `inventory.machine` entry to boot the live image on. Its `bmc` and `network.ip_address` are used; a live node writes nothing to disk and needs no `disk`. Required when `type = \"kairos\"`.",
 								Optional:            true,
+							},
+							"on_failure": schema.StringAttribute{
+								MarkdownDescription: "What a failed create does. `resume` (default): the resource is saved with the phase reached in `status.phase` and the error in `status.error`, nothing is torn down, and the next apply continues from there; `destroy` tears everything down at any phase. `fail`: the apply fails, Terraform taints the resource, and the next apply replaces it (destroy, then create from scratch). `resume` is for an operator at the keyboard with hardware that takes long to come up; `fail` is for CI.",
+								Optional:            true,
+								Computed:            true,
+								Default:             stringdefault.StaticString(onFailureResume),
 							},
 							"boot": schema.SingleNestedAttribute{
 								MarkdownDescription: "How the node is booted into the live image.",
@@ -288,89 +333,13 @@ func (r *ClusterResource) Schema(ctx context.Context, req resource.SchemaRequest
 				},
 			},
 
-			// --- providers (cluster-api-operator style maps keyed by provider name) ---
-			"core":           providerMapAttribute("Core CAPI provider, keyed by name (`cluster-api`). Omit to let clusterctl install the default.", false, providerMapPinned),
-			"infrastructure": providerMapAttribute("Infrastructure provider, keyed by name (e.g. `docker`, `tinkerbell`). Exactly one entry is required; with `control_plane` and `bootstrap` (default `kubeadm`) it selects the kinds of the generated cluster objects.", true, providerMapStructural),
-			"bootstrap":      providerMapAttribute("Bootstrap providers, keyed by name (e.g. `kubeadm`, `talos`).", false, providerMapStructural),
-			"control_plane":  providerMapAttribute("Control plane providers, keyed by name (e.g. `kubeadm`, `talos`).", false, providerMapStructural),
-			"ipam":           providerMapAttribute("IPAM providers, keyed by name (e.g. `in-cluster`, `unifi`).", false, providerMapConverged),
-			"addon":          providerMapAttribute("Addon providers, keyed by name (e.g. `helm`). An empty object installs the default release.", false, providerMapConverged),
-
-			// --- topology ---
-			"topology": schema.SingleNestedAttribute{
-				MarkdownDescription: "Workload cluster topology. Mirrors `Cluster.spec.topology`.",
-				Optional:            true,
-				Attributes: map[string]schema.Attribute{
-					"control_plane": schema.SingleNestedAttribute{
-						MarkdownDescription: "Control plane topology.",
-						Optional:            true,
-						Attributes: map[string]schema.Attribute{
-							"replicas": schema.Int64Attribute{
-								MarkdownDescription: "Number of control plane machines. Use an odd number for HA (1, 3, 5).",
-								Optional:            true,
-							},
-							"infrastructure": schema.StringAttribute{
-								MarkdownDescription: "Spec of the control plane's `<Infra>MachineTemplate` (e.g. Tinkerbell `hardwareAffinity`) as YAML or JSON with the CRD's camelCase keys, typically `yamlencode({ ... })`. A change creates a new template and rolls the control plane.",
-								Optional:            true,
-							},
-						},
-					},
-					"workers": schema.SingleNestedAttribute{
-						MarkdownDescription: "Worker topology.",
-						Optional:            true,
-						Attributes: map[string]schema.Attribute{
-							"machine_deployments": schema.ListNestedAttribute{
-								MarkdownDescription: "Worker MachineDeployments, as in `Cluster.spec.topology.workers.machineDeployments`. Each entry becomes a MachineDeployment with its own machine and bootstrap config templates (or, with `cluster_class`, a worker class and a topology entry).",
-								Optional:            true,
-								NestedObject: schema.NestedAttributeObject{
-									Attributes: map[string]schema.Attribute{
-										"name": schema.StringAttribute{
-											MarkdownDescription: "MachineDeployment name. Must be unique within the cluster.",
-											Required:            true,
-										},
-										"class": schema.StringAttribute{
-											MarkdownDescription: "Worker class name, used with `cluster_class`: deployments sharing a class share templates and must agree on `infrastructure` and `bootstrap`. Defaults to `name`.",
-											Optional:            true,
-										},
-										"infrastructure": schema.StringAttribute{
-											MarkdownDescription: "Spec of this deployment's `<Infra>MachineTemplate` as YAML or JSON with the CRD's camelCase keys, typically `yamlencode({ ... })`. A change creates a new template and rolls the deployment.",
-											Optional:            true,
-										},
-										"bootstrap": schema.StringAttribute{
-											MarkdownDescription: "Spec of this deployment's `<Bootstrap>ConfigTemplate` as YAML or JSON. Omit to use `bootstrap.<name>.resource_config`.",
-											Optional:            true,
-										},
-										"replicas": schema.Int64Attribute{
-											MarkdownDescription: "Number of machines.",
-											Optional:            true,
-										},
-										"failure_domain": schema.StringAttribute{
-											MarkdownDescription: "Failure domain the machines are placed in.",
-											Optional:            true,
-										},
-										"metadata": schema.SingleNestedAttribute{
-											MarkdownDescription: "Labels and annotations applied to the machines.",
-											Optional:            true,
-											Attributes: map[string]schema.Attribute{
-												"labels":      schema.MapAttribute{ElementType: types.StringType, Optional: true, MarkdownDescription: "Machine labels."},
-												"annotations": schema.MapAttribute{ElementType: types.StringType, Optional: true, MarkdownDescription: "Machine annotations."},
-											},
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-
 			// --- manifests ---
 			"manifests": schema.SingleNestedAttribute{
 				MarkdownDescription: "Raw Kubernetes manifests the provider applies for you.",
 				Optional:            true,
 				Attributes: map[string]schema.Attribute{
 					"management": schema.ListAttribute{
-						MarkdownDescription: "Multi-document YAML strings applied to the management cluster after the providers are initialized and before the generated cluster objects: IPAM pools and their credentials, extra Secrets, anything the cluster objects reference. Applied with server-side apply on every create and update, and again on the workload cluster after a self-managed pivot. With a pivot this is also where the workload cluster's addons go, as CAAPH `HelmChartProxy` and `ClusterResourceSet` objects (the `helm` addon provider installs CAAPH): CAAPH brings them up on the workload cluster as soon as its control plane is initialized, and the pivot waits for them before management moves.",
+						MarkdownDescription: "Multi-document YAML strings applied to the management cluster before the cluster objects: IPAM pools and their credentials, extra Secrets, anything the cluster objects reference. Applied with server-side apply on every create and update, and again on the workload cluster after a self-managed pivot. With a pivot this is also where the workload cluster's addons go, as CAAPH `HelmChartProxy` and `ClusterResourceSet` objects (the `helm` addon provider installs CAAPH): CAAPH brings them up on the workload cluster as soon as its control plane is initialized, and the pivot waits for them before management moves. On an external management cluster, prefer `capi_helm_chart_proxy` and `capi_cluster_resource_set`.",
 						ElementType:         types.StringType,
 						Optional:            true,
 					},
@@ -379,7 +348,7 @@ func (r *ClusterResource) Schema(ctx context.Context, req resource.SchemaRequest
 
 			// --- inventory ---
 			"inventory": schema.SingleNestedAttribute{
-				MarkdownDescription: "Hardware inventory for bare-metal provisioning. With the `tinkerbell` infrastructure provider each machine becomes a Tinkerbell Hardware, a rufio Machine and a BMC credentials Secret in the cluster namespace, applied before the generated cluster objects so CAPT can claim them. The `management.bootstrap.machine` entry is left out while it hosts the bootstrap cluster and registered as a netboot target after the pivot.",
+				MarkdownDescription: "The seed hardware inventory of a self-managed Tinkerbell cluster: each machine becomes a Tinkerbell Hardware, a rufio Machine and a BMC credentials Secret in the cluster namespace, applied to the bootstrap cluster before the cluster objects and again to the cluster after the pivot. The `management.bootstrap.machine` entry is left out while it hosts the bootstrap cluster and registered as a netboot target after the pivot. Machines added later are `capi_hardware` resources.",
 				Optional:            true,
 				Attributes: map[string]schema.Attribute{
 					"manage": schema.BoolAttribute{
@@ -442,34 +411,22 @@ func (r *ClusterResource) Schema(ctx context.Context, req resource.SchemaRequest
 
 			// --- wait ---
 			"wait": schema.SingleNestedAttribute{
-				MarkdownDescription: "Readiness wait configuration.",
+				MarkdownDescription: "What to wait for after an apply.",
 				Optional:            true,
 				Computed:            true,
 				Attributes: map[string]schema.Attribute{
-					"enabled": schema.BoolAttribute{
-						MarkdownDescription: "Wait for readiness.",
+					"conditions": schema.ListAttribute{
+						MarkdownDescription: "Cluster conditions that must be True (`Available` is `Ready` on the legacy contract; `ControlPlaneInitialized`, `InfrastructureReady`, ...). Default `[\"Available\"]`; an empty list waits for nothing. A self-managed create always waits for the control plane before the pivot.",
+						ElementType:         types.StringType,
 						Optional:            true,
 						Computed:            true,
-						Default:             booldefault.StaticBool(true),
+						Default:             listdefault.StaticValue(types.ListValueMust(types.StringType, []attr.Value{types.StringValue(defaultWaitCondition)})),
 					},
 					"timeout": schema.StringAttribute{
-						MarkdownDescription: "Max wait time (Go duration, e.g., `30m`). Default: `30m`.",
+						MarkdownDescription: "Max wait time, as a Go duration. Default `60m`.",
 						Optional:            true,
 						Computed:            true,
-					},
-				},
-			},
-
-			// --- output ---
-			"output": schema.SingleNestedAttribute{
-				MarkdownDescription: "Output configuration.",
-				Optional:            true,
-				Computed:            true,
-				Attributes: map[string]schema.Attribute{
-					"kubeconfig_path": schema.StringAttribute{
-						MarkdownDescription: "File path for the workload cluster kubeconfig.",
-						Optional:            true,
-						Computed:            true,
+						Default:             stringdefault.StaticString(defaultWaitTimeout),
 					},
 				},
 			},
@@ -479,20 +436,30 @@ func (r *ClusterResource) Schema(ctx context.Context, req resource.SchemaRequest
 				MarkdownDescription: "Computed cluster status.",
 				Computed:            true,
 				Attributes: map[string]schema.Attribute{
-					"endpoint":          schema.StringAttribute{Computed: true, MarkdownDescription: "API server endpoint."},
-					"kubeconfig":        schema.StringAttribute{Computed: true, Sensitive: true, MarkdownDescription: "Kubeconfig content."},
+					"phase":             schema.StringAttribute{Computed: true, MarkdownDescription: "How far the create workflow came: `bootstrapping`, `initialized`, `control_plane_initialized`, `paused`, `handed_over`, `pivoted`, `ready`. Anything but `ready` is resumed by the next apply."},
+					"error":             schema.StringAttribute{Computed: true, MarkdownDescription: "The error that stopped the last create, when `status.phase` is not `ready`."},
+					"endpoint":          schema.StringAttribute{Computed: true, MarkdownDescription: "API server URL."},
 					"ca_certificate":    schema.StringAttribute{Computed: true, Sensitive: true, MarkdownDescription: "CA certificate (PEM)."},
-					"description":       schema.StringAttribute{Computed: true, MarkdownDescription: "Cluster description."},
-					"bootstrap_cluster": schema.StringAttribute{Computed: true, MarkdownDescription: "Bootstrap cluster name."},
+					"description":       schema.StringAttribute{Computed: true, MarkdownDescription: "The cluster's object tree with conditions, as `clusterctl describe` renders it."},
+					"bootstrap_cluster": schema.StringAttribute{Computed: true, MarkdownDescription: "Name of the bootstrap cluster while it is in use (a self-managed create that has not pivoted yet)."},
+					"conditions": schema.ListNestedAttribute{
+						MarkdownDescription: "The Cluster's conditions.",
+						Computed:            true,
+						NestedObject: schema.NestedAttributeObject{
+							Attributes: map[string]schema.Attribute{
+								"type":    schema.StringAttribute{Computed: true},
+								"status":  schema.StringAttribute{Computed: true},
+								"reason":  schema.StringAttribute{Computed: true},
+								"message": schema.StringAttribute{Computed: true},
+							},
+						},
+					},
 				},
 			},
 		},
 	}
 }
 
-// providerMapAttribute builds one of the six provider maps. Every map shares
-// providerNestedObject. Providers are installed once by clusterctl init, so
-// any change other than resource_config recreates the cluster.
 // providerMapLifecycle is how a provider map reacts to entries coming and going.
 type providerMapLifecycle int
 
@@ -506,8 +473,10 @@ const (
 	providerMapPinned
 )
 
-func providerMapAttribute(desc string, required bool, lifecycle providerMapLifecycle) schema.MapNestedAttribute {
-	const owned = " Entries are owned by this resource unless `management.skip_init` is set: a changed entry (version, fetch config, customizations) is upgraded in place with `clusterctl upgrade apply`"
+// providerMapAttribute builds one of the six provider maps. Every map shares
+// providerNestedObject.
+func providerMapAttribute(desc string, lifecycle providerMapLifecycle) schema.MapNestedAttribute {
+	const owned = " Entries are owned by this resource: a changed entry (version, fetch config, customizations) is upgraded in place with `clusterctl upgrade apply`"
 	var text string
 	var modifiers []planmodifier.Map
 	switch lifecycle {
@@ -521,8 +490,7 @@ func providerMapAttribute(desc string, required bool, lifecycle providerMapLifec
 	}
 	return schema.MapNestedAttribute{
 		MarkdownDescription: desc + " Each value is a provider object modeled after the cluster-api-operator provider CRDs (`operator.cluster.x-k8s.io/v1alpha2`); customizations are applied natively by wrapping the clusterctl repository factory, so the operator itself is not required." + text,
-		Required:            required,
-		Optional:            !required,
+		Optional:            true,
 		NestedObject:        providerNestedObject(),
 		PlanModifiers:       modifiers,
 	}
@@ -785,7 +753,6 @@ func providerNestedObject() schema.NestedAttributeObject {
 		},
 	}
 }
-
 func (r *ClusterResource) Configure(ctx context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
 	if req.ProviderData == nil {
 		return
@@ -808,6 +775,80 @@ func (r *ClusterResource) Configure(ctx context.Context, req resource.ConfigureR
 	)
 }
 
+// --- plan-time rules ---
+
+// ValidateConfig refuses the combinations the schema cannot express.
+func (r *ClusterResource) ValidateConfig(ctx context.Context, req resource.ValidateConfigRequest, resp *resource.ValidateConfigResponse) {
+	var data ClusterResourceModel
+	resp.Diagnostics.Append(req.Config.Get(ctx, &data)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	hasClass := !data.Class.IsNull()
+	if hasClass && !data.Infrastructure.IsNull() {
+		resp.Diagnostics.AddAttributeError(path.Root("infrastructure"), "Invalid cluster configuration", "class and infrastructure are exclusive: a ClusterClass brings its own infrastructure template.")
+	}
+	if hasClass && data.KubernetesVersion.IsNull() {
+		resp.Diagnostics.AddAttributeError(path.Root("kubernetes_version"), "Invalid cluster configuration", "kubernetes_version is required with a class (Cluster.spec.topology.version).")
+	}
+	if !hasClass && !data.Class.IsUnknown() && data.Infrastructure.IsNull() {
+		resp.Diagnostics.AddAttributeError(path.Root("infrastructure"), "Invalid cluster configuration", "One of infrastructure (direct mode) or class (topology mode) is required.")
+	}
+	cp, d := extractControlPlane(ctx, &data)
+	resp.Diagnostics.Append(d...)
+	if cp != nil {
+		if hasClass {
+			if !cp.Provider.IsNull() || !cp.Infrastructure.IsNull() || !cp.MachineSpec.IsNull() || !cp.Spec.IsNull() {
+				resp.Diagnostics.AddAttributeError(path.Root("control_plane"), "Invalid cluster configuration", "With a class, control_plane takes only replicas: the ClusterClass defines the control plane.")
+			}
+		} else if !data.Class.IsUnknown() {
+			if cp.Provider.IsNull() && !cp.Provider.IsUnknown() {
+				resp.Diagnostics.AddAttributeError(path.Root("control_plane").AtName("provider"), "Invalid cluster configuration", "control_plane.provider is required without a class.")
+			}
+			if cp.Infrastructure.IsNull() && !cp.Infrastructure.IsUnknown() && cp.MachineSpec.IsNull() && !cp.MachineSpec.IsUnknown() {
+				resp.Diagnostics.AddAttributeError(path.Root("control_plane").AtName("infrastructure"), "Invalid cluster configuration", "control_plane.infrastructure (a capi_machine_template ref) or control_plane.machine_spec is required without a class.")
+			}
+			if !cp.Infrastructure.IsNull() && !cp.MachineSpec.IsNull() {
+				resp.Diagnostics.AddAttributeError(path.Root("control_plane").AtName("machine_spec"), "Invalid cluster configuration", "control_plane.infrastructure and control_plane.machine_spec are exclusive.")
+			}
+		}
+	} else if !hasClass && !data.Class.IsUnknown() && !data.ControlPlane.IsUnknown() {
+		resp.Diagnostics.AddAttributeError(path.Root("control_plane"), "Invalid cluster configuration", "control_plane is required without a class.")
+	}
+	mgmt, d := extractManagement(ctx, &data)
+	resp.Diagnostics.Append(d...)
+	if mgmt != nil && !mgmt.Providers.IsNull() && !mgmt.SelfManaged.IsUnknown() && !mgmt.SelfManaged.ValueBool() {
+		resp.Diagnostics.AddAttributeError(path.Root("management").AtName("providers"), "Invalid cluster configuration", "management.providers is for a self-managed cluster; on the provider block's management cluster declare providers with capi_provider.")
+	}
+	if mgmt != nil && !mgmt.Bootstrap.IsNull() && !mgmt.SelfManaged.IsUnknown() && !mgmt.SelfManaged.ValueBool() {
+		resp.Diagnostics.AddAttributeError(path.Root("management").AtName("bootstrap"), "Invalid cluster configuration", "management.bootstrap needs management.self_managed = true: a bootstrap cluster only exists to pivot from.")
+	}
+}
+
+// ModifyPlan refuses the class/direct switch and turns a create that did
+// not finish into a planned update, so the next apply resumes it.
+func (r *ClusterResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
+	if req.State.Raw.IsNull() || req.Plan.Raw.IsNull() {
+		return
+	}
+	var plan, state ClusterResourceModel
+	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
+	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	if plan.Class.IsNull() != state.Class.IsNull() && !plan.Class.IsUnknown() {
+		resp.RequiresReplace = append(resp.RequiresReplace, path.Root("class"))
+	}
+	status := extractStatus(ctx, &state)
+	if status != nil && !status.Phase.IsNull() && status.Phase.ValueString() != string(capi.PhaseReady) {
+		resp.Diagnostics.AddWarning("Resuming cluster creation", fmt.Sprintf("The last create of cluster %s stopped at phase %s: %s. This apply continues from there.", state.Name.ValueString(), status.Phase.ValueString(), status.Error.ValueString()))
+		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("status"), types.ObjectUnknown(statusAttrTypes()))...)
+	}
+}
+
+// --- CRUD ---
+
 func (r *ClusterResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
 	var data ClusterResourceModel
 
@@ -821,100 +862,17 @@ func (r *ClusterResource) Create(ctx context.Context, req resource.CreateRequest
 		return
 	}
 
-	tflog.Info(ctx, "Creating CAPI cluster", map[string]interface{}{
-		"name": data.Name.ValueString(),
-	})
+	tflog.Info(ctx, "Creating CAPI cluster", map[string]interface{}{"name": data.Name.ValueString()})
 
-	createOpts, diags := buildCreateOptions(ctx, &data)
-	resp.Diagnostics.Append(diags...)
-	if resp.Diagnostics.HasError() {
-		return
-	}
-
-	// Seed any persisted provider secrets (none on a fresh create; present when a
-	// tainted resource is recreated) so the bootstrapper can recognize a node it
-	// already owns.
+	// Seed any persisted provider secrets (none on a fresh create; present
+	// when a tainted resource is recreated) so the bootstrapper can recognize
+	// a node it already owns.
 	seedSecrets, d := providerSecretsFromDynamic(ctx, data.ProviderSecrets)
 	resp.Diagnostics.Append(d...)
-	createOpts.ProviderSecrets = seedSecrets
-
-	// Default kubeconfig output path
-	if createOpts.KubeconfigOutputPath == "" {
-		if home, err := os.UserHomeDir(); err == nil {
-			createOpts.KubeconfigOutputPath = filepath.Join(home, ".kube", fmt.Sprintf("%s.kubeconfig", data.Name.ValueString()))
-		}
-	}
-
-	mgr, d := r.managerFor(ctx, &data)
-	resp.Diagnostics.Append(d...)
+	r.run(ctx, &data, nil, seedSecrets, &resp.Diagnostics)
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	result, err := mgr.CreateCluster(ctx, *createOpts)
-	if err != nil {
-		resp.Diagnostics.AddError("Cluster Creation Error", fmt.Sprintf("Failed to create cluster: %s", err))
-		return
-	}
-
-	data.Id = types.StringValue(data.Name.ValueString())
-	r.ensureManagementComputed(ctx, &data, createOpts)
-	r.ensureOutputComputed(ctx, &data, createOpts.KubeconfigOutputPath)
-	r.ensureWaitComputed(ctx, &data)
-
-	resp.Diagnostics.Append(setStatus(ctx, &data, result)...)
-	if resp.Diagnostics.HasError() {
-		return
-	}
-
-	secretsVal, d := providerSecretsToDynamic(ctx, result.ProviderSecrets)
-	resp.Diagnostics.Append(d...)
-	data.ProviderSecrets = secretsVal
-
-	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
-}
-
-func (r *ClusterResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
-	var data ClusterResourceModel
-
-	resp.Diagnostics.Append(req.State.Get(ctx, &data)...)
-	if resp.Diagnostics.HasError() {
-		return
-	}
-
-	mgmtKubeconfig := r.resolveManagementKubeconfig(ctx, &data, nil)
-	if mgmtKubeconfig == "" {
-		resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
-		return
-	}
-
-	namespace := "default"
-	mgmt, _ := extractManagement(ctx, &data)
-	if mgmt != nil && !mgmt.Namespace.IsNull() {
-		namespace = mgmt.Namespace.ValueString()
-	}
-
-	result, err := r.manager.GetClusterInfo(ctx, mgmtKubeconfig, data.Name.ValueString(), namespace)
-	if errors.Is(err, capi.ErrClusterNotFound) {
-		// The Cluster object is gone from a reachable management cluster:
-		// deleted out of band. Drop it from state so the next apply recreates it.
-		tflog.Warn(ctx, "Cluster no longer exists on the management cluster, removing it from state", map[string]interface{}{"error": err.Error()})
-		resp.State.RemoveResource(ctx)
-		return
-	}
-	if err != nil {
-		// An unreachable management cluster is not a deleted cluster: keep
-		// the state as it is.
-		tflog.Warn(ctx, "Unable to read cluster info", map[string]interface{}{"error": err.Error()})
-		resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
-		return
-	}
-
-	prevStatus, _ := extractStatus(ctx, &data)
-	resp.Diagnostics.Append(setStatusWithFallback(ctx, &data, result, prevStatus)...)
-	if resp.Diagnostics.HasError() {
-		return
-	}
-
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 }
 
@@ -932,78 +890,180 @@ func (r *ClusterResource) Update(ctx context.Context, req resource.UpdateRequest
 		return
 	}
 
-	managementKubeconfig := r.resolveManagementKubeconfig(ctx, &plan, &state)
-	if managementKubeconfig == "" {
-		resp.Diagnostics.AddError("Cluster Update Error", "Unable to determine management kubeconfig.")
-		return
-	}
-
-	namespace := "default"
-	mgmt, _ := extractManagement(ctx, &plan)
-	if mgmt != nil && !mgmt.Namespace.IsNull() && mgmt.Namespace.ValueString() != "" {
-		namespace = mgmt.Namespace.ValueString()
-	}
-
-	reconcileOpts, diags := buildCreateOptions(ctx, &plan)
-	resp.Diagnostics.Append(diags...)
-	if resp.Diagnostics.HasError() {
-		return
-	}
-	reconcileOpts.ManagementKubeconfig = managementKubeconfig
-	reconcileOpts.Namespace = namespace
-	reconcileOpts.SelfManaged = false
-
-	// Provider lifecycle. With skip_init the providers are managed elsewhere;
-	// otherwise the management cluster is converged on the provider maps,
-	// but only when they changed, since clusterctl init resolves every
-	// release again.
-	upgrade, removed, added, d := providerChanges(ctx, &state, &plan)
-	resp.Diagnostics.Append(d...)
-	reconcileOpts.UpgradeProviders = upgrade
-	reconcileOpts.RemovedProviders = removed
-	if !added && len(upgrade) == 0 && removed.Empty() {
-		reconcileOpts.SkipInit = true
-	}
-
-	// Seed the secrets persisted from create so the bootstrapper recognizes the
-	// node it owns and can reach it over the Talos API.
 	seedSecrets, d := providerSecretsFromDynamic(ctx, state.ProviderSecrets)
 	resp.Diagnostics.Append(d...)
-	reconcileOpts.ProviderSecrets = seedSecrets
-
-	mgr, d := r.managerFor(ctx, &plan)
-	resp.Diagnostics.Append(d...)
+	r.run(ctx, &plan, &state, seedSecrets, &resp.Diagnostics)
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	result, err := mgr.CreateCluster(ctx, *reconcileOpts)
-	if err != nil {
-		resp.Diagnostics.AddError("Cluster Update Error", fmt.Sprintf("Failed to reconcile cluster: %s", err))
-		return
-	}
-
-	plan.Id = types.StringValue(plan.Name.ValueString())
-	r.ensureManagementComputed(ctx, &plan, reconcileOpts)
-	r.ensureOutputComputed(ctx, &plan, reconcileOpts.KubeconfigOutputPath)
-	r.ensureWaitComputed(ctx, &plan)
-
-	prevStatus, _ := extractStatus(ctx, &state)
-	resp.Diagnostics.Append(setStatusWithFallback(ctx, &plan, result, prevStatus)...)
-	if resp.Diagnostics.HasError() {
-		return
-	}
-
-	// Persist provider secrets: prefer any the bootstrapper surfaced this run,
-	// otherwise carry forward what create stored.
-	if len(result.ProviderSecrets) > 0 {
-		secretsVal, sd := providerSecretsToDynamic(ctx, result.ProviderSecrets)
-		resp.Diagnostics.Append(sd...)
-		plan.ProviderSecrets = secretsVal
-	} else {
+	if plan.ProviderSecrets.IsNull() || plan.ProviderSecrets.IsUnknown() {
 		plan.ProviderSecrets = state.ProviderSecrets
 	}
-
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+}
+
+// run is the create workflow and the update that follows it: against the
+// provider block's management cluster for an ordinary cluster; through a
+// bootstrap cluster for a self-managed one that has not pivoted yet
+// (a fresh create, or one being resumed); against the cluster itself once
+// it has. state is nil on create.
+func (r *ClusterResource) run(ctx context.Context, data, state *ClusterResourceModel, seedSecrets map[string]string, diags *diag.Diagnostics) {
+	opts, d := buildCreateOptions(ctx, data)
+	diags.Append(d...)
+	if diags.HasError() {
+		return
+	}
+	opts.ProviderSecrets = seedSecrets
+
+	mgmt, _ := extractManagement(ctx, data)
+	selfManaged := mgmt != nil && mgmt.SelfManaged.ValueBool()
+	var prevStatus *StatusModel
+	if state != nil {
+		prevStatus = extractStatus(ctx, state)
+	}
+	pivoted := prevStatus != nil && !prevStatus.Phase.IsNull() && prevStatus.Phase.ValueString() == string(capi.PhaseReady)
+	resuming := state != nil && !pivoted
+	onFailure := bootstrapOnFailure(ctx, data)
+
+	var cleanup func()
+	switch {
+	case !selfManaged:
+		// The provider block's management cluster; its providers are
+		// capi_provider resources, never touched here.
+		conn, d := r.pd.managementOrDiag(ctx)
+		diags.Append(d...)
+		if d.HasError() {
+			return
+		}
+		opts.ManagementKubeconfig = conn.KubeconfigPath
+		opts.SkipInit = true
+		opts.SelfManaged = false
+	case pivoted:
+		// The cluster manages itself: reach it through the credential the
+		// pivot captured, and converge its providers on management.providers.
+		kubeconfig, done, err := r.derivedKubeconfig(ctx, state)
+		if err != nil {
+			diags.AddError("Cluster connection", err.Error())
+			return
+		}
+		cleanup = done
+		opts.ManagementKubeconfig = kubeconfig
+		opts.SelfManaged = false
+		upgrade, removed, added, d := providerChanges(ctx, state, data)
+		diags.Append(d...)
+		opts.UpgradeProviders = upgrade
+		opts.RemovedProviders = removed
+		opts.SkipInit = !added && len(upgrade) == 0 && removed.Empty()
+	default:
+		// A fresh self-managed create, or one resumed from the bootstrap
+		// cluster the last run left in place: every step is check-before-act.
+		opts.ManagementKubeconfig = ""
+		opts.SelfManaged = true
+		opts.KeepBootstrapOnFailure = onFailure == onFailureResume
+	}
+	if cleanup != nil {
+		defer cleanup()
+	}
+
+	var phase capi.Phase
+	opts.OnPhase = func(p capi.Phase) { phase = p }
+
+	mgr, d := r.managerFor(ctx, data)
+	diags.Append(d...)
+	if diags.HasError() {
+		return
+	}
+	result, err := mgr.CreateCluster(ctx, *opts)
+	if err != nil {
+		var pe *capi.PhaseError
+		if selfManaged && !pivoted && onFailure == onFailureResume && errors.As(err, &pe) {
+			// Keep what exists: the phase, the error and the bootstrap
+			// cluster, so the next apply continues from here.
+			data.Id = types.StringValue(data.Name.ValueString())
+			r.ensureManagementComputed(ctx, data)
+			r.ensureWaitComputed(ctx, data)
+			diags.Append(setPartialStatus(ctx, data, pe, prevStatus)...)
+			if data.ProviderSecrets.IsUnknown() {
+				data.ProviderSecrets = types.DynamicNull()
+			}
+			verb := "create"
+			if resuming {
+				verb = "resume"
+			}
+			diags.AddWarning("Cluster creation incomplete", fmt.Sprintf("Cluster %s stopped at phase %s during %s: %s. Nothing was torn down; the next apply resumes from this phase, and destroy tears down what exists.", data.Name.ValueString(), pe.Phase, verb, pe.Err))
+			return
+		}
+		diags.AddError("Cluster Creation Error", fmt.Sprintf("Failed to create cluster: %s", err))
+		return
+	}
+
+	data.Id = types.StringValue(data.Name.ValueString())
+	r.ensureManagementComputed(ctx, data)
+	r.ensureWaitComputed(ctx, data)
+	if phase == "" {
+		phase = capi.PhaseReady
+	}
+	diags.Append(setStatusWithFallback(ctx, data, result, prevStatus, capi.PhaseReady)...)
+	if diags.HasError() {
+		return
+	}
+	switch {
+	case len(result.ProviderSecrets) > 0:
+		secretsVal, sd := providerSecretsToDynamic(ctx, result.ProviderSecrets)
+		diags.Append(sd...)
+		data.ProviderSecrets = secretsVal
+	case state != nil:
+		data.ProviderSecrets = state.ProviderSecrets
+	default:
+		data.ProviderSecrets = types.DynamicNull()
+	}
+}
+
+func (r *ClusterResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
+	var data ClusterResourceModel
+
+	resp.Diagnostics.Append(req.State.Get(ctx, &data)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	kubeconfig, cleanup, err := r.managementKubeconfig(ctx, &data)
+	if cleanup != nil {
+		defer cleanup()
+	}
+	if err != nil {
+		// An unreachable management cluster is not a deleted cluster: keep
+		// the state as it is.
+		tflog.Warn(ctx, "Unable to reach the management cluster", map[string]interface{}{"error": err.Error()})
+		resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
+		return
+	}
+
+	result, err := r.manager.GetClusterInfo(ctx, kubeconfig, data.Name.ValueString(), data.Namespace.ValueString())
+	if errors.Is(err, capi.ErrClusterNotFound) {
+		// The Cluster object is gone from a reachable management cluster:
+		// deleted out of band. Drop it from state so the next apply recreates it.
+		tflog.Warn(ctx, "Cluster no longer exists on the management cluster, removing it from state", map[string]interface{}{"error": err.Error()})
+		resp.State.RemoveResource(ctx)
+		return
+	}
+	if err != nil {
+		tflog.Warn(ctx, "Unable to read cluster info", map[string]interface{}{"error": err.Error()})
+		resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
+		return
+	}
+
+	prevStatus := extractStatus(ctx, &data)
+	phase := capi.PhaseReady
+	if prevStatus != nil && !prevStatus.Phase.IsNull() && prevStatus.Phase.ValueString() != "" {
+		phase = capi.Phase(prevStatus.Phase.ValueString())
+	}
+	resp.Diagnostics.Append(setStatusWithFallback(ctx, &data, result, prevStatus, phase)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 }
 
 func (r *ClusterResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
@@ -1014,67 +1074,87 @@ func (r *ClusterResource) Delete(ctx context.Context, req resource.DeleteRequest
 		return
 	}
 
-	mgmtKubeconfig := r.resolveManagementKubeconfig(ctx, &data, nil)
-
-	namespace := "default"
 	mgmt, _ := extractManagement(ctx, &data)
-	if mgmt != nil && !mgmt.Namespace.IsNull() {
-		namespace = mgmt.Namespace.ValueString()
+	selfManaged := mgmt != nil && mgmt.SelfManaged.ValueBool()
+	status := extractStatus(ctx, &data)
+	phase := capi.PhaseReady
+	if status != nil && !status.Phase.IsNull() && status.Phase.ValueString() != "" {
+		phase = capi.Phase(status.Phase.ValueString())
+	}
+	bootstrapName := ""
+	if status != nil && !status.BootstrapCluster.IsNull() {
+		bootstrapName = status.BootstrapCluster.ValueString()
 	}
 
 	deleteSecrets, d := providerSecretsFromDynamic(ctx, data.ProviderSecrets)
 	resp.Diagnostics.Append(d...)
 	deleteOpts := capi.DeleteClusterOptions{
-		Name:                 data.Name.ValueString(),
-		Namespace:            namespace,
-		ManagementKubeconfig: mgmtKubeconfig,
-		ProviderSecrets:      deleteSecrets,
+		Name:            data.Name.ValueString(),
+		Namespace:       data.Namespace.ValueString(),
+		ProviderSecrets: deleteSecrets,
 	}
 	// The configuration the cluster was created with: a self-managed cluster
 	// is deleted through a fresh bootstrap cluster initialised the same way.
-	if spec, d := buildCreateOptions(ctx, &data); !d.HasError() {
-		spec.ProviderSecrets = deleteSecrets
-		deleteOpts.Spec = *spec
-		deleteOpts.Wait = spec.Wait
-	} else {
+	spec, d := buildCreateOptions(ctx, &data)
+	if d.HasError() {
 		resp.Diagnostics.Append(d...)
 		return
 	}
-	if mgmt != nil {
-		externalManagement := !mgmt.Kubeconfig.IsNull() && mgmt.Kubeconfig.ValueString() != ""
-		// A pivot only ever happens from a bootstrap cluster of our own.
-		deleteOpts.SelfManaged = mgmt.SelfManaged.ValueBool() && !externalManagement
-		deleteOpts.UninstallProviders = mgmt.Uninstall.ValueBool() && !mgmt.SkipInit.ValueBool() && externalManagement
-	}
+	spec.ProviderSecrets = deleteSecrets
+	deleteOpts.Spec = *spec
+	deleteOpts.Wait = spec.Wait
 
-	status, _ := extractStatus(ctx, &data)
-	if status != nil && !status.BootstrapCluster.IsNull() {
-		deleteOpts.DeleteBootstrap = true
-		deleteOpts.BootstrapName = status.BootstrapCluster.ValueString()
-	}
-
-	// The default manager runs kind bootstrap clusters: it deletes a plain
-	// cluster and reverse-pivots a self-managed one.
-	mgr := r.manager
-	if bootstrapType(ctx, &data) == "kairos" {
-		// A disposable node is powered off right after the pivot. When that
-		// failed, status.bootstrap_cluster is still set: power it off now
-		// through the Kairos bootstrapper, before the reverse pivot.
-		deleteOpts.DeleteBootstrap = false
-		if status != nil && !status.BootstrapCluster.IsNull() {
+	// A create that never pivoted: whatever exists is on the bootstrap
+	// cluster. A kind cluster is reachable and deleted through; a Kairos
+	// node is powered off, which takes its objects with it.
+	if selfManaged && phase != capi.PhaseReady && phase != capi.PhasePivoted {
+		if bootstrapName == "" {
+			return
+		}
+		if bootstrapType(ctx, &data) == "kairos" {
 			if typed, d := r.managerFor(ctx, &data); !d.HasError() {
-				if err := typed.DeleteBootstrapCluster(ctx, status.BootstrapCluster.ValueString(), deleteSecrets); err != nil {
-					resp.Diagnostics.AddWarning("Bootstrap Node Warning", fmt.Sprintf("Could not power off the Kairos bootstrap node: %s", err))
+				if err := typed.DeleteBootstrapCluster(ctx, bootstrapName, deleteSecrets); err != nil {
+					resp.Diagnostics.AddError("Bootstrap Node Error", fmt.Sprintf("Could not power off the Kairos bootstrap node %s: %s", bootstrapName, err))
 				}
 			} else {
 				resp.Diagnostics.Append(d...)
 			}
+			return
 		}
+		deleteOpts.ManagementKubeconfig = kindKubeconfigPath(bootstrapName)
+		deleteOpts.DeleteBootstrap = true
+		deleteOpts.BootstrapName = bootstrapName
+		if err := r.manager.DeleteCluster(ctx, deleteOpts); err != nil {
+			resp.Diagnostics.AddError("Cluster Deletion Error", fmt.Sprintf("Failed to delete cluster: %s", err))
+		}
+		return
 	}
 
-	if mgmtKubeconfig == "" {
-		tflog.Warn(ctx, "No management kubeconfig for deletion - manual cleanup may be needed")
+	kubeconfig, cleanup, err := r.managementKubeconfig(ctx, &data)
+	if cleanup != nil {
+		defer cleanup()
+	}
+	if err != nil {
+		resp.Diagnostics.AddError("Cluster Deletion Error", fmt.Sprintf("Cannot reach the management cluster of %s: %s", data.Name.ValueString(), err))
 		return
+	}
+	deleteOpts.ManagementKubeconfig = kubeconfig
+	deleteOpts.SelfManaged = selfManaged
+
+	// The default manager runs kind bootstrap clusters: it deletes a plain
+	// cluster and reverse-pivots a self-managed one.
+	mgr := r.manager
+	if selfManaged && bootstrapType(ctx, &data) == "kairos" && bootstrapName != "" {
+		// A disposable node is powered off right after the pivot. When that
+		// failed, status.bootstrap_cluster is still set: power it off now
+		// through the Kairos bootstrapper, before the reverse pivot.
+		if typed, d := r.managerFor(ctx, &data); !d.HasError() {
+			if err := typed.DeleteBootstrapCluster(ctx, bootstrapName, deleteSecrets); err != nil {
+				resp.Diagnostics.AddWarning("Bootstrap Node Warning", fmt.Sprintf("Could not power off the Kairos bootstrap node: %s", err))
+			}
+		} else {
+			resp.Diagnostics.Append(d...)
+		}
 	}
 	if err := mgr.DeleteCluster(ctx, deleteOpts); err != nil {
 		// A deletion that did not finish keeps the resource: the user fixes
@@ -1084,139 +1164,159 @@ func (r *ClusterResource) Delete(ctx context.Context, req resource.DeleteRequest
 	}
 }
 
-// ImportState imports a cluster by `[kubeconfig:][namespace/]name`: the
-// name alone, `namespace/name`, or the management cluster's kubeconfig path
-// in front, which lets Read fetch the cluster's status right away. The
-// configuration must then set `management.kubeconfig` and `namespace` to
-// the same values, since both require replacement when changed.
+// ImportState imports a cluster by `[namespace/]name` from the management
+// cluster the provider block names. A self-managed cluster is imported the
+// same way through its own kubeconfig in the provider block; later reads
+// derive the connection once `provider_secrets` is known, so a cluster stood
+// up by other tooling is managed like any other.
 func (r *ClusterResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
-	kubeconfig, namespace, name := parseImportID(req.ID)
-	if name == "" {
-		resp.Diagnostics.AddError("Invalid import ID", fmt.Sprintf("Expected [kubeconfig:][namespace/]name, got %q.", req.ID))
+	id := strings.TrimSpace(req.ID)
+	namespace, name := "default", id
+	if i := strings.LastIndex(id, "/"); i >= 0 {
+		namespace, name = strings.TrimSpace(id[:i]), strings.TrimSpace(id[i+1:])
+	}
+	if name == "" || strings.Contains(id, ":") {
+		resp.Diagnostics.AddError("Invalid import ID", fmt.Sprintf("Expected [namespace/]name, got %q.", req.ID))
 		return
 	}
-	// The id is always the cluster name (see Create), and Read/Update rely on
-	// the name attribute being populated, so seed it here too.
+	if namespace == "" {
+		namespace = "default"
+	}
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), name)...)
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("name"), name)...)
-	if kubeconfig == "" && namespace == "" {
-		return
-	}
-	mgmt, d := types.ObjectValueFrom(ctx, managementAttrTypes(), ManagementModel{
-		Kubeconfig: stringOrNull(kubeconfig), Namespace: stringOrNull(namespace),
-		SkipInit: types.BoolNull(), SelfManaged: types.BoolNull(), Uninstall: types.BoolNull(),
-		Bootstrap: types.ObjectNull(managementBootstrapAttrTypes()),
-	})
-	resp.Diagnostics.Append(d...)
-	if d.HasError() {
-		return
-	}
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("management"), mgmt)...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("namespace"), namespace)...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("status"), types.ObjectValueMust(statusAttrTypes(), map[string]attr.Value{
+		"phase": types.StringValue(string(capi.PhaseReady)), "error": types.StringNull(), "endpoint": types.StringNull(), "ca_certificate": types.StringNull(),
+		"description": types.StringNull(), "bootstrap_cluster": types.StringNull(), "conditions": types.ListNull(types.ObjectType{AttrTypes: conditionAttrTypes()}),
+	}))...)
 }
 
-// UpgradeState migrates v0 (flat), v1 (nested objects with provider strings)
-// and v2 (provider maps with a clusterctl template) state to v3 (generated
-// manifests: no template/flavor, cluster_class, network, resource_config).
-// Terraform does not chain upgraders, so every entry emits v3 directly.
+// --- connections ---
+
+// managementKubeconfig is where the cluster's objects live: the provider
+// block's management cluster, the bootstrap cluster while a self-managed
+// create is under way, or the cluster itself once it manages itself, reached
+// through a credential derived from provider_secrets. The cleanup, when set,
+// removes the derived kubeconfig file.
+func (r *ClusterResource) managementKubeconfig(ctx context.Context, data *ClusterResourceModel) (string, func(), error) {
+	mgmt, _ := extractManagement(ctx, data)
+	if mgmt == nil || !mgmt.SelfManaged.ValueBool() {
+		conn, err := r.pd.management(ctx)
+		if err != nil {
+			return "", nil, err
+		}
+		return conn.KubeconfigPath, nil, nil
+	}
+	status := extractStatus(ctx, data)
+	if status != nil && !status.Phase.IsNull() && status.Phase.ValueString() != string(capi.PhaseReady) && status.Phase.ValueString() != string(capi.PhasePivoted) {
+		if status.BootstrapCluster.IsNull() || bootstrapType(ctx, data) == "kairos" {
+			return "", nil, fmt.Errorf("cluster %s has not pivoted yet (phase %s); its objects are on the bootstrap cluster", data.Name.ValueString(), status.Phase.ValueString())
+		}
+		return kindKubeconfigPath(status.BootstrapCluster.ValueString()), nil, nil
+	}
+	return r.derivedKubeconfig(ctx, data)
+}
+
+// derivedKubeconfig writes a short-lived admin kubeconfig for a self-managed
+// cluster from provider_secrets and status.endpoint.
+func (r *ClusterResource) derivedKubeconfig(ctx context.Context, data *ClusterResourceModel) (string, func(), error) {
+	secrets, d := providerSecretsFromDynamic(ctx, data.ProviderSecrets)
+	if d.HasError() || len(secrets) == 0 {
+		return "", nil, fmt.Errorf("cluster %s manages itself but provider_secrets holds no root credential; import it through its kubeconfig in the provider block", data.Name.ValueString())
+	}
+	status := extractStatus(ctx, data)
+	endpoint := ""
+	if status != nil && !status.Endpoint.IsNull() {
+		endpoint = status.Endpoint.ValueString()
+	}
+	if endpoint == "" {
+		return "", nil, fmt.Errorf("cluster %s manages itself but status.endpoint is unknown", data.Name.ValueString())
+	}
+	root, err := capi.ParseRootSecrets(data.Name.ValueString(), secrets)
+	if err != nil {
+		return "", nil, err
+	}
+	raw, err := capi.DeriveKubeconfig(root, endpoint, data.Name.ValueString(), defaultDerivedCredential, time.Now())
+	if err != nil {
+		return "", nil, err
+	}
+	dir, err := os.MkdirTemp("", "capi-tf-"+data.Name.ValueString()+"-")
+	if err != nil {
+		return "", nil, err
+	}
+	p := filepath.Join(dir, "kubeconfig")
+	if err := os.WriteFile(p, raw, 0o600); err != nil {
+		_ = os.RemoveAll(dir)
+		return "", nil, err
+	}
+	return p, func() { _ = os.RemoveAll(dir) }, nil
+}
+
+// kindKubeconfigPath is where the kind bootstrapper keeps a cluster's kubeconfig.
+func kindKubeconfigPath(name string) string {
+	return filepath.Join(os.TempDir(), fmt.Sprintf("kind-%s-kubeconfig", name))
+}
+
+// bootstrapOnFailure is management.bootstrap.on_failure, resume by default.
+func bootstrapOnFailure(ctx context.Context, data *ClusterResourceModel) string {
+	mgmt, _ := extractManagement(ctx, data)
+	bs, _ := extractManagementBootstrap(ctx, mgmt)
+	if bs == nil || bs.OnFailure.IsNull() || bs.OnFailure.IsUnknown() || bs.OnFailure.ValueString() == "" {
+		return onFailureResume
+	}
+	return bs.OnFailure.ValueString()
+}
+
+// --- Computed Field Helpers ---
+
+func (r *ClusterResource) ensureManagementComputed(ctx context.Context, data *ClusterResourceModel) {
+	mgmt, _ := extractManagement(ctx, data)
+	if mgmt == nil {
+		mgmt = &ManagementModel{
+			SelfManaged: types.BoolValue(false),
+			Providers:   types.ObjectNull(providersAttrTypes()),
+			Bootstrap:   types.ObjectNull(managementBootstrapAttrTypes()),
+		}
+	}
+	if mgmt.Bootstrap.IsUnknown() {
+		mgmt.Bootstrap = types.ObjectNull(managementBootstrapAttrTypes())
+	}
+	if mgmt.Providers.IsUnknown() {
+		mgmt.Providers = types.ObjectNull(providersAttrTypes())
+	}
+	val, _ := types.ObjectValueFrom(ctx, managementAttrTypes(), mgmt)
+	data.Management = val
+}
+
+func (r *ClusterResource) ensureWaitComputed(ctx context.Context, data *ClusterResourceModel) {
+	wait, _ := extractWait(ctx, data)
+	if wait == nil {
+		wait = &WaitModel{Conditions: types.ListValueMust(types.StringType, []attr.Value{types.StringValue(defaultWaitCondition)}), Timeout: types.StringValue(defaultWaitTimeout)}
+	}
+	if wait.Timeout.IsNull() || wait.Timeout.IsUnknown() || wait.Timeout.ValueString() == "" {
+		wait.Timeout = types.StringValue(defaultWaitTimeout)
+	}
+	if wait.Conditions.IsUnknown() {
+		wait.Conditions = types.ListValueMust(types.StringType, []attr.Value{types.StringValue(defaultWaitCondition)})
+	}
+	val, _ := types.ObjectValueFrom(ctx, waitAttrTypes(), wait)
+	data.Wait = val
+}
+
+// --- state upgrades ---
+
+// UpgradeState migrates every earlier schema version to v5. Terraform does
+// not chain upgraders, so each entry rewrites the raw state JSON through
+// every step to the current shape.
 func (r *ClusterResource) UpgradeState(ctx context.Context) map[int64]resource.StateUpgrader {
-	v0Schema := clusterResourceSchemaV0()
 	return map[int64]resource.StateUpgrader{
-		0: {
-			PriorSchema: &v0Schema,
-			StateUpgrader: func(ctx context.Context, req resource.UpgradeStateRequest, resp *resource.UpgradeStateResponse) {
-				var v0 clusterResourceModelV0
-				resp.Diagnostics.Append(req.State.Get(ctx, &v0)...)
-				if resp.Diagnostics.HasError() {
-					return
-				}
-
-				v1 := ClusterResourceModel{
-					Name:              v0.Name,
-					KubernetesVersion: v0.KubernetesVersion,
-					ClusterClass:      types.BoolValue(false),
-					Id:                v0.Id,
-					Network:           types.ObjectNull(clusterNetworkAttrTypes()),
-					Manifests:         types.ObjectNull(manifestsAttrTypes()),
-				}
-
-				// Management
-				ns := v0.TargetNamespace
-				if ns.IsNull() {
-					ns = types.StringValue("default")
-				}
-				mgmt := ManagementModel{
-					Kubeconfig:  v0.ManagementKubeconfig,
-					SkipInit:    v0.SkipInit,
-					SelfManaged: v0.SelfManaged,
-					Namespace:   ns,
-					Bootstrap:   types.ObjectNull(managementBootstrapAttrTypes()),
-				}
-				mgmtVal, d := types.ObjectValueFrom(ctx, managementAttrTypes(), mgmt)
-				resp.Diagnostics.Append(d...)
-				v1.Management = mgmtVal
-
-				// Providers: legacy "name:version" strings become one-entry maps.
-				v1.Core = types.MapNull(providerMapType().ElemType)
-				v1.Bootstrap = types.MapNull(providerMapType().ElemType)
-				v1.ControlPlane = types.MapNull(providerMapType().ElemType)
-				v1.IPAM = types.MapNull(providerMapType().ElemType)
-				v1.Addon = types.MapNull(providerMapType().ElemType)
-
-				v1.Infrastructure, d = providerMapValue(ctx, v0.InfrastructureProvider.ValueString())
-				resp.Diagnostics.Append(d...)
-				if !v0.BootstrapProvider.IsNull() && v0.BootstrapProvider.ValueString() != "" {
-					v1.Bootstrap, d = providerMapValue(ctx, v0.BootstrapProvider.ValueString())
-					resp.Diagnostics.Append(d...)
-				}
-				if !v0.ControlPlaneProvider.IsNull() && v0.ControlPlaneProvider.ValueString() != "" {
-					v1.ControlPlane, d = providerMapValue(ctx, v0.ControlPlaneProvider.ValueString())
-					resp.Diagnostics.Append(d...)
-				}
-				if !v0.CoreProvider.IsNull() && v0.CoreProvider.ValueString() != "" {
-					v1.Core, d = providerMapValue(ctx, v0.CoreProvider.ValueString())
-					resp.Diagnostics.Append(d...)
-				}
-
-				// Topology: the two counts become control_plane.replicas and one
-				// MachineDeployment.
-				v1.Topology, d = legacyTopologyObject(ctx, v0.ControlPlaneMachineCount, v0.WorkerMachineCount)
-				resp.Diagnostics.Append(d...)
-
-				v1.Inventory = types.ObjectNull(inventoryAttrTypes())
-
-				wait := WaitModel{Enabled: v0.WaitForReady, Timeout: types.StringNull()}
-				waitVal, d := types.ObjectValueFrom(ctx, waitAttrTypes(), wait)
-				resp.Diagnostics.Append(d...)
-				v1.Wait = waitVal
-
-				out := OutputModel{KubeconfigPath: v0.KubeconfigPath}
-				outVal, d := types.ObjectValueFrom(ctx, outputAttrTypes(), out)
-				resp.Diagnostics.Append(d...)
-				v1.Output = outVal
-
-				status := StatusModel{
-					Endpoint:         v0.Endpoint,
-					Kubeconfig:       v0.Kubeconfig,
-					CACertificate:    v0.ClusterCACertificate,
-					Description:      v0.ClusterDescription,
-					BootstrapCluster: v0.BootstrapClusterName,
-				}
-				statusVal, d := types.ObjectValueFrom(ctx, statusAttrTypes(), status)
-				resp.Diagnostics.Append(d...)
-				v1.Status = statusVal
-
-				resp.Diagnostics.Append(resp.State.Set(ctx, v1)...)
-			},
-		},
-		// No PriorSchema for v1, v2 and v3: the schemas were large and only a
-		// handful of attributes change shape, so the upgrades rewrite raw JSON.
+		0: rawJSONUpgrader(0, upgradeV0JSON),
 		1: rawJSONUpgrader(1, upgradeV1JSON),
 		2: rawJSONUpgrader(2, upgradeV2JSON),
 		3: rawJSONUpgrader(3, upgradeV3JSON),
+		4: rawJSONUpgrader(4, upgradeV4JSON),
 	}
 }
-
-// rawJSONUpgrader wraps a raw-JSON rewrite as a StateUpgrader.
 func rawJSONUpgrader(from int, upgrade func([]byte) ([]byte, error)) resource.StateUpgrader {
 	return resource.StateUpgrader{
 		StateUpgrader: func(_ context.Context, req resource.UpgradeStateRequest, resp *resource.UpgradeStateResponse) {
@@ -1238,29 +1338,20 @@ func rawJSONUpgrader(from int, upgrade func([]byte) ([]byte, error)) resource.St
 
 // validateWorkerClasses checks that machine deployments sharing a ClusterClass
 // worker class (class, or name when unset) agree on their template specs.
-func validateWorkerClasses(mds []capi.MachineDeploymentTopology, diags *diag.Diagnostics) {
-	first := map[string]capi.MachineDeploymentTopology{}
-	for _, md := range mds {
-		class := md.Class
-		if class == "" {
-			class = md.Name
-		}
-		prev, ok := first[class]
-		if !ok {
-			first[class] = md
-			continue
-		}
-		if !reflect.DeepEqual(prev.Infrastructure, md.Infrastructure) || !reflect.DeepEqual(prev.Bootstrap, md.Bootstrap) {
-			diags.AddError("Conflicting worker class",
-				fmt.Sprintf("topology.workers.machine_deployments %q and %q share class %q but differ in infrastructure or bootstrap.", prev.Name, md.Name, class))
-		}
-	}
+// --- Validation ---
+
+// supportedInfrastructure lists the infrastructure providers the resource
+// renders objects for.
+var supportedInfrastructure = map[string]struct{}{
+	"aws": {}, "azure": {}, "docker": {}, "openstack": {}, "tinkerbell": {}, "vsphere": {},
 }
 
+// validateLifecycleConfig checks what the schema cannot: the provider maps
+// of a self-managed cluster, the infrastructure provider, the inventory
+// against the control plane size, and the bootstrap configuration.
 func (r *ClusterResource) validateLifecycleConfig(ctx context.Context, data *ClusterResourceModel, diags *diag.Diagnostics) {
-	// Per-entry rules and name collection for every provider map.
 	names := map[capi.ProviderType][]string{}
-	for _, pm := range data.providerMaps() {
+	for _, pm := range data.providerMaps(ctx) {
 		entries, d := extractProviders(ctx, pm.Map)
 		diags.Append(d...)
 		for _, name := range sortedProviderNames(entries) {
@@ -1268,34 +1359,43 @@ func (r *ClusterResource) validateLifecycleConfig(ctx context.Context, data *Clu
 			validateProviderEntry(ctx, pm.Type, name, entries[name], diags)
 		}
 	}
-	if diags.HasError() || data.Infrastructure.IsUnknown() {
+	if diags.HasError() {
+		return
+	}
+	mgmt, d := extractManagement(ctx, data)
+	diags.Append(d...)
+	selfManaged := mgmt != nil && mgmt.SelfManaged.ValueBool()
+	if selfManaged && data.Class.IsNull() && len(names[capi.ProviderTypeInfrastructure]) != 1 {
+		diags.AddError("Invalid management configuration",
+			fmt.Sprintf("management.providers.infrastructure must contain exactly one provider for a self-managed cluster, got %d.", len(names[capi.ProviderTypeInfrastructure])))
 		return
 	}
 
-	infraNames := names[capi.ProviderTypeInfrastructure]
-	if len(infraNames) != 1 {
-		diags.AddError("Invalid infrastructure configuration",
-			fmt.Sprintf("infrastructure must contain exactly one provider, got %d.", len(infraNames)))
-		return
+	infra := ""
+	if spec, _ := extractInfrastructure(ctx, data); spec != nil && !spec.Provider.IsNull() && !spec.Provider.IsUnknown() {
+		infra = strings.ToLower(spec.Provider.ValueString())
+	} else if n := names[capi.ProviderTypeInfrastructure]; len(n) == 1 {
+		infra = strings.ToLower(n[0])
 	}
-	provider := strings.ToLower(infraNames[0])
-
-	supportedProviders := map[string]struct{}{
-		"aws": {}, "azure": {}, "docker": {}, "openstack": {}, "tinkerbell": {}, "vsphere": {},
-	}
-	if _, ok := supportedProviders[provider]; !ok {
-		diags.AddError(
-			"Unsupported infrastructure provider",
-			fmt.Sprintf("infrastructure provider %q is not supported. Supported: aws, azure, docker, openstack, tinkerbell, vsphere", provider),
-		)
-	}
-
-	if provider == "tinkerbell" {
-		mgmt, d := extractManagement(ctx, data)
-		diags.Append(d...)
-		if mgmt == nil || mgmt.SelfManaged.IsNull() || !mgmt.SelfManaged.ValueBool() {
-			diags.AddError("Invalid Tinkerbell configuration", "Tinkerbell clusters must have management.self_managed = true.")
+	if infra != "" {
+		if _, ok := supportedInfrastructure[infra]; !ok {
+			diags.AddError("Unsupported infrastructure provider",
+				fmt.Sprintf("infrastructure provider %q is not supported. Supported: aws, azure, docker, openstack, tinkerbell, vsphere", infra))
 		}
+		if n := names[capi.ProviderTypeInfrastructure]; len(n) == 1 && !strings.EqualFold(n[0], infra) {
+			diags.AddError("Invalid infrastructure configuration",
+				fmt.Sprintf("infrastructure.provider %q is not the provider management.providers.infrastructure installs (%q).", infra, n[0]))
+		}
+	}
+	cp, d := extractControlPlane(ctx, data)
+	diags.Append(d...)
+	if cp != nil && !cp.Provider.IsNull() && !cp.Provider.IsUnknown() {
+		if n := names[capi.ProviderTypeControlPlane]; len(n) > 0 && !contains(n, cp.Provider.ValueString()) {
+			diags.AddError("Invalid control plane configuration",
+				fmt.Sprintf("control_plane.provider %q is not one of the providers management.providers.control_plane installs (%s).", cp.Provider.ValueString(), strings.Join(n, ", ")))
+		}
+	}
+	if infra == "tinkerbell" {
 		for _, n := range names[capi.ProviderTypeBootstrap] {
 			if l := strings.ToLower(n); l != "kubeadm" && l != "talos" {
 				diags.AddError("Invalid bootstrap provider for Tinkerbell", fmt.Sprintf("Tinkerbell supports bootstrap providers kubeadm or talos, got %q.", n))
@@ -1308,197 +1408,20 @@ func (r *ClusterResource) validateLifecycleConfig(ctx context.Context, data *Clu
 		}
 	}
 
-	// Topology: unique machine deployment names; counts feed inventory validation.
-	cpTopo, mds, d := extractTopology(ctx, data)
-	diags.Append(d...)
-	seen := map[string]bool{}
-	var workerCount int64
-	for _, md := range mds {
-		if seen[md.Name] {
-			diags.AddError("Duplicate machine deployment", fmt.Sprintf("topology.workers.machine_deployments name %q appears more than once.", md.Name))
-		}
-		seen[md.Name] = true
-		if md.Replicas != nil {
-			workerCount += *md.Replicas
-		}
-	}
-	if data.ClusterClass.ValueBool() {
-		validateWorkerClasses(mds, diags)
-	}
-
-	// Validate inventory
+	// The inventory must seat the control plane; node groups are checked
+	// against the hardware by CAPT as they come.
 	inv, d := extractInventory(ctx, data)
 	diags.Append(d...)
 	if inv != nil {
-		var cp int64
-		if cpTopo.Replicas != nil {
-			cp = *cpTopo.Replicas
+		var replicas int64
+		if cp != nil && !cp.Replicas.IsNull() && !cp.Replicas.IsUnknown() {
+			replicas = cp.Replicas.ValueInt64()
 		}
-		validateInventory(ctx, inv, cp, workerCount, diags)
+		validateInventory(ctx, inv, replicas, 0, diags)
 	}
 
 	// Validate the bootstrap cluster configuration
 	validateManagementBootstrap(ctx, data, diags)
-}
-
-func (r *ClusterResource) resolveManagementKubeconfig(ctx context.Context, plan *ClusterResourceModel, state *ClusterResourceModel) string {
-	mgmt, _ := extractManagement(ctx, plan)
-	if mgmt != nil && !mgmt.Kubeconfig.IsNull() && mgmt.Kubeconfig.ValueString() != "" {
-		return mgmt.Kubeconfig.ValueString()
-	}
-
-	if state != nil {
-		stateMgmt, _ := extractManagement(ctx, state)
-		if stateMgmt != nil && !stateMgmt.Kubeconfig.IsNull() && stateMgmt.Kubeconfig.ValueString() != "" {
-			return stateMgmt.Kubeconfig.ValueString()
-		}
-	}
-
-	if mgmt != nil && !mgmt.SelfManaged.IsNull() && mgmt.SelfManaged.ValueBool() {
-		out, _ := extractOutput(ctx, plan)
-		if out != nil && !out.KubeconfigPath.IsNull() && out.KubeconfigPath.ValueString() != "" {
-			return out.KubeconfigPath.ValueString()
-		}
-		if state != nil {
-			stateOut, _ := extractOutput(ctx, state)
-			if stateOut != nil && !stateOut.KubeconfigPath.IsNull() && stateOut.KubeconfigPath.ValueString() != "" {
-				return stateOut.KubeconfigPath.ValueString()
-			}
-		}
-	}
-
-	status, _ := extractStatus(ctx, plan)
-	if status != nil && !status.BootstrapCluster.IsNull() {
-		return filepath.Join(os.TempDir(), fmt.Sprintf("kind-%s-kubeconfig", status.BootstrapCluster.ValueString()))
-	}
-	if state != nil {
-		stateStatus, _ := extractStatus(ctx, state)
-		if stateStatus != nil && !stateStatus.BootstrapCluster.IsNull() {
-			return filepath.Join(os.TempDir(), fmt.Sprintf("kind-%s-kubeconfig", stateStatus.BootstrapCluster.ValueString()))
-		}
-	}
-
-	// The provider block's management cluster, as for every other resource.
-	if r.pd != nil {
-		if conn, err := r.pd.management(ctx); err == nil {
-			return conn.KubeconfigPath
-		}
-	}
-	return ""
-}
-
-// --- Computed Field Helpers ---
-
-func (r *ClusterResource) ensureManagementComputed(ctx context.Context, data *ClusterResourceModel, opts *capi.CreateClusterOptions) {
-	mgmt, _ := extractManagement(ctx, data)
-
-	namespace := "default"
-	if opts.Namespace != "" {
-		namespace = opts.Namespace
-	}
-
-	if mgmt == nil {
-		mgmt = &ManagementModel{
-			Kubeconfig:  types.StringNull(),
-			SkipInit:    types.BoolValue(opts.SkipInit),
-			SelfManaged: types.BoolValue(opts.SelfManaged),
-			Uninstall:   types.BoolValue(false),
-			Namespace:   types.StringValue(namespace),
-			Bootstrap:   types.ObjectNull(managementBootstrapAttrTypes()),
-		}
-	} else {
-		if mgmt.Namespace.IsNull() || mgmt.Namespace.ValueString() == "" {
-			mgmt.Namespace = types.StringValue(namespace)
-		}
-		if mgmt.Uninstall.IsNull() || mgmt.Uninstall.IsUnknown() {
-			mgmt.Uninstall = types.BoolValue(false)
-		}
-		if mgmt.Bootstrap.IsUnknown() {
-			mgmt.Bootstrap = types.ObjectNull(managementBootstrapAttrTypes())
-		}
-	}
-
-	val, _ := types.ObjectValueFrom(ctx, managementAttrTypes(), mgmt)
-	data.Management = val
-}
-
-func (r *ClusterResource) ensureOutputComputed(ctx context.Context, data *ClusterResourceModel, kubeconfigPath string) {
-	out, _ := extractOutput(ctx, data)
-	if out == nil {
-		out = &OutputModel{KubeconfigPath: types.StringValue(kubeconfigPath)}
-	} else if out.KubeconfigPath.IsNull() || out.KubeconfigPath.ValueString() == "" {
-		out.KubeconfigPath = types.StringValue(kubeconfigPath)
-	}
-
-	val, _ := types.ObjectValueFrom(ctx, outputAttrTypes(), out)
-	data.Output = val
-}
-
-func (r *ClusterResource) ensureWaitComputed(ctx context.Context, data *ClusterResourceModel) {
-	wait, _ := extractWait(ctx, data)
-	if wait == nil {
-		wait = &WaitModel{Enabled: types.BoolValue(true), Timeout: types.StringValue("30m")}
-	}
-	if wait.Timeout.IsNull() || wait.Timeout.ValueString() == "" {
-		wait.Timeout = types.StringValue("30m")
-	}
-
-	val, _ := types.ObjectValueFrom(ctx, waitAttrTypes(), wait)
-	data.Wait = val
-}
-
-// --- v0 Schema (flat) for state migration ---
-
-type clusterResourceModelV0 struct {
-	Name                     types.String `tfsdk:"name"`
-	KubeconfigPath           types.String `tfsdk:"kubeconfig_path"`
-	ManagementKubeconfig     types.String `tfsdk:"management_kubeconfig"`
-	SkipInit                 types.Bool   `tfsdk:"skip_init"`
-	WaitForReady             types.Bool   `tfsdk:"wait_for_ready"`
-	SelfManaged              types.Bool   `tfsdk:"self_managed"`
-	InfrastructureProvider   types.String `tfsdk:"infrastructure_provider"`
-	BootstrapProvider        types.String `tfsdk:"bootstrap_provider"`
-	ControlPlaneProvider     types.String `tfsdk:"control_plane_provider"`
-	CoreProvider             types.String `tfsdk:"core_provider"`
-	TargetNamespace          types.String `tfsdk:"target_namespace"`
-	KubernetesVersion        types.String `tfsdk:"kubernetes_version"`
-	ControlPlaneMachineCount types.Int64  `tfsdk:"control_plane_machine_count"`
-	WorkerMachineCount       types.Int64  `tfsdk:"worker_machine_count"`
-	Flavor                   types.String `tfsdk:"flavor"`
-	Id                       types.String `tfsdk:"id"`
-	Endpoint                 types.String `tfsdk:"endpoint"`
-	ClusterCACertificate     types.String `tfsdk:"cluster_ca_certificate"`
-	Kubeconfig               types.String `tfsdk:"kubeconfig"`
-	ClusterDescription       types.String `tfsdk:"cluster_description"`
-	BootstrapClusterName     types.String `tfsdk:"bootstrap_cluster_name"`
-}
-
-func clusterResourceSchemaV0() schema.Schema {
-	return schema.Schema{
-		Attributes: map[string]schema.Attribute{
-			"name":                        schema.StringAttribute{Required: true},
-			"kubeconfig_path":             schema.StringAttribute{Optional: true, Computed: true},
-			"management_kubeconfig":       schema.StringAttribute{Optional: true},
-			"skip_init":                   schema.BoolAttribute{Optional: true, Computed: true},
-			"wait_for_ready":              schema.BoolAttribute{Optional: true, Computed: true},
-			"self_managed":                schema.BoolAttribute{Optional: true, Computed: true},
-			"infrastructure_provider":     schema.StringAttribute{Required: true},
-			"bootstrap_provider":          schema.StringAttribute{Optional: true},
-			"control_plane_provider":      schema.StringAttribute{Optional: true},
-			"core_provider":               schema.StringAttribute{Optional: true},
-			"target_namespace":            schema.StringAttribute{Optional: true, Computed: true},
-			"kubernetes_version":          schema.StringAttribute{Optional: true},
-			"control_plane_machine_count": schema.Int64Attribute{Optional: true},
-			"worker_machine_count":        schema.Int64Attribute{Optional: true},
-			"flavor":                      schema.StringAttribute{Optional: true},
-			"id":                          schema.StringAttribute{Computed: true},
-			"endpoint":                    schema.StringAttribute{Computed: true},
-			"cluster_ca_certificate":      schema.StringAttribute{Computed: true, Sensitive: true},
-			"kubeconfig":                  schema.StringAttribute{Computed: true, Sensitive: true},
-			"cluster_description":         schema.StringAttribute{Computed: true},
-			"bootstrap_cluster_name":      schema.StringAttribute{Computed: true},
-		},
-	}
 }
 
 // validateManagementBootstrap checks management.bootstrap: the type, the

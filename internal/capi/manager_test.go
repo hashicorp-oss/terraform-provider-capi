@@ -31,18 +31,18 @@ func TestManager_CreateCluster_FullWorkflow(t *testing.T) {
 
 	ctx := context.Background()
 	cpCount := int64(1)
-	workerCount := int64(2)
+	var phases []Phase
 
 	result, err := mgr.CreateCluster(ctx, CreateClusterOptions{
-		Name:               "test-cluster",
-		Namespace:          "default",
-		Providers:          dockerProviders(),
-		Variables:          map[string]string{"EXP_MACHINE_POOL": "true"},
-		KubernetesVersion:  "v1.31.0",
-		Network:            NetworkConfig{ControlPlaneEndpoint: &APIEndpoint{Host: "10.0.0.160", Port: 6443}},
-		ControlPlane:       ControlPlaneTopology{Replicas: &cpCount},
-		MachineDeployments: []MachineDeploymentTopology{{Name: "md-0", Replicas: &workerCount}},
-		WaitForReady:       true,
+		Name:              "test-cluster",
+		Namespace:         "default",
+		Providers:         dockerProviders(),
+		Variables:         map[string]string{"EXP_MACHINE_POOL": "true"},
+		KubernetesVersion: "v1.31.0",
+		Network:           NetworkConfig{ControlPlaneEndpoint: &APIEndpoint{Host: "10.0.0.160", Port: 6443}},
+		ControlPlane:      ControlPlaneSpec{Replicas: &cpCount, Template: &TemplateRef{Kind: "DockerMachineTemplate", Name: "cp"}},
+		WaitForReady:      true,
+		OnPhase:           func(p Phase) { phases = append(phases, p) },
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -82,14 +82,14 @@ func TestManager_CreateCluster_FullWorkflow(t *testing.T) {
 	if gen.Opts.Network.ControlPlaneEndpoint == nil || gen.Opts.Network.ControlPlaneEndpoint.Host != "10.0.0.160" {
 		t.Errorf("network not passed through: %+v", gen.Opts.Network)
 	}
-	if gen.Opts.ControlPlane.Replicas == nil || *gen.Opts.ControlPlane.Replicas != 1 {
-		t.Errorf("control plane topology not passed through: %+v", gen.Opts.ControlPlane)
+	if gen.Opts.ControlPlane.Replicas == nil || *gen.Opts.ControlPlane.Replicas != 1 || gen.Opts.ControlPlane.Template == nil || gen.Opts.ControlPlane.Template.Name != "cp" {
+		t.Errorf("control plane not passed through: %+v", gen.Opts.ControlPlane)
 	}
-	if len(gen.Opts.MachineDeployments) != 1 || gen.Opts.MachineDeployments[0].Name != "md-0" {
-		t.Errorf("machine deployments not passed through: %+v", gen.Opts.MachineDeployments)
+	if gen.Opts.Class != nil {
+		t.Error("Class must be unset by default")
 	}
-	if gen.Opts.ClusterClass {
-		t.Error("ClusterClass must be off by default")
+	if len(phases) < 3 || phases[0] != PhaseBootstrapping || phases[1] != PhaseInitialized || phases[len(phases)-1] != PhaseReady || result.Phase != PhaseReady {
+		t.Errorf("phases = %v, result phase = %s", phases, result.Phase)
 	}
 	if installer.InitCalls[0].Opts.Variables["EXP_MACHINE_POOL"] != "true" {
 		t.Error("init must receive the caller's variables")
@@ -598,7 +598,7 @@ func TestManager_CreateCluster_ClusterClassEnablesTopologyGate(t *testing.T) {
 
 	_, err := mgr.CreateCluster(context.Background(), CreateClusterOptions{
 		Name: "cc", Namespace: "default", Providers: dockerProviders(),
-		Variables: map[string]string{"OTHER": "x"}, ClusterClass: true,
+		Variables: map[string]string{"OTHER": "x"}, Class: &ClassRef{Name: "cc"},
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -610,8 +610,8 @@ func TestManager_CreateCluster_ClusterClassEnablesTopologyGate(t *testing.T) {
 	if vars["CLUSTER_TOPOLOGY"] != "true" || vars["OTHER"] != "x" {
 		t.Errorf("init variables = %v, want CLUSTER_TOPOLOGY=true added to the caller's", vars)
 	}
-	if len(generator.GenerateCalls) != 1 || !generator.GenerateCalls[0].Opts.ClusterClass {
-		t.Error("generator must be asked for ClusterClass output")
+	if len(generator.GenerateCalls) != 1 || generator.GenerateCalls[0].Opts.Class == nil || generator.GenerateCalls[0].Opts.Class.Name != "cc" {
+		t.Error("generator must be asked for a topology on the class")
 	}
 }
 

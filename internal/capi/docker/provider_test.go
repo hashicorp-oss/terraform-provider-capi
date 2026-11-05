@@ -30,8 +30,8 @@ func TestDefaultCreateOptions(t *testing.T) {
 	if *opts.ControlPlane.Replicas != DefaultControlPlaneCount {
 		t.Errorf("expected cp count %d, got %d", DefaultControlPlaneCount, *opts.ControlPlane.Replicas)
 	}
-	if *opts.MachineDeployments[0].Replicas != DefaultWorkerCount {
-		t.Errorf("expected worker count %d, got %d", DefaultWorkerCount, *opts.MachineDeployments[0].Replicas)
+	if opts.Infrastructure.Provider != InfrastructureProviderName || opts.ControlPlane.Provider != ControlPlaneProviderName || opts.ControlPlane.Template == nil || opts.ControlPlane.Template.Name != "my-cluster-control-plane" {
+		t.Errorf("cluster objects = %+v %+v", opts.Infrastructure, opts.ControlPlane)
 	}
 	if opts.Namespace != "default" {
 		t.Errorf("expected namespace 'default', got %q", opts.Namespace)

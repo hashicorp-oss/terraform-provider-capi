@@ -1,9 +1,6 @@
 #!/bin/bash
-# By name (the management kubeconfig and namespace come from the configuration
-# on the next apply):
+# [namespace/]name on the management cluster the provider block names. The
+# configuration's inputs are not read back; the status is. A self-managed
+# cluster is imported through its own kubeconfig in the provider block.
 terraform import capi_cluster.example my-cluster
-# With the management cluster's kubeconfig and the namespace, so the status is
-# read right away. Both must match `management.kubeconfig` and
-# `management.namespace` in the configuration; each requires replacement when
-# changed.
-terraform import capi_cluster.example ~/.kube/management.kubeconfig:capi-system/my-cluster
+terraform import capi_cluster.example capi-system/my-cluster

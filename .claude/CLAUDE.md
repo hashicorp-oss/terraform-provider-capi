@@ -1,1653 +1,288 @@
----
-description: Terraform plugin framework instructions for implementing the CAPI cluster resource, including schema design, lifecycle management, and best practices. Load when modifying cluster_resource.go or any related files under internal/provider/.
-applyTo: 'internal/provider/**'
----
+# terraform-provider-capi: implementation guide
 
-# Terraform Plugin Framework: `capi_cluster` Implementation Guide
-
-This document defines the schema conventions, model structures, lifecycle patterns, and implementation rules for the `capi_cluster` resource using the Terraform Plugin Framework.
-
----
-
-## 1. Schema Design Philosophy
-
-### 1.1 Core Nesting Rules
-
-The schema follows a **nested-first** design. Every concept that groups multiple related attributes MUST be expressed as a `schema.SingleNestedAttribute` (or `schema.ListNestedAttribute` / `schema.SetNestedAttribute` for collections).
-
-**Rule 1 — Multi-word attributes become nested objects:**
-
-Any attribute name composed of two or more words where the first word is a *domain* and the second is a *property* MUST be split into a nested object.
-
-```
-✗  infrastructure_provider    →  ✓  infrastructure = { <name> = { version } }
-✗  bootstrap_provider         →  ✓  bootstrap = { <name> = { version } }
-✗  management_kubeconfig      →  ✓  management { kubeconfig }
-✗  worker_machine_count       →  ✓  topology { workers { machine_deployments } }
-✗  kubeconfig_path            →  ✓  output { kubeconfig_path }
-✗  control_plane_endpoint →  ✓  network { control_plane_endpoint { host, port } }
-```
-
-**Rule 2 — Single-subject compound words stay as ONE nested object:**
-
-Compound words that describe a single concept become a top-level nested object name, not a further split.
-
-```
-✓  control_plane = { talos = { version } }      ← "control_plane" is one subject
-✓  machine_count                                ← inside its parent, this is a simple property
-✗  control { plane { provider } }              ← wrong: splits a single subject
-```
-
-**Rule 3 — Flat attributes are the exception, not the rule:**
-
-Only truly atomic, cluster-level identity properties remain flat at the top level:
-
-```
-✓  name                ← cluster identity (single word)
-✓  kubernetes_version   ← cluster-wide version (single property, no domain grouping)
-✓  cluster_class       ← generation mode switch (single subject)
-✓  id                  ← standard Terraform computed identifier
-```
-
-Everything else MUST be nested under a domain object.
-
-**Rule 4 — Computed outputs go in `status`:**
-
-All provider-computed values (endpoint, kubeconfig, CA cert, description) MUST be grouped under a single computed-only `status` nested attribute. This cleanly separates user inputs from provider outputs.
-
-**Rule 5 — Use `schema.SingleNestedAttribute` for singular objects, `schema.ListNestedAttribute` for ordered collections:**
-
-| Pattern | Attribute Type | When |
-|---------|---------------|------|
-| One instance | `schema.SingleNestedAttribute` | `management`, `topology`, `status` |
-| Named instances | `schema.MapNestedAttribute` | Provider maps: `infrastructure`, `bootstrap`, `control_plane`, `core`, `ipam`, `addon` (keyed by provider name) |
-| Ordered collection | `schema.ListNestedAttribute` | `inventory.machine`, `topology.workers.machine_deployments` |
-| Unordered unique collection | `schema.SetNestedAttribute` | Worker node groups (future) |
-| Key-value pairs | `schema.MapAttribute` | `labels`, `annotations` |
-
-**Rule 6 — Never use blocks for new schemas:**
-
-Per HashiCorp's official guidance: *"Use nested attribute types instead of block types for new schema implementations. Block support is mainly for migrating legacy SDK-based providers."*
-
-All nested structures MUST use `schema.SingleNestedAttribute`, `schema.ListNestedAttribute`, or `schema.SetNestedAttribute` — never `schema.SingleNestedBlock`, `schema.ListNestedBlock`, or `schema.SetNestedBlock`.
-
-### 1.2 Naming Conventions
-
-| Convention | Example | Rule |
-|-----------|---------|------|
-| Snake case for all attributes | `machine_count`, `ip_address` | Standard Terraform convention |
-| Nested object names are domain nouns | `infrastructure`, `control_plane`, `topology` | Not verbs, not adjectives |
-| Boolean attributes use positive form | `enabled`, `self_managed` | Avoid double negatives like `skip_disabled` |
-| Computed outputs never appear in config | `status { endpoint }` | Prevent user confusion on what's configurable |
-| Sensitive attributes are marked | `bmc { password }`, `status { kubeconfig }` | Framework enforces masking in output |
+The provider block is the management cluster (as the `aws` provider block is
+the AWS API), every separable Cluster API object is its own resource, and
+`capi_cluster` keeps what `aws_eks_cluster` would: identity, version, network,
+the control plane, the create-only bootstrap, waits, status. Design:
+`docs/superpowers/specs/2026-11-04-provider-design.md`; build plan:
+`docs/superpowers/plans/2026-11-05-eks-shaped-resources.md`.
 
 ---
 
-## 2. Target HCL Experience
+## 1. Schema conventions
 
-### 2.1 Minimal Configuration (Docker Provider)
+**Nested-first.** Every concept that groups attributes is a
+`schema.SingleNestedAttribute` (`MapNestedAttribute` for named instances,
+`ListNestedAttribute` for ordered collections, `MapAttribute` for key/value
+pairs). Never blocks. Multi-word attributes become nested objects
+(`control_plane_endpoint` → `network { control_plane_endpoint { host, port } }`);
+single-subject compounds stay one object (`control_plane`). Computed outputs
+live under `status`. Snake case; nested object names are domain nouns;
+booleans positive; sensitive values marked.
+
+**Dynamic attributes** (`schema.DynamicAttribute`) carry object specs
+(`spec`, `machine_spec`, `variables`, `patches`). terraform-plugin-framework
+refuses a dynamic attribute *inside a collection nested attribute* at provider
+start ("Dynamic types inside of collections are not currently supported"),
+which no Go test catches: the provider map entries' `resource_config` and the
+machine-deployment list in older schemas are therefore YAML/JSON strings
+(`yamlObject`). Run `.test` (`go install ./... && terraform validate`) after
+any schema change.
+
+**Kinds and API versions are discovered, never hardcoded**
+(`internal/capi/kinds.go`, `KindCatalog`: CRDs labelled
+`cluster.x-k8s.io/provider=<label>`, resolved by kind suffix, version by the
+contract label for the core contract in use; `ByKind` for a kind name;
+`KindsOf` for a provider's kinds). Ref shapes follow the contract: v1beta2
+`{apiGroup, kind, name}`, legacy `{apiVersion, kind, name, namespace}`.
+
+---
+
+## 2. Resources
+
+| Resource | Object(s) | Cloud analogue |
+| --- | --- | --- |
+| `capi_cluster` | `Cluster`, `<Infra>Cluster`, `<CP>ControlPlane` (+ its own machine template with `machine_spec`), or a topology `Cluster` on a class; the bootstrap/pivot | `aws_eks_cluster` |
+| `capi_machine_template` (`role` machine/cluster), `capi_control_plane_template`, `capi_bootstrap_template` | hash-named immutable revisions `<name>-<8 hex sha256(spec)>`, `ref`, GC beyond `revision_history` | `aws_launch_template` |
+| `capi_machine_deployment` | `MachineDeployment` (direct) or one topology entry under its own field manager | `aws_eks_node_group` |
+| `capi_machine_health_check` | `MachineHealthCheck` (v1beta2 `checks`/`remediation` and legacy shapes) | — |
+| `capi_cluster_class` | `ClusterClass` from template refs; exports `ref`, `classes` | — |
+| `capi_helm_chart_proxy` | CAAPH `HelmChartProxy` + per-cluster `HelmReleaseProxy` wait; `force_delete` | `aws_eks_addon` |
+| `capi_cluster_resource_set` | `ClusterResourceSet` + its ConfigMaps/Secrets; `prune`, `wait.applied`/`ready` | `aws_eks_addon` |
+| `capi_hardware` | Tinkerbell `Hardware`, rufio `Machine`, BMC `Secret`; `adopted`, `force` | `aws_ec2_host` |
+| `capi_provider` | one clusterctl provider: init / upgrade apply / delete; `kinds`, `ref` | `aws_eks_addon` |
+| `capi_object` | any CR of an installed provider | `kubernetes_manifest` |
+| ephemeral `capi_kubeconfig` | `<name>-kubeconfig` Secret, or derived from `provider_secrets` | `aws_eks_cluster_auth` |
+| data `capi_cluster`, `capi_provider_components` | describe; kinds a release ships | — |
+
+Shared machinery: `internal/capi/objects.go` (`ObjectClient`: server-side
+apply with a field manager, get, list, delete, patch, condition and deletion
+waits, `WithFieldManager`, `WorkloadClient` through a cluster's kubeconfig
+Secret), `internal/provider/object_engine.go` (render, apply-and-wait, subset
+drift detection, `wait` and metadata attributes, `attr.Value` ↔ Go for
+dynamic specs), `internal/provider/connection.go` (the provider block's
+`kubeconfig` content or `kubernetes` block, materialised lazily as a file).
+
+---
+
+## 3. `capi_cluster` (schema version 5)
+
+### 3.1 Target HCL
 
 ```hcl
+# On the management cluster the provider block names (providers are capi_provider resources).
 resource "capi_cluster" "dev" {
-  name               = "dev-cluster"
+  name               = "dev"
   kubernetes_version = "v1.31.0"
-
-  infrastructure = { docker = {} }
+  infrastructure     = { provider = "docker" }
+  control_plane      = { provider = "kubeadm", replicas = 1, infrastructure = capi_machine_template.cp.ref }
 }
-```
 
-### 2.2 Full Configuration (Tinkerbell Bare-Metal)
+# Topology mode.
+resource "capi_cluster" "classy" {
+  name               = "classy"
+  kubernetes_version = "v1.34.0"
+  class              = capi_cluster_class.main.ref
+  control_plane      = { replicas = 3 }
+}
 
-Providers are maps keyed by provider name, matching the cluster-api-operator
-Helm values layout. `fetch_config.owner` alone is enough to point at a fork of
-a provider clusterctl already knows; the repository name and components file
-are inferred and the pinned `version` is embedded in the release URL. The
-provider generates the CAPI objects itself (§3.6); each entry's
-`resource_config` (a YAML/JSON object, typically `yamlencode({...})`) is merged
-into the spec of that provider's object.
+# Self-managed Tinkerbell cluster: bootstrap, providers, seed inventory and manifests are create-only.
+resource "capi_cluster" "prod" {
+  name               = "prod"
+  namespace          = "tinkerbell"
+  kubernetes_version = "v1.34.0"
+  network            = { control_plane_endpoint = { host = "192.168.1.100" } }
 
-```hcl
-resource "capi_cluster" "production" {
-  name               = "prod-cluster"
-  kubernetes_version = "v1.31.0"
-
-  network = {
-    control_plane_endpoint = { host = "192.168.1.100", port = 6443 }
-    pods                   = { cidr_blocks = ["10.244.0.0/16"] }
-    services               = { cidr_blocks = ["10.96.0.0/12"] }
-  }
-
-  management = {
-    self_managed = true
-    namespace    = "capi-system"
-  }
-
-  core = {
-    cluster-api = {
-      manager = {
-        feature_gates = { ClusterTopology = true, MachinePool = true }
-      }
-    }
-  }
-
-  infrastructure = {
-    tinkerbell = {
-      version         = "v0.7.9"
-      fetch_config    = { owner = "tinkerbell-community" }
-      manager         = { feature_gates = { ClusterTopology = true } }
-      resource_config = yamlencode({ templateInline = file("${path.module}/talos-workflow.yaml") }) # TinkerbellCluster.spec
-    }
-  }
-
-  bootstrap = {
-    talos = {
-      version         = "v0.8.2"
-      fetch_config    = { owner = "sidero-community" }
-      resource_config = yamlencode({ talosVersion = "v1.13" }) # default worker TalosConfigTemplate.spec
-    }
-  }
-
+  infrastructure = { provider = "tinkerbell", spec = { templateInline = file("workflow.yaml") } }   # TinkerbellCluster.spec
   control_plane = {
-    talos = {
-      version      = "v0.7.1"
-      fetch_config = { owner = "sidero-community" }
-      resource_config = yamlencode({ # TalosControlPlane.spec
-        controlPlaneConfig = { controlplane = { talosVersion = "v1.13", strategicPatches = [local.vip_patch] } }
-      })
-    }
+    provider     = "talos"
+    replicas     = 3
+    machine_spec = { hardwareAffinity = { required = [{ labelSelector = { matchLabels = { type = "cp" } } }] } }  # own template: CRDs do not exist before the bootstrap
+    spec         = { controlPlaneConfig = { controlplane = { talosVersion = "v1.13", strategicPatches = [...] } } } # TalosControlPlane.spec
   }
-
-  ipam = {
-    unifi = {
-      version      = "v0.4.1"
-      fetch_config = { owner = "ubiquiti-community", repository = "cluster-api-ipam-provider-unifi" }
-    }
-  }
-
-  addon = { helm = {} }
-
-  topology = {
-    control_plane = {
-      replicas       = 3
-      infrastructure = yamlencode({ hardwareAffinity = { required = [{ labelSelector = { matchLabels = { type = "cp" } } }] } })
-    }
-    workers = {
-      machine_deployments = [
-        {
-          name           = "md-0"
-          replicas       = 5
-          metadata       = { labels = { tier = "worker" } }
-          infrastructure = yamlencode({ hardwareAffinity = { required = [{ labelSelector = { matchLabels = { type = "worker" } } }] } })
-        }
-      ]
-    }
-  }
-
-  inventory = {
-    machine = [
-      {
-        hostname = "cp-1"
-        network = {
-          ip_address  = "192.168.1.10"
-          netmask     = "255.255.255.0"
-          gateway     = "192.168.1.1"
-          mac_address = "aa:bb:cc:dd:ee:01"
-          nameservers = ["8.8.8.8", "8.8.4.4"]
-          vlan_id     = "100"
-        }
-        disk = { device = "/dev/sda" }
-        bmc = {
-          address  = "192.168.2.10"
-          username = "admin"
-          password = var.bmc_passwords["cp-1"]
-        }
-        labels = { "type" = "cp" }
-      },
-      {
-        hostname = "worker-1"
-        network = {
-          ip_address  = "192.168.1.20"
-          netmask     = "255.255.255.0"
-          gateway     = "192.168.1.1"
-          mac_address = "aa:bb:cc:dd:ee:11"
-          nameservers = ["8.8.8.8"]
-        }
-        disk = { device = "/dev/sda" }
-        bmc = {
-          address  = "192.168.2.20"
-          username = "admin"
-          password = var.bmc_passwords["worker-1"]
-        }
-        labels = { "type" = "worker" }
-      }
-    ]
-  }
-
-  wait = {
-    enabled = true
-    timeout = "60m"
-  }
-
-  output = {
-    kubeconfig_path = "~/.kube/prod-cluster.kubeconfig"
-  }
-}
-
-# Outputs from computed status block:
-output "cluster_endpoint" {
-  value = capi_cluster.production.status.endpoint
-}
-
-output "kubeconfig" {
-  value     = capi_cluster.production.status.kubeconfig
-  sensitive = true
-}
-```
-
-### 2.3 File-Based Inventory (EKS-A CSV Compatibility)
-
-```hcl
-resource "capi_cluster" "bare_metal" {
-  name               = "bm-cluster"
-  kubernetes_version = "v1.31.0"
-
-  infrastructure = { tinkerbell = { version = "v0.7.9" } }
 
   management = {
     self_managed = true
-  }
-
-  topology = {
-    control_plane = { replicas = 3 }
-    workers = {
-      machine_deployments = [{ name = "md-0", replicas = 3 }]
+    providers = {                    # the six clusterctl provider maps, keyed by provider name
+      infrastructure = { tinkerbell = { version = "v0.7.9", fetch_config = { owner = "tinkerbell-community" } } }
+      bootstrap      = { talos = { version = "v0.8.2", fetch_config = { owner = "sidero-community" }, resource_config = yamlencode({ talosVersion = "v1.13" }) } }
+      control_plane  = { talos = { version = "v0.8.0", fetch_config = { owner = "sidero-community" } } }
+      addon          = { helm = {} }
+    }
+    bootstrap = {
+      type = "kairos", machine = "nuc", on_failure = "resume"
+      boot   = { method = "manual" | "auto" | "virtual_media", device = "usb", timeout = "10m", attempts = 3 }
+      kairos = { iso = "http://.../kairos.iso", address = "192.168.1.50", ssh = { user = "kairos", private_key = file("...") } }
+      addons = { helm = [{ name = "tinkerbell", chart = "oci://...", values = yamlencode({ deployment = { hostNetwork = true } }) }] }
     }
   }
-
-  inventory = {
-    source = "${path.module}/hardware.csv"
-  }
+  manifests = { management = [local.cilium_proxy, local.tinkerbell_proxy] }   # HelmChartProxy/CRS YAML for the workload's addons
+  inventory = { machine = [{ hostname = "nuc", network = {...}, bmc = {...}, labels = { type = "worker" } }, ...] }
+  wait      = { conditions = ["Available"], timeout = "90m" }
 }
+
+# Node groups, addons and machines are their own resources, applied against
+# the cluster once it manages itself (provider alias on ephemeral.capi_kubeconfig).
 ```
+
+### 3.2 Attributes
+
+| Attribute | Type / mutability | Notes |
+| --- | --- | --- |
+| `name`, `namespace` | Required / Optional-Computed (`default`); RequiresReplace | the Cluster's identity |
+| `kubernetes_version` | Optional, in place | CP `version`, or `spec.topology.version` (required with `class`) |
+| `network` | Optional, in place | `control_plane_endpoint {host, port}`, `pods`/`services {cidr_blocks}`, `service_domain` |
+| `infrastructure` | `{ provider (RequiresReplace), spec (Dynamic) }` | direct mode; exclusive with `class` |
+| `control_plane` | `{ provider (RequiresReplace), replicas, infrastructure = ref, machine_spec (Dynamic), spec (Dynamic) }` | with `class` only `replicas`; otherwise `provider` and one of `infrastructure`/`machine_spec` required |
+| `class` | `{ name, namespace }` | topology mode; class↔direct switch replaces (ModifyPlan) |
+| `management` | `{ self_managed (RequiresReplace), providers { core, infrastructure, bootstrap, control_plane, ipam, addon }, bootstrap { type, machine, on_failure, boot, kairos, addons } }` | `providers` and `bootstrap` only with `self_managed` (ValidateConfig) |
+| `manifests.management` | List(String), re-applied | applied before the cluster objects and again after a move |
+| `inventory` | `{ manage, source, machine[] }` | seed inventory of a self-managed Tinkerbell cluster; later machines are `capi_hardware` |
+| `wait` | `{ conditions (default ["Available"]), timeout (default 60m) }` | `Available` is `Ready` on the legacy contract; empty list waits for nothing |
+| `status` | Computed | `phase`, `error`, `endpoint`, `ca_certificate`, `description`, `bootstrap_cluster`, `conditions[]` |
+| `provider_secrets` | Computed, sensitive, `UseNonNullStateForUnknown` | root credential captured after the pivot (`<name>-talos` bundle or `<name>-ca`) |
+
+Removed in v5: `cluster_class`, `topology` (control plane → `control_plane.replicas`; workers → `capi_machine_deployment`), `output.kubeconfig_path` and `status.kubeconfig` (→ `ephemeral.capi_kubeconfig`), the six top-level provider maps (→ `management.providers`), `management.{kubeconfig, skip_init, uninstall, namespace}` (the provider block is the management connection; providers on it are `capi_provider`).
+
+### 3.3 Provider maps (`management.providers`)
+
+`providerMapAttribute(desc, lifecycle)` with the shared `providerNestedObject()`
+(`version`, `fetch_config {owner, repository, url, oci}`, `config_variables`,
+`secret_config_variables`, `deployment`, `manager`, `additional_manifests`,
+`manifest_patches`, `patches`, `resource_config` YAML/JSON string). Entries become
+`capi.ProviderConfig` in a `capi.ProviderSet`; `fetch_config` resolves through
+`capi.ResolveFetchURL` (`internal/capi/fetch.go`); customizations through the
+customizing repository factory injected into both the init and the cluster
+client (`newClusterctlClient`). Mutability: `infrastructure`/`bootstrap`/
+`control_plane` key changes replace (`providerMapRequiresReplace` compares key
+sets); other changes are `clusterctl upgrade apply` / init / delete in place
+(`providerChanges` → `UpgradeProviders`/`RemovedProviders`, `SkipInit` when
+nothing changed). `resource_config` of the infrastructure and control-plane
+entries merges under the cluster's `infrastructure.spec` / `control_plane.spec`
+(RFC 7396: `providerDefaults` ← `resource_config` ← cluster spec ← wiring).
+
+### 3.4 Generated objects (`internal/capi/generate.go`)
+
+Direct mode: `Cluster <name>` (network + refs), `<Infra>Cluster <name>`,
+`<CP>ControlPlane <name>-control-plane` (`version`, `replicas`,
+`machineTemplate` ref in the shape `ControlPlaneRefShape` decides), and, with
+`machine_spec`, the hash-named `<Infra>MachineTemplate
+<name>-control-plane-<hash>` (a spec change rotates it and rolls the control
+plane). With a `control_plane.infrastructure` ref nothing else is generated.
+Topology mode: one `Cluster` with `spec.topology {classRef|class, version,
+controlPlane.replicas}`; the ClusterClass is `capi_cluster_class`. Golden
+manifests: `internal/capi/testdata/golden/` (`UPDATE_GOLDEN=1 go test
+./internal/capi -run TestGenerate` regenerates). CRD fixtures:
+`internal/capi/testdata/crds/`.
+
+### 3.5 Lifecycle (`cluster_resource.go`, `internal/capi/manager.go`)
+
+- **Create/Update** share `run`: external management (`!self_managed`) →
+  the provider block's kubeconfig, `SkipInit`; a self-managed cluster that has
+  pivoted (`status.phase == ready`) → a kubeconfig derived from
+  `provider_secrets` + `status.endpoint` (`derivedKubeconfig`), providers
+  converged by `providerChanges`; otherwise the bootstrap flow
+  (`ManagementKubeconfig = ""`, `SelfManaged`, `KeepBootstrapOnFailure` when
+  `on_failure = resume`).
+- **Phases** (`capi.Phase`): bootstrapping → initialized →
+  control_plane_initialized → paused → handed_over → pivoted → ready, reported
+  through `CreateClusterOptions.OnPhase` and carried by `*capi.PhaseError`
+  (with the bootstrap cluster left in place). With `on_failure = resume` a
+  failure saves `status.phase`/`status.error` with a warning; `ModifyPlan`
+  marks `status` unknown for any non-terminal phase so the next apply re-runs
+  the workflow (every step is check-before-act: kind reuses an existing
+  cluster, Kairos reuses a node answering over SSH, init converges, objects
+  are server-side applied). `fail` returns the error (taint and replace).
+- **Pivot** (`Manager.CreateCluster`, at most one DHCP responder at any step):
+  bootstrap → providers + `bootstrap.addons` → inventory (bootstrap machine
+  excluded) + `manifests.management` → cluster objects →
+  `ControlPlaneInitialized` → `handOver` (pause the Cluster, Tinkerbell
+  quiescence, uninstall bootstrap addons, `WaitForAddons` on the CAAPH
+  proxies) → init workload → `clusterctl move` → re-apply inventory and
+  manifests → delete bootstrap → `rootSecrets` into `provider_secrets` →
+  readiness.
+- **Read**: `GetClusterInfo` through `managementKubeconfig` (provider block,
+  kind bootstrap path while unpivoted, derived otherwise). `ErrClusterNotFound`
+  removes the resource; any other error keeps state. Status carries the
+  Cluster's conditions and `RenderObjectTree` description.
+- **Delete**: unpivoted self-managed → delete through the kind bootstrap or
+  power the Kairos node off; otherwise `DeleteCluster` (wait for the Cluster
+  to vanish; self-managed = reverse pivot through a fresh kind cluster,
+  `deleteSelfManaged`, resumable). Failures are errors, never warnings.
+- **Import**: `[namespace/]name` on the provider block's management cluster;
+  status phase `ready`. A self-managed cluster is imported through its own
+  kubeconfig in the provider block.
+
+### 3.6 State upgrades (`cluster_resource_upgrade.go`)
+
+Every upgrader is a raw-JSON rewrite to v5: `upgradeV0JSON` (flat → v1 shape),
+`upgradeV1JSON` (→ v2 → v3 → v4 → v5), `upgradeV2JSON`, `upgradeV3JSON`
+(`upgradeV3ToV4JSON` refuses Talos/in-place bootstraps), `upgradeV4JSON`:
+namespace to the top level, provider maps under `management.providers`,
+`cluster_class`/`topology` → `class` or `infrastructure` + `control_plane`
+(the generated control-plane template becomes `machine_spec` as a typed
+dynamic value, `dynamicJSON`, so the hash and the template name are unchanged
+and nothing rolls), `output`/`status.kubeconfig` dropped, `wait.enabled` →
+`wait.conditions`, `status.phase = ready`, `bootstrap.on_failure = resume`.
+
+| Version | Change |
+| --- | --- |
+| 0 | flat attributes |
+| 1 | nested objects + inventory |
+| 2 | provider maps, `fetch_config`, `topology`, `ipam` |
+| 3 | generated manifests: `resource_config`, `network`, `cluster_class` |
+| 4 | Kairos pivot only; `cni`, `management.addons`, Talos bootstrapper removed |
+| 5 | EKS shape: `namespace`, `infrastructure`/`control_plane`/`class`, `management.providers`, phases and `on_failure`, `wait.conditions`, derived connection |
 
 ---
 
-## 3. Complete Schema Definition
+## 4. Other resources: what to know
 
-### 3.1 Top-Level Attributes
-
-```go
-"name": schema.StringAttribute{
-    MarkdownDescription: "The name of the cluster. Must be a valid DNS-1123 subdomain.",
-    Required:            true,
-    PlanModifiers: []planmodifier.String{
-        stringplanmodifier.RequiresReplace(),
-    },
-},
-"kubernetes_version": schema.StringAttribute{
-    MarkdownDescription: "Kubernetes version for the workload cluster (e.g., `v1.31.0`).",
-    Optional:            true,
-},
-"cluster_class": schema.BoolAttribute{
-    MarkdownDescription: "Generate a ClusterClass and a topology Cluster instead of direct objects.",
-    Optional:            true,
-    Computed:            true,
-    Default:             booldefault.StaticBool(false),
-    PlanModifiers:       []planmodifier.Bool{boolplanmodifier.RequiresReplace()},
-},
-"id": schema.StringAttribute{
-    Computed:            true,
-    MarkdownDescription: "Cluster identifier.",
-    PlanModifiers: []planmodifier.String{
-        stringplanmodifier.UseStateForUnknown(),
-    },
-},
-```
-
-### 3.2 `management` — Cluster Management Configuration
-
-Groups all attributes related to HOW the cluster is managed: management cluster identity, initialization, self-management pivot, and namespace scoping.
-
-```go
-"management": schema.SingleNestedAttribute{
-    MarkdownDescription: "Management cluster configuration. Controls how the CAPI lifecycle is managed.",
-    Optional:            true,
-    Attributes: map[string]schema.Attribute{
-        "kubeconfig": schema.StringAttribute{
-            MarkdownDescription: "Path to the kubeconfig for an existing management cluster. If not provided, a bootstrap cluster (kind) is created automatically.",
-            Optional:            true,
-            PlanModifiers: []planmodifier.String{
-                stringplanmodifier.RequiresReplace(),
-            },
-        },
-        "skip_init": schema.BoolAttribute{
-            MarkdownDescription: "Skip running clusterctl init on the management cluster. Use when CAPI providers are already installed and managed elsewhere: the provider maps are then never installed, upgraded or deleted by this resource.",
-            Optional:            true,
-            Computed:            true,
-            Default:             booldefault.StaticBool(false),
-        },
-        "uninstall": schema.BoolAttribute{ // clusterctl delete --all on destroy; only with kubeconfig + skip_init = false
-            Optional:            true,
-            Computed:            true,
-            Default:             booldefault.StaticBool(false),
-        },
-        "self_managed": schema.BoolAttribute{
-            MarkdownDescription: "Pivot CAPI management from bootstrap to workload cluster (clusterctl move). Required `true` for Tinkerbell provider.",
-            Optional:            true,
-            Computed:            true,
-            Default:             booldefault.StaticBool(false),
-            PlanModifiers: []planmodifier.Bool{
-                boolplanmodifier.RequiresReplace(),
-            },
-        },
-        "namespace": schema.StringAttribute{
-            MarkdownDescription: "Namespace on the management cluster where CAPI resources are created.",
-            Optional:            true,
-            Computed:            true,
-            PlanModifiers: []planmodifier.String{
-                stringplanmodifier.RequiresReplace(),
-            },
-        },
-    },
-},
-```
-
-**Mutability:**
-- `kubeconfig` — immutable (RequiresReplace)
-- `self_managed` — immutable (RequiresReplace)
-- `namespace` — immutable (RequiresReplace)
-- `skip_init` — mutable; `false` means this resource owns the providers on the
-  management cluster (install, upgrade, delete, see §3.3 and §7.4)
-- `uninstall` — mutable; on destroy, `clusterctl delete --all` (CRDs and
-  namespaces kept) on an external management cluster this resource initialised
-
-**`management.bootstrap` — transient bootstrap cluster:**
-
-```go
-"bootstrap": schema.SingleNestedAttribute{
-    Optional: true,
-    PlanModifiers: []planmodifier.Object{objectplanmodifier.RequiresReplace()},
-    Attributes: map[string]schema.Attribute{
-        "type":    // "kind" (default) | "kairos"
-        "machine": // inventory.machine[].hostname; required for kairos
-        "boot":    // { method: auto|virtual_media|manual, timeout: "15m", attempts: 3, device: cdrom|usb }
-        "kairos":  // { iso, address, ssh { user, port, private_key, host_key } }
-        "addons":  // { prerequisites [yaml], helm [ { name, namespace, chart, repository, version, values, timeout } ], manifests [yaml] }
-    },
-},
-```
-
-There is no in-place mode and no Talos bootstrapper (removed 2026-11-05,
-`docs/superpowers/plans/2026-11-04-remove-talos-bootstrap.md`): a node adopted into
-the cluster it bootstrapped is rewritten by CABPT at the first control-plane change,
-so the bootstrap node is disposable by design and joins the cluster afterwards as an
-ordinary CAPT-provisioned machine. `type = "kind"` runs the bootstrap cluster on the
-machine running Terraform; `type = "kairos"` runs it on a bare-metal machine.
-
-**Disposable Kairos node** (`type = "kairos"`, `internal/capi/kairos`, always a pivot,
-requires `self_managed = true`): the bootstrap machine is booted from a user-built Kairos
-live ISO (AuroraBoot `kairos.iso.custom.iso` embedding the cloud-config: `k3s.enabled`,
-`users[].ssh_authorized_keys`, `kairos.ram` on the live command line; see
-`examples/resources/capi_cluster/kairos-cloud-config.yaml`). `boot.method` `auto` or
-`virtual_media` attach the ISO through the BMC (`bmc.MediaBoot`, `internal/capi/bmc`: power
-off if on, eject, attach by AMT storage redirection or bmclib virtual media plus a one-shot
-boot override, power on); `manual` drives no BMC at all (a USB stick and a power button) and
-the node needs no `bmc`. The bootstrapper waits for SSH on `kairos.address` (default: the
-machine's `ip_address`), keeps the media attached for the life of the node (the cloud-config
-is read from the ISO root at every stage), reads `/etc/rancher/k3s/k3s.yaml` (plain read,
-then `sudo -n`), rewrites its server to the node address, waits for the API and a Ready
-node, installs `bootstrap.addons` (`internal/capi/addons`, order `prerequisites`, `helm`,
-`manifests`) and returns the cluster; a node that already answers over SSH is reused.
-`Delete` ejects the media and powers the node off (with `manual`, it tells the operator
-to). `disk` is not required on the machine. Model: `KairosModel{ISO, Address, SSH}` /
-`KairosSSHModel{User, Port, PrivateKey, HostKey}`; wiring in `buildKairosBootstrapConfig`
-and `managerFor` (`internal/provider/kairos_bootstrap.go`).
-
-**`management.bootstrap.addons`** is the bootstrap cluster's own stack, a Tinkerbell on
-host networking bound to the node's address, so the first control-plane machine can
-netboot. It is installed right after `clusterctl init` on the bootstrap cluster and
-uninstalled before management moves away (`capi.AddonInstaller.Uninstall`). The workload
-cluster's own addons (its CNI, its customized Tinkerbell, IPAM pools) are CAAPH
-`HelmChartProxy` and `ClusterResourceSet` objects declared in `manifests.management`;
-`addon = { helm = {} }` installs CAAPH, which brings them up on the workload cluster as
-soon as its control plane is initialized.
-
-**Pivot sequence with the Tinkerbell handover** (`Manager.CreateCluster`, at most one DHCP
-responder at any step): init bootstrap → `bootstrap.addons` → inventory (bootstrap machine
-excluded) and `manifests.management` → cluster objects → phase one:
-`ControlPlaneInitialized` (the first control-plane machine netbooted from the bootstrap
-Tinkerbell) → `handOver`: `Applier.Pause` (`spec.paused` on the Cluster, so CAPT creates
-no further Machines or Workflows) → Tinkerbell quiescence (`capi.Quiescer`, no Workflow
-PREPARING/PENDING/RUNNING/POST) → uninstall `bootstrap.addons` → `Waiter.WaitForAddons`
-(every HelmChartProxy whose `status.matchingClusters` names the cluster has a Ready
-HelmReleaseProxy for it; nothing to wait for without CAAPH) → init workload →
-`clusterctl move` (carries Hardware, rufio Machines, Workflows and the proxies; resumes
-the Cluster on the target) → re-apply the inventory (bootstrap machine now a netboot
-target; BMC Secrets do not move) and `manifests.management` on the workload → delete the
-bootstrap cluster → capture the root credential (`rootSecrets`: the `<name>-talos` Secret,
-else `<name>-ca`, keys prefixed with the Secret name) into `provider_secrets` → phase two:
-Cluster `Available`/`Ready` on the new management cluster. A pivot without a workload
-kubeconfig is an error, never a bootstrap deletion. The reverse pivot on destroy
-(`deleteSelfManaged`) installs `bootstrap.addons` on the kind cluster (only rufio matters
-there) and pauses the Cluster before quiescing and moving back.
-
-### 3.3 Provider Maps — `core`, `infrastructure`, `bootstrap`, `control_plane`, `ipam`, `addon`
-
-Every CAPI provider category is a `schema.MapNestedAttribute` keyed by the
-provider name clusterctl uses (`cluster-api`, `docker`, `tinkerbell`, `kubeadm`,
-`talos`, `helm`, `unifi`). All six maps share one nested object built by
-`providerNestedObject()` and are created through `providerMapAttribute(desc, required)`:
-
-```go
-"infrastructure": providerMapAttribute("Infrastructure provider, keyed by name ...", true),
-"bootstrap":      providerMapAttribute("Bootstrap providers, keyed by name ...", false),
-// core, control_plane, ipam, addon likewise
-```
-
-The shared provider object (modeled after the cluster-api-operator provider CRDs):
-
-| Attribute | Type | Purpose |
-|---|---|---|
-| `version` | String Optional | Release tag (`v0.7.9`); omitted means clusterctl's `latest` |
-| `fetch_config` | SingleNested Optional | `{ owner, repository, url, oci }` — see 3.4 |
-| `config_variables` | Map(String) Optional | `${VAR}` substitution in component YAML |
-| `secret_config_variables` | Map(String) Optional, Sensitive | Same, for secrets |
-| `deployment` | SingleNested Optional | replicas, node_selector, service_account_name, containers[] |
-| `manager` | SingleNested Optional | profiler_address, max_concurrent_reconciles, verbosity, `feature_gates` (Map(Bool)), additional_args |
-| `additional_manifests` | String Optional | Extra YAML applied with the components |
-| `manifest_patches` | List(String) Optional | RFC 7396 merge patches (exclusive with `patches`) |
-| `patches` | ListNested Optional | Strategic merge / RFC 6902 patches with `target` selectors |
-| `resource_config` | String Optional | YAML/JSON object (`yamlencode({...})`) merged into the spec of the provider's generated cluster object (§3.6); only on `infrastructure`, `control_plane`, `bootstrap` |
-
-An empty object (`helm = {}`) installs clusterctl's default release.
-
-**Mutability (the clusterctl provider lifecycle):** `infrastructure`,
-`bootstrap` and `control_plane` carry `providerMapRequiresReplace()`, a
-`mapplanmodifier.RequiresReplaceIf` that compares the *key sets* of state and
-plan: the generated cluster objects follow the provider names, so adding or
-removing a name replaces the cluster. Everything else is applied in place by
-Update (`providerChanges`, `internal/provider/provider_lifecycle.go`):
-
-- a `resource_config` change re-applies the generated objects;
-- any other change inside an entry (version, `fetch_config`, customizations)
-  is `clusterctl upgrade apply` for that entry (`CreateClusterOptions.
-  UpgradeProviders` → `Installer.Upgrade`); an unpinned entry is re-rendered at
-  its installed version, which re-applies its customizations;
-- an added entry in any map is installed by `clusterctl init`
-  (`Installer.Init` converges: clusterctl skips providers at the requested
-  version, the installer upgrades pinned ones installed at another version
-  first, then installs what is missing);
-- an entry removed from `ipam` or `addon` is `clusterctl delete`d, keeping
-  CRDs (`RemovedProviders` → `Installer.Uninstall`); a removed `core` entry
-  only stops pinning.
-
-Update sets `SkipInit` when nothing in the six maps changed, since init
-resolves every release again. With `management.skip_init = true` the
-providers are never touched. `clusterctl upgrade apply` fetches components
-through the *cluster* client, so `newClusterctlClient` injects a
-`ClusterClientFactory` whose repository factory is the customizing one too
-(`customizingClusterFactory`); without it an upgrade would drop every
-customization init applied.
-
-**Cardinality:** `infrastructure` is Required and must contain exactly one
-entry. The other five are Optional and may hold several entries; a missing
-`control_plane` or `bootstrap` entry defaults to `kubeadm` for generation,
-exactly as `clusterctl init` installs the kubeadm providers by default.
-
-`resource_config` and the topology `infrastructure`/`bootstrap` specs are
-strings, not objects: terraform-plugin-framework does not support dynamic
-attributes inside collection nested attributes (the provider maps and the
-machine-deployment list), so these take YAML or JSON text and the provider
-decodes it (`yamlObject`; integral numbers → `int64`).
-
-**Backend:** entries become `capi.ProviderConfig{Name, Type, Version, FetchConfig, ...}`
-grouped in a `capi.ProviderSet` (`internal/capi/types.go`). Customizations are
-keyed by `ProviderKey{Type, Name}`, so bootstrap `talos` and control-plane
-`talos` are configured independently (`internal/capi/customize.go`).
-
-### 3.4 `fetch_config` — Friendlier Component Source
-
-```go
-"fetch_config": schema.SingleNestedAttribute{
-    Optional: true,
-    Attributes: map[string]schema.Attribute{
-        "owner":      schema.StringAttribute{Optional: true}, // GitHub owner/org
-        "repository": schema.StringAttribute{Optional: true}, // GitHub repository
-        "url":        schema.StringAttribute{Optional: true}, // verbatim clusterctl URL
-        "oci":        schema.StringAttribute{Optional: true}, // verbatim OCI reference
-    },
-},
-```
-
-Resolution (`capi.ResolveFetchURL`, `internal/capi/fetch.go`):
-
-1. `url` or `oci` set → used verbatim (they exclude `owner`/`repository`).
-2. Otherwise `https://github.com/{owner}/{repository}/releases/{version|latest}/{type}-components.yaml`,
-   where `owner`/`repository` default from clusterctl's built-in entry for the
-   provider (including the `<name>-<name>` aliases such as `tinkerbell-tinkerbell`)
-   and `{type}` is `core`, `infrastructure`, `bootstrap`, `control-plane`, `ipam`, or `addon`.
-3. A provider clusterctl does not know needs `repository` (or `url`/`oci`);
-   otherwise create fails with `ErrUnknownProviderRepository`.
-
-Pinning `version` in the URL avoids clusterctl's GitHub API call for `latest`.
-Resolved URLs are registered with clusterctl through an isolated viper-backed
-`config.Reader` (`internal/capi/clusterctl_config.go`) that still loads the
-user's `clusterctl.yaml` and environment.
-
-### 3.5 `topology` — Machine Counts (mirrors `Cluster.spec.topology`)
-
-```go
-"topology": schema.SingleNestedAttribute{
-    Optional: true,
-    Attributes: map[string]schema.Attribute{
-        "control_plane": schema.SingleNestedAttribute{
-            Optional: true,
-            Attributes: map[string]schema.Attribute{
-                "replicas":       schema.Int64Attribute{Optional: true},
-                "infrastructure": schema.StringAttribute{Optional: true}, // YAML/JSON control plane <Infra>MachineTemplate spec
-            },
-        },
-        "workers": schema.SingleNestedAttribute{
-            Optional: true,
-            Attributes: map[string]schema.Attribute{
-                "machine_deployments": schema.ListNestedAttribute{ // Cluster.spec.topology.workers.machineDeployments[]
-                    Optional: true,
-                    NestedObject: schema.NestedAttributeObject{
-                        Attributes: map[string]schema.Attribute{
-                            "name":           schema.StringAttribute{Required: true},
-                            "class":          schema.StringAttribute{Optional: true},
-                            "replicas":       schema.Int64Attribute{Optional: true},
-                            "failure_domain": schema.StringAttribute{Optional: true},
-                            "metadata":       // { labels, annotations } Map(String)
-                            "infrastructure": schema.StringAttribute{Optional: true}, // YAML/JSON <Infra>MachineTemplate spec
-                            "bootstrap":      schema.StringAttribute{Optional: true}, // YAML/JSON <Bootstrap>ConfigTemplate spec
-                        },
-                    },
-                },
-            },
-        },
-    },
-},
-```
-
-**Mutability:** everything under `topology` is mutable (in-place scale).
-
-**Backend:** `control_plane` → `CreateClusterOptions.ControlPlane capi.ControlPlaneTopology`
-(`Replicas`, `Infrastructure`); the list → `CreateClusterOptions.MachineDeployments
-[]capi.MachineDeploymentTopology` (with `Infrastructure` and `Bootstrap`). Each entry
-becomes one MachineDeployment with its own machine template and bootstrap config
-template (or, with `cluster_class`, a worker class named `class` — default `name` —
-plus a topology entry; deployments sharing a class must agree on both specs).
-Inventory validation counts workers as the sum of all replicas; names must be unique.
-
-### 3.6 CNI and other workload addons
-
-There is no `cni` block (removed in schema version 4). The workload cluster's
-CNI is an addon like any other: a CAAPH `HelmChartProxy` in
-`manifests.management`, installed on the cluster as soon as its control plane
-is initialized and waited for before the pivot moves management. On Talos the
-built-in flannel and kube-proxy are turned off by a machine-config patch in
-`control_plane["talos"].resource_config` and `bootstrap["talos"].resource_config`
-(`examples/resources/capi_cluster/cni-none.yaml`), and the Cilium values must
-carry the Talos-required settings themselves
-(`examples/resources/capi_cluster/cilium-values.yaml`: `kubeProxyReplacement`,
-KubePrism `k8sServiceHost`/`k8sServicePort`, `cgroup.autoMount.enabled=false` +
-`cgroup.hostRoot`, the restricted `securityContext.capabilities` lists). The
-chart version must be a tag that exists on `oci://quay.io/cilium/charts/cilium`;
-quay keeps only recent patch releases. Objects that need the CNI's CRDs (a
-Cilium load-balancer pool for the Tinkerbell Service) are a `ClusterResourceSet`.
-
-### 3.6 `network`, `cluster_class` and generated manifests
-
-There is no cluster template. `internal/capi/generate.go` builds the CAPI
-objects from the provider set (`ManifestGenerator`, default
-`NewManifestGenerator(NewCRDKindResolver())`), and `Manager.CreateCluster`
-server-side-applies them where it used to apply the clusterctl template.
-
-```go
-"network": schema.SingleNestedAttribute{ // Cluster.spec.clusterNetwork + controlPlaneEndpoint; mutable
-    Optional: true,
-    Attributes: map[string]schema.Attribute{
-        "control_plane_endpoint": // { host (Required), port (Optional; the generator defaults 6443) }
-        "pods":                   // { cidr_blocks List(String) }
-        "services":               // { cidr_blocks List(String) }
-        "service_domain":         schema.StringAttribute{Optional: true},
-    },
-},
-```
-
-**Kinds and versions are discovered, never hardcoded** (`internal/capi/kinds.go`).
-`KindCatalog` lists the CRDs labelled `cluster.x-k8s.io/provider=<label>`
-(clusterctl's manifest label: `cluster-api`, `infrastructure-tinkerbell`,
-`control-plane-talos`, ...) and resolves a kind by suffix (`Cluster`,
-`ClusterTemplate`, `MachineTemplate`, `ControlPlane`, `ControlPlaneTemplate`,
-`ConfigTemplate`; shortest match wins, ties are an error). The API version is
-the newest served version named by the CRD's contract label for the core
-contract in use (`cluster.x-k8s.io/v1beta2: v1beta1` on Talos CRDs), else the
-storage version. The control-plane CRD's OpenAPI schema decides the
-machine-template ref shape (`machineTemplate.spec.infrastructureRef{apiGroup}`
-vs the legacy `machineTemplate.infrastructureRef{apiVersion}`); core refs
-follow the core version. Missing kinds fail with `ErrKindNotFound` naming the
-label and suffix.
-
-**Direct mode** (`cluster_class = false`): `Cluster` `<name>` (network settings
-+ refs), `<Infra>Cluster` `<name>`, `<CP>ControlPlane` `<name>-control-plane`
-(`version`, `replicas`, machine template ref), and per machine deployment a
-`MachineDeployment` `<name>-<md>` with `<Infra>MachineTemplate` and
-`<Bootstrap>ConfigTemplate`. **ClusterClass mode** (`cluster_class = true`):
-`<Infra>ClusterTemplate`, `<CP>ControlPlaneTemplate`, per-class machine and
-config templates, a `ClusterClass` `<name>` and a `Cluster` whose
-`spec.topology` comes from `topology`; init gets `CLUSTER_TOPOLOGY=true` (the
-gate is Alpha/off in cluster-api v1.14), `kubernetes_version` is required and
-the v1beta2 core contract is required.
-
-**Spec assembly** for every provider object: `providerDefaults` (required-field
-minimums: Talos `generateType` per role, kubeadm `kubeadmConfigSpec: {}`) ←
-`resource_config` (RFC 7396: nested maps merge, lists/scalars replace, `null`
-deletes) ← generator-owned wiring set last (refs, names, `version`,
-`replicas`, `clusterName`, labels). Immutable templates are named
-`<base>-<8 hex of sha256(spec JSON)>`, so a spec change is a new object plus a
-moved ref (CAPI rolls it out); stale templates stay until cluster deletion.
-An existing template-created cluster therefore sees one control-plane rollout
-on its first apply after upgrading, because its machine template is renamed.
-
-The waiter (`internal/capi/waiter.go`) watches the core `Cluster`'s
-`ControlPlaneInitialized` and `Available`/`Ready` conditions at the discovered
-core version, so `wait.enabled` works for any control-plane provider.
-
-Golden manifests live in `internal/capi/testdata/golden/`; CRD fixtures in
-`internal/capi/testdata/crds/` (real CAPT/CACPPT/CABPT CRDs trimmed to kinds,
-labels, versions and the `machineTemplate` schema slice, plus synthetic
-core/docker/kubeadm sets and a v1beta1-contract set).
-
-### 3.7 Removed Attributes
-
-`infrastructure.provider`, `bootstrap.provider`, `control_plane.provider`,
-`control_plane.machine_count`, `core.provider`, `workers`, and the `addons`
-list were replaced by the provider maps and `topology` in schema version 2.
-`template` (`source`, `variables`) and `flavor` were removed in schema
-version 3 when manifest generation replaced clusterctl templates.
-
-### 3.8 `inventory` — Hardware Inventory
-
-The most complex nested attribute. Supports file-based (EKS-A CSV) or inline machine definitions.
-
-With the `tinkerbell` infrastructure provider and `manage = true` (default) every
-`machine` becomes, in the cluster namespace, a basic-auth Secret `<hostname>-bmc-auth`, a
-rufio `Machine <hostname>` (Redfish with basic auth by default, IntelAMT when the BMC port
-is 16992/16993) and a Tinkerbell `Hardware <hostname>` (labels from `labels`, `dhcp.ip`
-from `network`, `disks`, `bmcRef`). `capi.InventoryManifests` (`internal/capi/inventory.go`,
-golden `testdata/golden/inventory-tinkerbell.yaml`) renders them and the manager applies
-them before the generated cluster objects, after the caller's `manifests.management`.
-
-```go
-"inventory": schema.SingleNestedAttribute{
-    MarkdownDescription: "Hardware inventory for bare-metal provisioning. Supports file-based (CSV/YAML) or inline machine definitions. Required for Tinkerbell infrastructure provider.",
-    Optional:            true,
-    Attributes: map[string]schema.Attribute{
-        "manage": schema.BoolAttribute{ // create the Tinkerbell/rufio objects; default true
-            Optional: true, Computed: true, Default: booldefault.StaticBool(true),
-        },
-        "source": schema.StringAttribute{
-            MarkdownDescription: "Path to a hardware inventory file. Supports EKS Anywhere CSV format or YAML manifests containing Hardware, Machine, and Secret resources.",
-            Optional:            true,
-        },
-        "machine": schema.ListNestedAttribute{
-            MarkdownDescription: "Inline machine definitions. Each machine maps to a Tinkerbell Hardware + optional BMC (Rufio Machine) + Secret.",
-            Optional:            true,
-            NestedObject: schema.NestedAttributeObject{
-                Attributes: map[string]schema.Attribute{
-                    "hostname": schema.StringAttribute{
-                        MarkdownDescription: "Machine hostname. Must be unique across all inventory machines.",
-                        Required:            true,
-                    },
-                    "network": schema.SingleNestedAttribute{
-                        MarkdownDescription: "Network configuration for the machine's primary interface.",
-                        Required:            true,
-                        Attributes: map[string]schema.Attribute{
-                            "ip_address": schema.StringAttribute{
-                                MarkdownDescription: "Primary IP address.",
-                                Required:            true,
-                            },
-                            "netmask": schema.StringAttribute{
-                                MarkdownDescription: "Network mask (e.g., `255.255.255.0`).",
-                                Required:            true,
-                            },
-                            "gateway": schema.StringAttribute{
-                                MarkdownDescription: "Default gateway address.",
-                                Required:            true,
-                            },
-                            "mac_address": schema.StringAttribute{
-                                MarkdownDescription: "Primary NIC MAC address (e.g., `aa:bb:cc:dd:ee:01`). Must be unique.",
-                                Required:            true,
-                            },
-                            "nameservers": schema.ListAttribute{
-                                MarkdownDescription: "DNS nameserver addresses.",
-                                ElementType:         types.StringType,
-                                Optional:            true,
-                            },
-                            "vlan_id": schema.StringAttribute{
-                                MarkdownDescription: "VLAN ID for the interface (0-4096).",
-                                Optional:            true,
-                            },
-                        },
-                    },
-                    "disk": schema.SingleNestedAttribute{
-                        MarkdownDescription: "Boot disk configuration.",
-                        Optional:            true,
-                        Attributes: map[string]schema.Attribute{
-                            "device": schema.StringAttribute{
-                                MarkdownDescription: "Disk device path (e.g., `/dev/sda`).",
-                                Required:            true,
-                            },
-                        },
-                    },
-                    "bmc": schema.SingleNestedAttribute{
-                        MarkdownDescription: "BMC (Baseboard Management Controller) configuration for out-of-band management. Maps to a Rufio Machine + Secret.",
-                        Optional:            true,
-                        Attributes: map[string]schema.Attribute{
-                            "address": schema.StringAttribute{
-                                MarkdownDescription: "BMC endpoint address (IP or hostname).",
-                                Required:            true,
-                            },
-                            "username": schema.StringAttribute{
-                                MarkdownDescription: "BMC username for authentication.",
-                                Required:            true,
-                            },
-                            "password": schema.StringAttribute{
-                                MarkdownDescription: "BMC password for authentication.",
-                                Required:            true,
-                                Sensitive:           true,
-                            },
-                        },
-                    },
-                    "labels": schema.MapAttribute{
-                        MarkdownDescription: "Labels applied to the Hardware resource. Use `type=cp` for control plane and `type=worker` for worker nodes.",
-                        ElementType:         types.StringType,
-                        Optional:            true,
-                    },
-                },
-            },
-        },
-    },
-},
-```
-
-**Validation (custom validator on `inventory`):**
-- `source` and `machine` are mutually exclusive: `objectvalidator.AtLeastOneOf()` + `objectvalidator.ConflictsWith()` equivalent logic
-- When `machine` is provided, validate uniqueness of hostnames, IP addresses, and MAC addresses
-- When BMC fields are partially set, require all three (`address`, `username`, `password`)
-
-### 3.9 `wait` — Readiness Wait Configuration
-
-```go
-"wait": schema.SingleNestedAttribute{
-    MarkdownDescription: "Readiness wait configuration. Controls whether and how long to wait for the workload cluster to become ready.",
-    Optional:            true,
-    Attributes: map[string]schema.Attribute{
-        "enabled": schema.BoolAttribute{
-            MarkdownDescription: "Wait for the workload cluster to become ready before returning.",
-            Optional:            true,
-            Computed:            true,
-            Default:             booldefault.StaticBool(true),
-        },
-        "timeout": schema.StringAttribute{
-            MarkdownDescription: "Maximum time to wait for readiness (Go duration string, e.g., `30m`, `1h`). Default: `60m`.",
-            Optional:            true,
-            Computed:            true,
-        },
-    },
-},
-```
-
-### 3.10 `output` — Output Configuration
-
-```go
-"output": schema.SingleNestedAttribute{
-    MarkdownDescription: "Output configuration. Controls where cluster credentials and artifacts are written.",
-    Optional:            true,
-    Attributes: map[string]schema.Attribute{
-        "kubeconfig_path": schema.StringAttribute{
-            MarkdownDescription: "File path where the workload cluster kubeconfig is written. Defaults to `~/.kube/<name>.kubeconfig`.",
-            Optional:            true,
-            Computed:            true,
-        },
-    },
-},
-```
-
-### 3.11 `status` — Computed Cluster Status
-
-All computed outputs are grouped here. This block is entirely computed — practitioners never configure it.
-
-```go
-"status": schema.SingleNestedAttribute{
-    MarkdownDescription: "Computed cluster status. Contains the cluster endpoint, kubeconfig, CA certificate, and description after creation.",
-    Computed:            true,
-    Attributes: map[string]schema.Attribute{
-        "endpoint": schema.StringAttribute{
-            MarkdownDescription: "Cluster API server endpoint URL.",
-            Computed:            true,
-        },
-        "kubeconfig": schema.StringAttribute{
-            MarkdownDescription: "Kubeconfig content for accessing the workload cluster.",
-            Computed:            true,
-            Sensitive:           true,
-        },
-        "ca_certificate": schema.StringAttribute{
-            MarkdownDescription: "Cluster CA certificate (PEM-encoded).",
-            Computed:            true,
-            Sensitive:           true,
-        },
-        "description": schema.StringAttribute{
-            MarkdownDescription: "Cluster status description from `clusterctl describe cluster`.",
-            Computed:            true,
-        },
-        "bootstrap_cluster": schema.StringAttribute{
-            MarkdownDescription: "Name of the bootstrap cluster that was created during provisioning.",
-            Computed:            true,
-        },
-    },
-},
-```
-
-### 3.12 `addon` — Addon Providers
-
-Addon providers (e.g. `helm`) are one of the provider maps described in 3.3.
-
-### 3.13 `manifests` — Raw Manifests
-
-```go
-"manifests": schema.SingleNestedAttribute{
-    Optional: true,
-    Attributes: map[string]schema.Attribute{
-        "management": schema.ListAttribute{ElementType: types.StringType, Optional: true}, // multi-doc YAML strings
-    },
-},
-```
-
-`manifests.management` is server-side-applied to the management cluster after provider
-init and before the generated cluster objects (`CreateClusterOptions.ManagementManifests`):
-IPAM pools and credentials, extra Secrets, anything the cluster objects reference.
+- **Templates** (`template_resource.go`): `ModifyPlan` computes `object_name`,
+  `revision`, `ref` from the planned spec; `collect` keeps the current,
+  referenced and `revision_history` unreferenced revisions
+  (`capi.TemplateReferences` scans MDs, MachineSets, MachinePools,
+  ClusterClasses, control planes). Delete refuses while the current revision
+  is referenced. `api_version` renders at plan; otherwise resolved from CRDs.
+- **Node groups** (`machine_deployment_*.go`): `nodeGroupInputs` → direct
+  `MachineDeployment` (autoscaler annotations on the object, selector labels
+  on the template) or a topology entry applied under
+  `terraform-provider-capi/machine-deployment/<name>` (listType=map keyed by
+  name, so capi_cluster never touches it); `readClusterFacts` supplies the
+  core version, topology version, worker classes and failure domains; a wait
+  timeout lists each machine's phase, failing conditions and the deletion
+  timeout that applies (`readMachineFailures`). Deleting a topology entry
+  waits for the controller to remove the realised MD.
+- **Addons**: `helmChartProxyReady` requires the proxy's observed generation,
+  the conditions, and a Ready `HelmReleaseProxy` (label
+  `helmreleaseproxy.addons.cluster.x-k8s.io/helmchartproxy-name`) per matched
+  cluster; vacuously ready with no matches. CRS: ConfigMaps `<name>-<i>`,
+  Secrets `<name>-secret-<i>` (type `addons.cluster.x-k8s.io/resource-set`),
+  `strategy` and the selector immutable (webhook), bindings read from
+  `ClusterResourceSetBinding <cluster>`, `objectReady` per kind.
+- **Hardware**: `capi.HardwareObjects`; CAPT ownership labels
+  `v1alpha1.tinkerbell.org/ownerName|ownerNamespace`, provisioned annotation
+  `v1alpha1.tinkerbell.org/provisioned`; `adopted` = provisioned + PXE off.
+- **Provider**: `ClusterctlInstaller.Init` with `NoDefaults` (clusterctl's
+  `-` provider for bootstrap/control-plane) so no kubeadm sneaks in; the core
+  is still added on a first init. Declare `core` and depend on it.
+- **Cluster class**: v1beta2 `templateRef` vs legacy `ref`; `variables` and
+  `patches` are dynamic lists passed through.
 
 ---
 
-## 4. Go Model Structs
-
-### 4.1 Naming Convention
-
-Every nested attribute has a corresponding Go model struct. Struct names follow the pattern `<Domain>Model`.
-
-```go
-type ClusterResourceModel struct {
-    Name              types.String `tfsdk:"name"`
-    KubernetesVersion types.String `tfsdk:"kubernetes_version"`
-    ClusterClass      types.Bool   `tfsdk:"cluster_class"`
-    Id                types.String `tfsdk:"id"`
-
-    Management     types.Object `tfsdk:"management"`
-    Core           types.Map    `tfsdk:"core"`           // map[string]ProviderModel
-    Infrastructure types.Map    `tfsdk:"infrastructure"` // exactly one entry
-    Bootstrap      types.Map    `tfsdk:"bootstrap"`
-    ControlPlane   types.Map    `tfsdk:"control_plane"`
-    IPAM           types.Map    `tfsdk:"ipam"`
-    Addon          types.Map    `tfsdk:"addon"`
-    Topology       types.Object `tfsdk:"topology"`
-    Network        types.Object `tfsdk:"network"`   // ClusterNetworkModel {control_plane_endpoint, pods, services, service_domain}
-    Manifests      types.Object `tfsdk:"manifests"` // ManifestsModel {management}
-    Inventory      types.Object `tfsdk:"inventory"`
-    Wait           types.Object `tfsdk:"wait"`
-    Output         types.Object `tfsdk:"output"`
-    Status         types.Object `tfsdk:"status"`
-}
-```
-
-### 4.2 Nested Model Structs
-
-```go
-type ManagementModel struct {
-    Kubeconfig  types.String `tfsdk:"kubeconfig"`
-    SkipInit    types.Bool   `tfsdk:"skip_init"`
-    SelfManaged types.Bool   `tfsdk:"self_managed"`
-    Uninstall   types.Bool   `tfsdk:"uninstall"`
-    Namespace   types.String `tfsdk:"namespace"`
-    Bootstrap   types.Object `tfsdk:"bootstrap"` // ManagementBootstrapModel {type, machine, boot, kairos, addons}
-}
-
-// Shared by all six provider maps; one providerAttrTypes()/providerMapType().
-type ProviderModel struct {
-    Version               types.String `tfsdk:"version"`
-    FetchConfig           types.Object `tfsdk:"fetch_config"` // FetchConfigModel
-    ConfigVariables       types.Map    `tfsdk:"config_variables"`
-    SecretConfigVariables types.Map    `tfsdk:"secret_config_variables"`
-    Deployment            types.Object `tfsdk:"deployment"` // DeploymentModel
-    Manager               types.Object `tfsdk:"manager"`    // ManagerModel
-    AdditionalManifests   types.String `tfsdk:"additional_manifests"`
-    ManifestPatches       types.List   `tfsdk:"manifest_patches"`
-    Patches               types.List   `tfsdk:"patches"` // []PatchModel
-    ResourceConfig        types.String `tfsdk:"resource_config"` // YAML/JSON → capi.ProviderConfig.ResourceConfig
-}
-
-type FetchConfigModel struct {
-    Owner      types.String `tfsdk:"owner"`
-    Repository types.String `tfsdk:"repository"`
-    URL        types.String `tfsdk:"url"`
-    OCI        types.String `tfsdk:"oci"`
-}
-
-type TopologyModel struct {
-    ControlPlane types.Object `tfsdk:"control_plane"` // ControlPlaneTopologyModel
-    Workers      types.Object `tfsdk:"workers"`       // WorkersTopologyModel
-}
-
-type ControlPlaneTopologyModel struct {
-    Replicas       types.Int64  `tfsdk:"replicas"`
-    Infrastructure types.String `tfsdk:"infrastructure"` // YAML/JSON
-}
-
-type WorkersTopologyModel struct {
-    MachineDeployments types.List `tfsdk:"machine_deployments"` // []MachineDeploymentModel
-}
-
-type MachineDeploymentModel struct {
-    Name           types.String `tfsdk:"name"`
-    Class          types.String `tfsdk:"class"`
-    Replicas       types.Int64  `tfsdk:"replicas"`
-    FailureDomain  types.String `tfsdk:"failure_domain"`
-    Metadata       types.Object `tfsdk:"metadata"` // TopologyMetadataModel {labels, annotations}
-    Infrastructure types.String `tfsdk:"infrastructure"` // YAML/JSON
-    Bootstrap      types.String `tfsdk:"bootstrap"`      // YAML/JSON
-}
-
-type ClusterNetworkModel struct {
-    ControlPlaneEndpoint types.Object `tfsdk:"control_plane_endpoint"` // EndpointModel {host, port}
-    Pods                 types.Object `tfsdk:"pods"`                   // NetworkRangesModel {cidr_blocks}
-    Services             types.Object `tfsdk:"services"`               // NetworkRangesModel
-    ServiceDomain        types.String `tfsdk:"service_domain"`
-}
-
-type InventoryModel struct {
-    Manage  types.Bool   `tfsdk:"manage"`
-    Source  types.String `tfsdk:"source"`
-    Machine types.List   `tfsdk:"machine"` // []MachineModel
-}
-
-type ManifestsModel struct {
-    Management types.List `tfsdk:"management"` // []types.String
-}
-
-type BootstrapAddonsModel struct {
-    Prerequisites types.List `tfsdk:"prerequisites"`
-    Helm          types.List `tfsdk:"helm"` // []HelmReleaseModel
-    Manifests     types.List `tfsdk:"manifests"`
-}
-
-type MachineModel struct {
-    Hostname types.String `tfsdk:"hostname"`
-    Network  types.Object `tfsdk:"network"` // NetworkModel
-    Disk     types.Object `tfsdk:"disk"`    // DiskModel
-    BMC      types.Object `tfsdk:"bmc"`     // BMCModel
-    Labels   types.Map    `tfsdk:"labels"`
-}
-
-type NetworkModel struct {
-    IPAddress   types.String `tfsdk:"ip_address"`
-    Netmask     types.String `tfsdk:"netmask"`
-    Gateway     types.String `tfsdk:"gateway"`
-    MACAddress  types.String `tfsdk:"mac_address"`
-    Nameservers types.List   `tfsdk:"nameservers"` // []types.String
-    VLANID      types.String `tfsdk:"vlan_id"`
-}
-
-type DiskModel struct {
-    Device types.String `tfsdk:"device"`
-}
-
-type BMCModel struct {
-    Address  types.String `tfsdk:"address"`
-    Username types.String `tfsdk:"username"`
-    Password types.String `tfsdk:"password"`
-}
-
-type WaitModel struct {
-    Enabled types.Bool   `tfsdk:"enabled"`
-    Timeout types.String `tfsdk:"timeout"`
-}
-
-type OutputModel struct {
-    KubeconfigPath types.String `tfsdk:"kubeconfig_path"`
-}
-
-type StatusModel struct {
-    Endpoint         types.String `tfsdk:"endpoint"`
-    Kubeconfig       types.String `tfsdk:"kubeconfig"`
-    CACertificate    types.String `tfsdk:"ca_certificate"`
-    Description      types.String `tfsdk:"description"`
-    BootstrapCluster types.String `tfsdk:"bootstrap_cluster"`
-}
-```
-
-### 4.3 Accessing Nested Models
-
-Use `types.Object` with `As()` for type-safe access:
-
-```go
-func extractManagement(ctx context.Context, data *ClusterResourceModel) (*ManagementModel, diag.Diagnostics) {
-    if data.Management.IsNull() || data.Management.IsUnknown() {
-        return nil, nil
-    }
-    var mgmt ManagementModel
-    diags := data.Management.As(ctx, &mgmt, basetypes.ObjectAsOptions{})
-    return &mgmt, diags
-}
-```
-
-### 4.4 Setting Nested Values
-
-Use `types.ObjectValueFrom()` to construct nested objects for state:
-
-```go
-func setStatus(ctx context.Context, data *ClusterResourceModel, result *capi.ClusterResult) diag.Diagnostics {
-    status := StatusModel{
-        Endpoint:         stringOrNull(result.Endpoint),
-        Kubeconfig:       stringOrNull(result.Kubeconfig),
-        CACertificate:    stringOrNull(result.CACertificate),
-        Description:      stringOrNull(result.ClusterDescription),
-        BootstrapCluster: bootstrapClusterName(result),
-    }
-    val, diags := types.ObjectValueFrom(ctx, statusAttrTypes(), status)
-    if diags.HasError() {
-        return diags
-    }
-    data.Status = val
-    return nil
-}
-
-func stringOrNull(s string) types.String {
-    if s == "" {
-        return types.StringNull()
-    }
-    return types.StringValue(s)
-}
-```
-
-### 4.5 Attribute Type Registration
-
-Each nested model requires an `attrTypes()` helper for `types.ObjectValueFrom()` and `types.ObjectNull()`:
-
-```go
-func statusAttrTypes() map[string]attr.Type {
-    return map[string]attr.Type{
-        "endpoint":          types.StringType,
-        "kubeconfig":        types.StringType,
-        "ca_certificate":    types.StringType,
-        "description":       types.StringType,
-        "bootstrap_cluster": types.StringType,
-    }
-}
-
-func managementAttrTypes() map[string]attr.Type {
-    return map[string]attr.Type{
-        "kubeconfig":   types.StringType,
-        "skip_init":    types.BoolType,
-        "self_managed": types.BoolType,
-        "namespace":    types.StringType,
-    }
-}
-
-// Pattern: one *AttrTypes() function per nested model struct.
-```
-
----
-
-## 5. Plan Modifiers
-
-### 5.1 RequiresReplace on Nested Attributes
-
-For immutable nested attributes where the *entire block* triggers replacement, apply `objectplanmodifier.RequiresReplace()` at the nested attribute level:
-
-```go
-"infrastructure": schema.SingleNestedAttribute{
-    PlanModifiers: []planmodifier.Object{
-        objectplanmodifier.RequiresReplace(),
-    },
-    // ...
-}
-```
-
-For the provider maps, apply `mapplanmodifier.RequiresReplace()` on the map
-itself (see `providerMapAttribute`). Mutable settings such as `topology`
-replica counts live in their own nested attribute with no plan modifier, so a
-scale operation never touches an immutable map:
-
-```go
-"topology": schema.SingleNestedAttribute{
-    Optional: true, // no RequiresReplace — replicas scale in place
-    // ...
-}
-```
-
-### 5.2 UseStateForUnknown on Computed Attributes
-
-Apply to computed values that persist across updates:
-
-```go
-"id": schema.StringAttribute{
-    Computed: true,
-    PlanModifiers: []planmodifier.String{
-        stringplanmodifier.UseStateForUnknown(),
-    },
-},
-```
-
-For `status` (computed block), do NOT use `UseStateForUnknown` on child attributes — they should refresh on every read/update.
-
-### 5.3 Defaults
-
-Use `Default` for optional attributes with sensible defaults:
-
-```go
-"enabled": schema.BoolAttribute{
-    Optional: true,
-    Computed: true,
-    Default:  booldefault.StaticBool(true),
-},
-```
-
----
-
-## 6. Validation
-
-### 6.1 Framework Validators
-
-Use `terraform-plugin-framework-validators` for declarative validation:
-
-```go
-import (
-    "github.com/hashicorp/terraform-plugin-framework-validators/objectvalidator"
-    "github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
-    "github.com/hashicorp/terraform-plugin-framework-validators/int64validator"
-    "github.com/hashicorp/terraform-plugin-framework-validators/listvalidator"
-)
-
-// On inventory.source — mutually exclusive with inventory.machine
-"source": schema.StringAttribute{
-    Validators: []validator.String{
-        stringvalidator.ConflictsWith(path.MatchRelative().AtParent().AtName("machine")),
-    },
-},
-
-// On topology.control_plane.replicas — must be odd for HA
-"replicas": schema.Int64Attribute{
-    Validators: []validator.Int64{
-        int64validator.AtLeast(1),
-    },
-},
-```
-
-### 6.2 Custom Validation in CRUD
-
-Provider-specific validation logic (e.g., Tinkerbell requires `self_managed=true`) belongs in `validateLifecycleConfig()`, called at the top of Create and Update:
-
-```go
-func (r *ClusterResource) validateLifecycleConfig(ctx context.Context, data *ClusterResourceModel, diags *diag.Diagnostics) {
-    // 1. Per-entry rules (fetch_config exclusivity, patches) for every provider map.
-    names := map[capi.ProviderType][]string{}
-    for _, pm := range data.providerMaps() {
-        entries, d := extractProviders(ctx, pm.Map)
-        diags.Append(d...)
-        for _, name := range sortedProviderNames(entries) {
-            names[pm.Type] = append(names[pm.Type], name)
-            validateProviderEntry(ctx, pm.Type, name, entries[name], diags)
-        }
-    }
-
-    // 2. Exactly one infrastructure provider; it must be supported.
-    infraNames := names[capi.ProviderTypeInfrastructure]
-    if len(infraNames) != 1 {
-        diags.AddError("Invalid infrastructure configuration", "infrastructure must contain exactly one provider.")
-        return
-    }
-
-    // 3. Provider-specific rules, e.g. Tinkerbell needs self_managed and kubeadm/talos.
-    if strings.ToLower(infraNames[0]) == "tinkerbell" {
-        mgmt, d := extractManagement(ctx, data)
-        diags.Append(d...)
-        if mgmt == nil || !mgmt.SelfManaged.ValueBool() {
-            diags.AddError("Invalid Tinkerbell configuration", "Tinkerbell clusters must have management.self_managed = true.")
-        }
-    }
-
-    // 4. Topology (unique machine deployment names) feeds inventory validation.
-    cpCount, mds, d := extractTopology(ctx, data)
-    // ...
-}
-```
-
-### 6.3 Inventory Validation
-
-```go
-func validateInventory(ctx context.Context, inv *InventoryModel, cpCount, workerCount int64, diags *diag.Diagnostics) {
-    if inv == nil {
-        return
-    }
-
-    // source and machine are mutually exclusive
-    hasSource := !inv.Source.IsNull() && inv.Source.ValueString() != ""
-    hasMachines := !inv.Machine.IsNull() && !inv.Machine.IsUnknown()
-    if hasSource && hasMachines {
-        diags.AddError("Invalid inventory", "Specify either source or machine, not both.")
-        return
-    }
-
-    if !hasMachines {
-        return
-    }
-
-    var machines []MachineModel
-    diags.Append(inv.Machine.ElementsAs(ctx, &machines, false)...)
-    if diags.HasError() {
-        return
-    }
-
-    // Uniqueness checks
-    hostnames := map[string]bool{}
-    ips := map[string]bool{}
-    macs := map[string]bool{}
-    for _, m := range machines {
-        h := m.Hostname.ValueString()
-        if hostnames[h] {
-            diags.AddError("Duplicate hostname", fmt.Sprintf("hostname %q appears more than once", h))
-        }
-        hostnames[h] = true
-
-        // Extract network and check IP/MAC uniqueness
-        var net NetworkModel
-        diags.Append(m.Network.As(ctx, &net, basetypes.ObjectAsOptions{})...)
-        ip := net.IPAddress.ValueString()
-        if ips[ip] {
-            diags.AddError("Duplicate IP", fmt.Sprintf("ip_address %q appears more than once", ip))
-        }
-        ips[ip] = true
-        mac := net.MACAddress.ValueString()
-        if macs[mac] {
-            diags.AddError("Duplicate MAC", fmt.Sprintf("mac_address %q appears more than once", mac))
-        }
-        macs[mac] = true
-    }
-
-    // Role counting
-    cpMachines := 0
-    workerMachines := 0
-    for _, m := range machines {
-        labels := map[string]string{}
-        if !m.Labels.IsNull() {
-            diags.Append(m.Labels.ElementsAs(ctx, &labels, false)...)
-        }
-        switch labels["type"] {
-        case "cp":
-            cpMachines++
-        default:
-            workerMachines++
-        }
-    }
-    if int64(cpMachines) < cpCount {
-        diags.AddError("Insufficient hardware",
-            fmt.Sprintf("Need %d control plane machines (type=cp label), have %d", cpCount, cpMachines))
-    }
-    if int64(workerMachines) < workerCount {
-        diags.AddError("Insufficient hardware",
-            fmt.Sprintf("Need %d worker machines, have %d", workerCount, workerMachines))
-    }
-}
-```
-
----
-
-## 7. CRUD Implementation Patterns
-
-### 7.1 Building CreateClusterOptions from Nested Schema
-
-```go
-func buildCreateOptions(ctx context.Context, data *ClusterResourceModel) (*capi.CreateClusterOptions, diag.Diagnostics) {
-    var diags diag.Diagnostics
-    opts := &capi.CreateClusterOptions{
-        Name: data.Name.ValueString(),
-        Wait: capi.DefaultWaitOptions(),
-    }
-
-    if !data.KubernetesVersion.IsNull() {
-        opts.KubernetesVersion = data.KubernetesVersion.ValueString()
-    }
-    if !data.Flavor.IsNull() {
-        opts.Flavor = data.Flavor.ValueString()
-    }
-
-    // Management (kubeconfig, skip_init, self_managed, namespace, bootstrap mode)
-    mgmt, d := extractManagement(ctx, data)
-    diags.Append(d...)
-    // ...
-
-    // Providers: all six maps flattened into a ProviderSet. Each entry is
-    // converted by buildProviderConfig(ctx, name, type, ProviderModel), which
-    // handles version, fetch_config, config variables, deployment, manager,
-    // manifests and patches. Map keys are visited in sorted order.
-    providers, d := extractProviderSet(ctx, data)
-    diags.Append(d...)
-    opts.Providers = providers
-
-    // Topology
-    cpCount, mds, d := extractTopology(ctx, data)
-    diags.Append(d...)
-    opts.ControlPlaneMachineCount = cpCount
-    opts.MachineDeployments = mds
-
-    // Wait, Output ...
-    return opts, diags
-}
-```
-
-Helpers: `extractProviders(ctx, types.Map) (map[string]ProviderModel, diag.Diagnostics)`
-returns nil for a null map; `data.providerMaps()` lists the six maps with their
-`capi.ProviderType`; `providerMapValue(ctx, "name:version")` builds a one-entry
-map for the state upgraders.
-
-### 7.2 Populating State from ClusterResult
-
-After CreateCluster/UpdateCluster returns a `ClusterResult`, populate the model:
-
-```go
-func populateStateFromResult(ctx context.Context, data *ClusterResourceModel, result *capi.ClusterResult) diag.Diagnostics {
-    var diags diag.Diagnostics
-
-    data.Id = types.StringValue(data.Name.ValueString())
-
-    // Set status block from result
-    diags.Append(setStatus(ctx, data, result)...)
-
-    // Set computed output.kubeconfig_path if not already set
-    if !data.Output.IsNull() {
-        // preserve user-provided output config
-    }
-
-    return diags
-}
-```
-
-### 7.3 Null Handling for Optional Nested Attributes
-
-When an optional nested attribute is not configured, its value is `types.ObjectNull(attrTypes)`. Always check before extracting:
-
-```go
-if data.Management.IsNull() || data.Management.IsUnknown() {
-    // Use defaults: no management kubeconfig, self_managed=false, etc.
-}
-```
-
-When setting computed nested attributes (like `status`) that have no prior value, construct a full object:
-
-```go
-// For the initial state when status has no value yet:
-data.Status, diags = types.ObjectValueFrom(ctx, statusAttrTypes(), StatusModel{
-    Endpoint:         types.StringNull(),
-    Kubeconfig:       types.StringNull(),
-    CACertificate:    types.StringNull(),
-    Description:      types.StringNull(),
-    BootstrapCluster: types.StringNull(),
-})
-```
-
-### 7.4 Lifecycle Semantics (Read, Update, Delete, Import)
-
-The resource mirrors the clusterctl lifecycle end to end: `init` (§3.3),
-generated manifests (§3.6), `move` (pivot, §3.2), `upgrade apply` and
-`delete` of providers (§3.3), `get kubeconfig` and `describe` (`status`).
-
-- **Read** calls `Manager.GetClusterInfo`, which reads the Cluster object
-  first (`Applier.Get`). `ErrClusterNotFound` means the object is gone from a
-  *reachable* management cluster: Read removes the resource from state. Any
-  other error (unreachable cluster, CAPI not installed) keeps the state and
-  warns. `status.endpoint` and `status.ca_certificate` come from the
-  kubeconfig (`kubeconfigEndpoint`), the endpoint falling back to
-  `Cluster.spec.controlPlaneEndpoint`; `status.description` is the v1beta2
-  object tree rendered by `RenderObjectTree` (`internal/capi/describe.go`),
-  the library's printer being internal to cluster-api.
-- **Update** re-runs `CreateCluster` against the current management cluster
-  (for a self-managed cluster, its own kubeconfig from `output`) with the
-  provider diff from §3.3; `SelfManaged` is always false there.
-- **Delete** (`Manager.DeleteCluster`) deletes the Cluster object and waits
-  for it to disappear (`Waiter.WaitForClusterDeleted`, bounded by
-  `wait.timeout`) before anything that manages the machines goes away; an
-  already-gone cluster is fine. A failure is an error, not a warning, so
-  Terraform never forgets provisioned machines. A self-managed (pivoted)
-  cluster is deleted the way CAPI documents it, reversing the create pivot
-  (`deleteSelfManaged`): a fresh **kind** bootstrap cluster (always
-  `r.manager`, never the Kairos bootstrapper) gets `clusterctl init`,
-  `management.bootstrap.addons` (only rufio matters there), the full inventory
-  (BMC Secrets do not move; rufio needs them to power machines off) and
-  `manifests.management`; the Cluster is paused and the workload cluster
-  quiesced; `clusterctl move` runs workload → bootstrap; the Cluster is
-  deleted and waited for there; the bootstrap cluster is deleted. A failure
-  after the move started leaves the bootstrap cluster in place (it may hold
-  the only management objects); the next destroy finds the Cluster gone from
-  the workload, asks `Bootstrapper.Exists` for `<name>-bootstrap` and resumes
-  the deletion there. `DeleteClusterOptions.Spec` carries the create options
-  for this. A lingering Kairos node (a pivot whose power-off failed) is
-  powered off first (`Manager.DeleteBootstrapCluster`).
-  `management.uninstall` runs `clusterctl delete --all` afterwards, only for
-  an external `management.kubeconfig` with `skip_init = false`.
-- **Import** accepts `[kubeconfig:][namespace/]name` (`parseImportID`): the
-  kubeconfig path and namespace seed `management` so the first Read fetches
-  the status; the configuration must repeat both since they RequiresReplace.
-
----
-
-## 8. Migration Path
-
-### 8.1 From Flat Schema to Nested Schema
-
-The current `cluster_resource.go` uses flat attributes. The migration to nested attributes requires a state migration function using `resource.ResourceWithUpgradeState`.
-
-**Step 1 — Implement `UpgradeState()`:**
-
-```go
-func (r *ClusterResource) UpgradeState(ctx context.Context) map[int64]resource.StateUpgrader {
-    return map[int64]resource.StateUpgrader{
-        0: {
-            PriorSchema:   &clusterResourceSchemaV0(), // flat schema
-            StateUpgrader: upgradeClusterResourceStateV0ToV1,
-        },
-    }
-}
-```
-
-**Step 2 — Map flat fields to nested structure:**
-
-```go
-func upgradeClusterResourceStateV0ToV1(ctx context.Context, req resource.UpgradeStateRequest, resp *resource.UpgradeStateResponse) {
-    // Read flat v0 state
-    var v0 ClusterResourceModelV0
-    resp.Diagnostics.Append(req.State.Get(ctx, &v0)...)
-
-    // Build nested v1 state
-    v1 := ClusterResourceModel{
-        Name:              v0.Name,
-        KubernetesVersion: v0.KubernetesVersion,
-        Flavor:            v0.Flavor,
-        Id:                v0.Id,
-    }
-
-    // Map management fields
-    mgmt := ManagementModel{
-        Kubeconfig:  v0.ManagementKubeconfig,
-        SkipInit:    v0.SkipInit,
-        SelfManaged: v0.SelfManaged,
-        Namespace:   v0.TargetNamespace,
-    }
-    v1.Management, _ = types.ObjectValueFrom(ctx, managementAttrTypes(), mgmt)
-
-    // Map infrastructure: the legacy "name:version" string becomes a one-entry map
-    v1.Infrastructure, _ = providerMapValue(ctx, v0.InfrastructureProvider.ValueString())
-
-    // Counts become topology (worker count -> one machine deployment "md-0")
-    v1.Topology, _ = legacyTopologyObject(ctx, v0.ControlPlaneMachineCount, v0.WorkerMachineCount)
-
-    // ... repeat for all nested blocks ...
-
-    resp.Diagnostics.Append(resp.State.Set(ctx, v1)...)
-}
-```
-
-**Step 3 — Version the schema:**
-
-```go
-func (r *ClusterResource) Schema(ctx context.Context, req resource.SchemaRequest, resp *resource.SchemaResponse) {
-    resp.Schema = schema.Schema{
-        Version: 1, // increment from 0
-        // ... nested schema definition ...
-    }
-}
-```
-
-### 8.2 Schema Version History
-
-| Version | Description | Breaking Changes |
-|---------|-------------|-----------------|
-| 0 | Flat attributes | N/A (initial) |
-| 1 | Nested objects + inventory | All provider/count fields moved into nested objects |
-| 2 | Provider maps, `fetch_config` owner/repository, `topology`, `ipam` | `provider = "name:version"` strings become map keys + `version`; `workers` and `addons` removed; counts move to `topology` (`replicas`) |
-| 3 | Generated manifests: `resource_config`, `network`, `cluster_class`, topology specs | `template` and `flavor` removed |
-| 4 | Kairos pivot only (current) | `management.bootstrap.mode`, `management.bootstrap.talos`, `management.bootstrap.state_dir`, `cni` and `management.addons` removed; a state with `type = "talos"` or `mode = "in_place"` fails the upgrade and must be removed and imported |
-
-Every upgrader emits v4 directly (Terraform does not chain them). The v1, v2
-and v3 upgraders rewrite the raw state JSON (`cluster_resource_upgrade.go`,
-`upgradeV1JSON` = v1→v2→v3→v4, `upgradeV2JSON` = v2→v3→v4, `upgradeV3JSON` =
-v3→v4); a legacy worker count becomes one machine deployment named `md-0`, v3
-adds `cluster_class: false`, `network: null`, `resource_config: null` on every
-provider entry and null `infrastructure`/`bootstrap` on the topology entries,
-and v4 drops the removed attributes. `manifests`, `inventory.manage`,
-`management.bootstrap.addons.prerequisites`, `management.bootstrap.kairos` and
-`management.uninstall` joined v3 without a bump (`upgradeInventoryAndAddonsJSON`
-fills them; a v3 state that predates them decodes with nulls).
-
----
-
-## 9. Testing Patterns
-
-### 9.1 Schema Validation Tests
-
-```go
-func TestClusterResource_Schema(t *testing.T) {
-    ctx := context.Background()
-    r := NewClusterResource()
-    req := resource.SchemaRequest{}
-    resp := &resource.SchemaResponse{}
-    r.Schema(ctx, req, resp)
-
-    assert.False(t, resp.Diagnostics.HasError())
-
-    // Verify nested attributes exist
-    infraAttr, ok := resp.Schema.Attributes["infrastructure"]
-    assert.True(t, ok, "infrastructure nested attribute must exist")
-    _, isSingleNested := infraAttr.(schema.SingleNestedAttribute)
-    assert.True(t, isSingleNested, "infrastructure must be SingleNestedAttribute")
-}
-```
-
-### 9.2 Model Extraction Tests
-
-```go
-func TestExtractManagement_Null(t *testing.T) {
-    ctx := context.Background()
-    data := &ClusterResourceModel{
-        Management: types.ObjectNull(managementAttrTypes()),
-    }
-    mgmt, diags := extractManagement(ctx, data)
-    assert.Nil(t, mgmt)
-    assert.False(t, diags.HasError())
-}
-
-func TestExtractManagement_Populated(t *testing.T) {
-    ctx := context.Background()
-    mgmtVal, _ := types.ObjectValueFrom(ctx, managementAttrTypes(), ManagementModel{
-        Kubeconfig:  types.StringValue("/path/to/kubeconfig"),
-        SkipInit:    types.BoolValue(false),
-        SelfManaged: types.BoolValue(true),
-        Namespace:   types.StringValue("capi-system"),
-    })
-    data := &ClusterResourceModel{Management: mgmtVal}
-    mgmt, diags := extractManagement(ctx, data)
-    assert.NotNil(t, mgmt)
-    assert.False(t, diags.HasError())
-    assert.Equal(t, "/path/to/kubeconfig", mgmt.Kubeconfig.ValueString())
-}
-```
-
-### 9.3 Inventory Validation Tests
-
-```go
-func TestValidateInventory_DuplicateHostnames(t *testing.T) {
-    // Build inventory with two machines sharing a hostname
-    // Assert error diagnostic about duplicate hostname
-}
-
-func TestValidateInventory_InsufficientMachines(t *testing.T) {
-    // Build inventory with 2 CP machines but cpCount=3
-    // Assert error diagnostic about insufficient
-}
-
-func TestValidateInventory_SourceAndMachineMutuallyExclusive(t *testing.T) {
-    // Build inventory with both source and machine populated
-    // Assert error diagnostic
-}
-```
-
----
-
-## 10. Summary: Attribute Location Map
-
-Quick reference for where every attribute lives in the schema:
-
-| Old (Flat) | New (Nested) | Type | Mutability |
-|---|---|---|---|
-| `name` | `name` | `StringAttribute` Required | Immutable (RequiresReplace) |
-| `kubernetes_version` | `kubernetes_version` | `StringAttribute` Optional | **Mutable** |
-| `flavor` | *(removed in v3)* | — | — |
-| *(new)* | `cluster_class` | `BoolAttribute` Optional | Immutable |
-| *(new)* | `network.control_plane_endpoint.{host,port}` / `network.{pods,services}.cidr_blocks` / `network.service_domain` | `SingleNestedAttribute` Optional | **Mutable** |
-| `id` | `id` | `StringAttribute` Computed | Computed |
-| `management_kubeconfig` | `management.kubeconfig` | `StringAttribute` Optional | Immutable |
-| `skip_init` | `management.skip_init` | `BoolAttribute` Optional | **Mutable** |
-| *(new)* | `management.uninstall` | `BoolAttribute` Optional, default false | **Mutable** (acts on destroy) |
-| `self_managed` | `management.self_managed` | `BoolAttribute` Optional | Immutable |
-| `target_namespace` | `management.namespace` | `StringAttribute` Optional | Immutable |
-| `infrastructure_provider` | `infrastructure.<name>` (+ `.version`) | `MapNestedAttribute` Required | Name change replaces; entry changes upgrade in place |
-| `bootstrap_provider` | `bootstrap.<name>` | `MapNestedAttribute` Optional | Name change replaces; entry changes upgrade in place |
-| `control_plane_provider` | `control_plane.<name>` | `MapNestedAttribute` Optional | Name change replaces; entry changes upgrade in place |
-| `core_provider` | `core.<name>` | `MapNestedAttribute` Optional | **Mutable** (upgrade in place; never deleted) |
-| *(new)* | `ipam.<name>` | `MapNestedAttribute` Optional | **Mutable** (init / upgrade / delete in place) |
-| *(was `addons[]`)* | `addon.<name>` | `MapNestedAttribute` Optional | **Mutable** (init / upgrade / delete in place) |
-| *(new)* | `<map>.<name>.fetch_config.{owner,repository,url,oci}` | `SingleNestedAttribute` Optional | Immutable |
-| *(new)* | `<map>.<name>.resource_config` | `StringAttribute` (YAML/JSON) Optional | **Mutable** (in-place re-apply) |
-| *(new in v2)* | `cni` | *(removed in v4: a `HelmChartProxy` in `manifests.management`)* | — |
-| `control_plane_machine_count` | `topology.control_plane.replicas` | `Int64Attribute` Optional | **Mutable** |
-| *(new)* | `topology.control_plane.infrastructure` | `StringAttribute` (YAML/JSON) Optional | **Mutable** (template rotation) |
-| `worker_machine_count` | `topology.workers.machine_deployments[].replicas` | `ListNestedAttribute` Optional | **Mutable** |
-| *(new)* | `topology.workers.machine_deployments[].{infrastructure,bootstrap}` | `StringAttribute` (YAML/JSON) Optional | **Mutable** (template rotation) |
-| *(new)* | `manifests.management` | `ListAttribute` Optional | **Mutable** (re-applied) |
-| *(new)* | `inventory.manage` | `BoolAttribute` Optional, default true | **Mutable** |
-| *(new)* | `inventory.source` | `StringAttribute` Optional | **Mutable** |
-| *(new)* | `inventory.machine[]` | `ListNestedAttribute` Optional | **Mutable** (re-applied as Hardware/Machine/Secret) |
-| *(new in v3)* | `management.bootstrap.mode` / `.talos` / `.state_dir` | *(removed in v4: Kairos pivot only)* | — |
-| *(new)* | `management.bootstrap.kairos.{iso,address,ssh}` | `SingleNestedAttribute` Optional | Immutable |
-| *(new in v3)* | `management.addons` | *(removed in v4: `management.bootstrap.addons` is the bootstrap stack, the workload's addons are CAAPH objects)* | — |
-| *(new)* | `management.bootstrap.addons.prerequisites` | `ListAttribute` Optional | Immutable |
-| `wait_for_ready` | `wait.enabled` | `BoolAttribute` Optional | **Mutable** |
-| *(new)* | `wait.timeout` | `StringAttribute` Optional | **Mutable** |
-| `kubeconfig_path` | `output.kubeconfig_path` | `StringAttribute` Optional | **Mutable** |
-| `endpoint` | `status.endpoint` | `StringAttribute` Computed | Computed |
-| `kubeconfig` | `status.kubeconfig` | `StringAttribute` Computed+Sensitive | Computed |
-| `cluster_ca_certificate` | `status.ca_certificate` | `StringAttribute` Computed+Sensitive | Computed |
-| `cluster_description` | `status.description` | `StringAttribute` Computed | Computed |
-| `bootstrap_cluster_name` | `status.bootstrap_cluster` | `StringAttribute` Computed | Computed |
-
+## 5. Conventions and tooling
+
+- Tests: `go test ./internal/...`; render/readback tests next to each
+  resource; fake dynamic client with an SSA reactor in
+  `internal/capi/objects_test.go` (`newFakeObjectClient`, register kinds in
+  `testKinds`).
+- Lint: `if ! rtk proxy golangci-lint run ./... ; then` (RTK masks exit codes);
+  three pre-existing findings are ignored (`customize_test.go` forcetypeassert,
+  `customize.go:125` nilerr, `bootstrap.go:155` unparam).
+- Docs: `go generate ./...` then `git checkout docs/guides`; examples under
+  `examples/{resources,data-sources,ephemeral-resources}/<type>/`.
+- `.test/`: gitignored harness on the Kairos pivot topology; `go install ./...
+  && terraform validate` there is the only place schema-construction errors
+  surface.
+- Commit one step at a time with build, tests, lint and docs green.

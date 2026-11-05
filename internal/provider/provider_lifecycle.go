@@ -22,8 +22,8 @@ import (
 // which clusterctl init installs).
 func providerChanges(ctx context.Context, state, plan *ClusterResourceModel) (upgrade []capi.ProviderKey, removed capi.ProviderSet, added bool, diags diag.Diagnostics) {
 	removed = capi.ProviderSet{}
-	stateMaps := state.providerMaps()
-	for i, pm := range plan.providerMaps() {
+	stateMaps := state.providerMaps(ctx)
+	for i, pm := range plan.providerMaps(ctx) {
 		before, d := extractProviders(ctx, stateMaps[i].Map)
 		diags.Append(d...)
 		after, d := extractProviders(ctx, pm.Map)

@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -19,9 +20,10 @@ import (
 
 const clusterNameLabel = "cluster.x-k8s.io/cluster-name"
 
-// CatalogManifestGenerator generates cluster manifests from the provider set,
-// resolving every provider kind and API version through a KindCatalog so no
-// provider table is hardcoded.
+// CatalogManifestGenerator generates the cluster's own objects from the
+// installed provider CRDs, resolving every kind and API version through a
+// KindCatalog so no provider table is hardcoded. Templates, node groups,
+// classes and addons are separate resources and are only referenced here.
 type CatalogManifestGenerator struct {
 	resolver KindResolver
 }
@@ -42,8 +44,8 @@ func (g *CatalogManifestGenerator) Generate(ctx context.Context, mgmt *Cluster, 
 		return nil, err
 	}
 	var objs []unstructured.Unstructured
-	if opts.ClusterClass {
-		objs, err = b.clusterClass()
+	if opts.Class != nil {
+		objs, err = b.topology()
 	} else {
 		objs, err = b.direct()
 	}
@@ -60,52 +62,60 @@ type manifestBuilder struct {
 	coreVersion string
 	infra       ProviderConfig
 	cp          ProviderConfig
-	bootstrap   ProviderConfig
 }
 
-// defaultProviderName is what clusterctl init installs when a bootstrap or
-// control-plane provider is not configured, so generation defaults the same way.
+// defaultProviderName is what clusterctl init installs when a control-plane
+// provider is not configured, so generation defaults the same way.
 const defaultProviderName = "kubeadm"
 
 func newManifestBuilder(catalog *KindCatalog, opts GenerateOptions) (*manifestBuilder, error) {
-	infra, ok := opts.Providers.Infrastructure()
-	if !ok {
-		return nil, fmt.Errorf("generating cluster %s: no infrastructure provider configured", opts.ClusterName)
-	}
 	core, err := catalog.CoreVersion()
 	if err != nil {
 		return nil, err
 	}
-	return &manifestBuilder{
-		catalog:     catalog,
-		opts:        opts,
-		coreVersion: core,
-		infra:       infra,
-		cp:          firstOrDefault(opts.Providers, ProviderTypeControlPlane),
-		bootstrap:   firstOrDefault(opts.Providers, ProviderTypeBootstrap),
-	}, nil
-}
-
-// firstOrDefault returns the first provider of a type, or the kubeadm default.
-func firstOrDefault(providers ProviderSet, typ ProviderType) ProviderConfig {
-	if ps := providers[typ]; len(ps) > 0 {
-		return ps[0]
+	b := &manifestBuilder{catalog: catalog, opts: opts, coreVersion: core}
+	if opts.Class != nil {
+		return b, nil
 	}
-	return ProviderConfig{Type: typ, Name: defaultProviderName}
+	b.infra = providerNamed(opts.Providers, ProviderTypeInfrastructure, opts.Infrastructure.Provider)
+	if b.infra.Name == "" {
+		return nil, fmt.Errorf("generating cluster %s: no infrastructure provider: set infrastructure.provider, or a class", opts.ClusterName)
+	}
+	b.cp = providerNamed(opts.Providers, ProviderTypeControlPlane, opts.ControlPlane.Provider)
+	if b.cp.Name == "" {
+		b.cp = ProviderConfig{Type: ProviderTypeControlPlane, Name: defaultProviderName}
+	}
+	return b, nil
 }
 
-// direct generates the Cluster, provider cluster, control plane, and one
-// MachineDeployment (with its templates) per topology entry.
+// providerNamed returns the configured entry of a type by name (so its
+// ResourceConfig applies), a bare entry of that name when it is not in the
+// set, or the first entry of the type when no name is given.
+func providerNamed(providers ProviderSet, typ ProviderType, name string) ProviderConfig {
+	for _, p := range providers[typ] {
+		if name == "" || strings.EqualFold(p.Name, name) {
+			return p
+		}
+	}
+	if name == "" {
+		return ProviderConfig{}
+	}
+	return ProviderConfig{Type: typ, Name: name}
+}
+
+// direct generates the Cluster, the <Infra>Cluster and the <CP>ControlPlane
+// wired to the control-plane machine template the caller references.
 func (b *manifestBuilder) direct() ([]unstructured.Unstructured, error) {
+	name := b.opts.ClusterName
+	hasRef := b.opts.ControlPlane.Template != nil && b.opts.ControlPlane.Template.Name != ""
+	if !hasRef && b.opts.ControlPlane.TemplateSpec == nil {
+		return nil, fmt.Errorf("generating cluster %s: control_plane.infrastructure (a capi_machine_template ref) or control_plane.machine_spec is required without a class", name)
+	}
 	clusterGVK, err := b.catalog.Resolve(ProviderKey{ProviderTypeCore, "cluster-api"}, "Cluster")
 	if err != nil {
 		return nil, err
 	}
 	infraClusterGVK, err := b.catalog.Resolve(b.infra.key(), "Cluster")
-	if err != nil {
-		return nil, err
-	}
-	infraMTGVK, err := b.catalog.Resolve(b.infra.key(), "MachineTemplate")
 	if err != nil {
 		return nil, err
 	}
@@ -118,7 +128,6 @@ func (b *manifestBuilder) direct() ([]unstructured.Unstructured, error) {
 		return nil, err
 	}
 
-	name := b.opts.ClusterName
 	cpName := name + "-control-plane"
 
 	// Cluster
@@ -128,24 +137,42 @@ func (b *manifestBuilder) direct() ([]unstructured.Unstructured, error) {
 	clusterSpec["controlPlaneRef"] = b.ref(b.coreRefShape(), cpGVK, cpName)
 	cluster.Object["spec"] = clusterSpec
 
-	// <Infra>Cluster
+	// <Infra>Cluster: provider defaults, the provider entry's settings, then
+	// the cluster's own infrastructure spec.
 	infraCluster := b.newObject(infraClusterGVK, name)
-	infraCluster.Object["spec"] = buildSpec(providerDefaults(b.infra.key()), b.infra.ResourceConfig)
+	infraCluster.Object["spec"] = buildSpec(buildSpec(providerDefaults(b.infra.key()), b.infra.ResourceConfig), b.opts.Infrastructure.Spec)
 
-	// Control plane machine template + control plane
-	cpMT, err := b.templateObject(infraMTGVK, cpName, b.opts.ControlPlane.Infrastructure)
-	if err != nil {
-		return nil, err
-	}
+	// <CP>ControlPlane, on the referenced machine template.
 	controlPlane := b.newObject(cpGVK, cpName)
-	cpSpec := buildSpec(providerDefaults(b.cp.key()), b.cp.ResourceConfig)
+	cpSpec := buildSpec(buildSpec(providerDefaults(b.cp.key()), b.cp.ResourceConfig), b.opts.ControlPlane.Spec)
 	if b.opts.KubernetesVersion != "" {
 		cpSpec["version"] = b.opts.KubernetesVersion
 	}
 	if b.opts.ControlPlane.Replicas != nil {
 		cpSpec["replicas"] = *b.opts.ControlPlane.Replicas
 	}
-	mtRef := b.ref(cpRefShape, infraMTGVK, cpMT.GetName())
+	objs := []unstructured.Unstructured{cluster, infraCluster}
+	var mtGVK schema.GroupVersionKind
+	var mtName string
+	if hasRef {
+		tmpl := b.opts.ControlPlane.Template
+		mtGVK = schema.FromAPIVersionAndKind(tmpl.APIVersion, tmpl.Kind)
+		mtName = tmpl.Name
+	} else {
+		// The template is the cluster's own: hash-named, so a spec change
+		// is a new object and a control-plane rollout.
+		infraMTGVK, err := b.catalog.Resolve(b.infra.key(), "MachineTemplate")
+		if err != nil {
+			return nil, err
+		}
+		cpMT, err := b.templateObject(infraMTGVK, cpName, b.opts.ControlPlane.TemplateSpec)
+		if err != nil {
+			return nil, err
+		}
+		objs = append(objs, cpMT)
+		mtGVK, mtName = infraMTGVK, cpMT.GetName()
+	}
+	mtRef := b.ref(cpRefShape, mtGVK, mtName)
 	if cpRefShape == RefShapeLegacy {
 		setPath(cpSpec, mtRef, "machineTemplate", "infrastructureRef")
 	} else {
@@ -153,86 +180,10 @@ func (b *manifestBuilder) direct() ([]unstructured.Unstructured, error) {
 	}
 	controlPlane.Object["spec"] = cpSpec
 
-	objs := []unstructured.Unstructured{cluster, infraCluster, cpMT, controlPlane}
-
-	// Machine deployments
-	if len(b.opts.MachineDeployments) > 0 {
-		mdGVK, err := b.catalog.Resolve(ProviderKey{ProviderTypeCore, "cluster-api"}, "MachineDeployment")
-		if err != nil {
-			return nil, err
-		}
-		bsGVK, err := b.catalog.Resolve(b.bootstrap.key(), "ConfigTemplate")
-		if err != nil {
-			return nil, err
-		}
-		for _, md := range b.opts.MachineDeployments {
-			mdName := name + "-" + md.Name
-			mt, err := b.templateObject(infraMTGVK, mdName, md.Infrastructure)
-			if err != nil {
-				return nil, err
-			}
-			bsConfig := md.Bootstrap
-			if bsConfig == nil {
-				bsConfig = b.bootstrap.ResourceConfig
-			}
-			ct, err := b.templateObject(bsGVK, mdName, buildSpec(providerDefaults(b.bootstrap.key()), bsConfig))
-			if err != nil {
-				return nil, err
-			}
-			deployment := b.machineDeployment(mdGVK, md, mdName, bsGVK, ct.GetName(), infraMTGVK, mt.GetName())
-			objs = append(objs, mt, ct, deployment)
-		}
-	}
-	return objs, nil
+	return append(objs, controlPlane), nil
 }
 
-// machineDeployment builds one MachineDeployment wired to its templates.
-func (b *manifestBuilder) machineDeployment(gvk schema.GroupVersionKind, md MachineDeploymentTopology, mdName string, bsGVK schema.GroupVersionKind, configName string, mtGVK schema.GroupVersionKind, mtName string) unstructured.Unstructured {
-	selector := map[string]any{
-		clusterNameLabel:                   b.opts.ClusterName,
-		"cluster.x-k8s.io/deployment-name": mdName,
-	}
-	labels := map[string]any{}
-	for k, v := range md.Labels {
-		labels[k] = v
-	}
-	for k, v := range selector {
-		labels[k] = v
-	}
-	meta := map[string]any{"labels": labels}
-	if len(md.Annotations) > 0 {
-		annotations := map[string]any{}
-		for k, v := range md.Annotations {
-			annotations[k] = v
-		}
-		meta["annotations"] = annotations
-	}
-	machineSpec := map[string]any{
-		"clusterName":       b.opts.ClusterName,
-		"bootstrap":         map[string]any{"configRef": b.ref(b.coreRefShape(), bsGVK, configName)},
-		"infrastructureRef": b.ref(b.coreRefShape(), mtGVK, mtName),
-	}
-	if b.opts.KubernetesVersion != "" {
-		machineSpec["version"] = b.opts.KubernetesVersion
-	}
-	if md.FailureDomain != "" {
-		machineSpec["failureDomain"] = md.FailureDomain
-	}
-	spec := map[string]any{
-		"clusterName": b.opts.ClusterName,
-		"selector":    map[string]any{"matchLabels": selector},
-		"template":    map[string]any{"metadata": meta, "spec": machineSpec},
-	}
-	if md.Replicas != nil {
-		spec["replicas"] = *md.Replicas
-	}
-	obj := b.newObject(gvk, mdName)
-	obj.Object["spec"] = spec
-	return obj
-}
-
-// templateObject builds an immutable template object (spec.template.spec =
-// spec) named <base>-<hash of its spec>, so any change becomes a new object.
+// templateObject renders an immutable template named <base>-<hash of spec>.
 func (b *manifestBuilder) templateObject(gvk schema.GroupVersionKind, base string, spec map[string]any) (unstructured.Unstructured, error) {
 	if spec == nil {
 		spec = map[string]any{}
@@ -245,6 +196,41 @@ func (b *manifestBuilder) templateObject(gvk schema.GroupVersionKind, base strin
 	obj := b.newObject(gvk, base+"-"+h)
 	obj.Object["spec"] = full
 	return obj, nil
+}
+
+// topology generates a Cluster whose spec.topology refers to an existing
+// ClusterClass: v1beta2 classRef, or the legacy class and classNamespace.
+func (b *manifestBuilder) topology() ([]unstructured.Unstructured, error) {
+	name := b.opts.ClusterName
+	if b.opts.KubernetesVersion == "" {
+		return nil, fmt.Errorf("generating cluster %s: kubernetes_version is required with a class (Cluster.spec.topology.version)", name)
+	}
+	clusterGVK, err := b.catalog.Resolve(ProviderKey{ProviderTypeCore, "cluster-api"}, "Cluster")
+	if err != nil {
+		return nil, err
+	}
+	class := b.opts.Class
+	topology := map[string]any{"version": b.opts.KubernetesVersion}
+	if b.coreRefShape() == RefShapeContract {
+		ref := map[string]any{"name": class.Name}
+		if class.Namespace != "" && class.Namespace != b.opts.Namespace {
+			ref["namespace"] = class.Namespace
+		}
+		topology["classRef"] = ref
+	} else {
+		topology["class"] = class.Name
+		if class.Namespace != "" && class.Namespace != b.opts.Namespace {
+			topology["classNamespace"] = class.Namespace
+		}
+	}
+	if b.opts.ControlPlane.Replicas != nil {
+		topology["controlPlane"] = map[string]any{"replicas": *b.opts.ControlPlane.Replicas}
+	}
+	cluster := b.newObject(clusterGVK, name)
+	clusterSpec := b.clusterNetworkSpec()
+	clusterSpec["topology"] = topology
+	cluster.Object["spec"] = clusterSpec
+	return []unstructured.Unstructured{cluster}, nil
 }
 
 // clusterNetworkSpec renders Cluster.spec.clusterNetwork and

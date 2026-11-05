@@ -1,5 +1,3 @@
-# Direct mode, Tinkerbell + Talos at the v1beta2 core contract (Talos CRDs at v1beta1).
-# Template names carry the first 8 hex chars of sha256(canonical JSON of spec).
 ---
 apiVersion: cluster.x-k8s.io/v1beta2
 kind: Cluster
@@ -12,11 +10,11 @@ spec:
   clusterNetwork:
     pods:
       cidrBlocks:
-        - 10.244.0.0/16
+      - 10.244.0.0/16
     serviceDomain: cluster.local
     services:
       cidrBlocks:
-        - 10.96.0.0/12
+      - 10.96.0.0/12
   controlPlaneEndpoint:
     host: 10.0.0.160
     port: 6443
@@ -37,25 +35,10 @@ metadata:
   name: acc
   namespace: capi
 spec:
+  imageLookupFormat: '{{.BaseRegistry}}/talos:{{.KubernetesVersion}}'
   templateInline: |
     version: "0.1"
     name: talos
----
-apiVersion: infrastructure.cluster.x-k8s.io/v1beta2
-kind: TinkerbellMachineTemplate
-metadata:
-  labels:
-    cluster.x-k8s.io/cluster-name: acc
-  name: acc-control-plane-06d80c2f
-  namespace: capi
-spec:
-  template:
-    spec:
-      hardwareAffinity:
-        required:
-          - labelSelector:
-              matchLabels:
-                type: cp
 ---
 apiVersion: controlplane.cluster.x-k8s.io/v1beta1
 kind: TalosControlPlane
@@ -69,139 +52,18 @@ spec:
     controlplane:
       generateType: controlplane
       strategicPatches:
-        - |
-          machine:
-            install:
-              disk: /dev/sda
+      - |
+        machine:
+          network:
+            hostname: cp
       talosVersion: v1.13
   machineTemplate:
     spec:
       infrastructureRef:
         apiGroup: infrastructure.cluster.x-k8s.io
         kind: TinkerbellMachineTemplate
-        name: acc-control-plane-06d80c2f
+        name: cp-1a2b3c4d
   replicas: 1
   rolloutStrategy:
     type: OnDelete
   version: v1.34.0
----
-apiVersion: infrastructure.cluster.x-k8s.io/v1beta2
-kind: TinkerbellMachineTemplate
-metadata:
-  labels:
-    cluster.x-k8s.io/cluster-name: acc
-  name: acc-md-0-6d0c2ca9
-  namespace: capi
-spec:
-  template:
-    spec:
-      hardwareAffinity:
-        required:
-          - labelSelector:
-              matchLabels:
-                type: worker
----
-apiVersion: bootstrap.cluster.x-k8s.io/v1beta1
-kind: TalosConfigTemplate
-metadata:
-  labels:
-    cluster.x-k8s.io/cluster-name: acc
-  name: acc-md-0-8d41c84e
-  namespace: capi
-spec:
-  template:
-    spec:
-      generateType: worker
-      talosVersion: v1.13
----
-apiVersion: cluster.x-k8s.io/v1beta2
-kind: MachineDeployment
-metadata:
-  labels:
-    cluster.x-k8s.io/cluster-name: acc
-  name: acc-md-0
-  namespace: capi
-spec:
-  clusterName: acc
-  replicas: 2
-  selector:
-    matchLabels:
-      cluster.x-k8s.io/cluster-name: acc
-      cluster.x-k8s.io/deployment-name: acc-md-0
-  template:
-    metadata:
-      annotations:
-        note: x
-      labels:
-        cluster.x-k8s.io/cluster-name: acc
-        cluster.x-k8s.io/deployment-name: acc-md-0
-        tier: worker
-    spec:
-      bootstrap:
-        configRef:
-          apiGroup: bootstrap.cluster.x-k8s.io
-          kind: TalosConfigTemplate
-          name: acc-md-0-8d41c84e
-      clusterName: acc
-      failureDomain: rack-1
-      infrastructureRef:
-        apiGroup: infrastructure.cluster.x-k8s.io
-        kind: TinkerbellMachineTemplate
-        name: acc-md-0-6d0c2ca9
-      version: v1.34.0
----
-apiVersion: infrastructure.cluster.x-k8s.io/v1beta2
-kind: TinkerbellMachineTemplate
-metadata:
-  labels:
-    cluster.x-k8s.io/cluster-name: acc
-  name: acc-gpu-9e458ff9
-  namespace: capi
-spec:
-  template:
-    spec: {}
----
-apiVersion: bootstrap.cluster.x-k8s.io/v1beta1
-kind: TalosConfigTemplate
-metadata:
-  labels:
-    cluster.x-k8s.io/cluster-name: acc
-  name: acc-gpu-865d8919
-  namespace: capi
-spec:
-  template:
-    spec:
-      generateType: worker
-      talosVersion: v1.14
----
-apiVersion: cluster.x-k8s.io/v1beta2
-kind: MachineDeployment
-metadata:
-  labels:
-    cluster.x-k8s.io/cluster-name: acc
-  name: acc-gpu
-  namespace: capi
-spec:
-  clusterName: acc
-  replicas: 1
-  selector:
-    matchLabels:
-      cluster.x-k8s.io/cluster-name: acc
-      cluster.x-k8s.io/deployment-name: acc-gpu
-  template:
-    metadata:
-      labels:
-        cluster.x-k8s.io/cluster-name: acc
-        cluster.x-k8s.io/deployment-name: acc-gpu
-    spec:
-      bootstrap:
-        configRef:
-          apiGroup: bootstrap.cluster.x-k8s.io
-          kind: TalosConfigTemplate
-          name: acc-gpu-865d8919
-      clusterName: acc
-      infrastructureRef:
-        apiGroup: infrastructure.cluster.x-k8s.io
-        kind: TinkerbellMachineTemplate
-        name: acc-gpu-9e458ff9
-      version: v1.34.0

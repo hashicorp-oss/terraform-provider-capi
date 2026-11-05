@@ -46,7 +46,14 @@ ConfigMaps and Secrets, `prune` through the workload kubeconfig Secret,
 `capi_hardware` with the owner-label refusal and `force` power-off,
 `capi_provider` on the clusterctl lifecycle with `NoDefaults` init and the
 inventory read, `capi_cluster_class` from template refs in both contract
-shapes with `classes` and `ref`).
+shapes with `classes` and `ref`), 6 (3bca271 → `capi_cluster` schema v5:
+`namespace`, `infrastructure`/`control_plane`/`class`, `management.providers`,
+`management.bootstrap.on_failure` with `status.phase`/`status.error` and a
+resumable workflow (`capi.Phase`, `PhaseError`, `KeepBootstrapOnFailure`),
+`wait.conditions`, the connection derived from `provider_secrets` after the
+pivot, `control_plane.machine_spec` for the self-rendered control-plane
+template, raw-JSON upgraders for every version incl. v0, examples, `.test`
+and CLAUDE.md ported).
 
 1. **Connection, credentials, reads.** Provider `kubeconfig` and
    `kubernetes` block; ephemeral `capi_kubeconfig` (from the management

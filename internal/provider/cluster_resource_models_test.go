@@ -5,399 +5,141 @@ package provider
 
 import (
 	"context"
-	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
-	"github.com/hashicorp/terraform-plugin-framework/types/basetypes"
 	"github.com/hashicorp/terraform-plugin-go/tftypes"
 
 	"github.com/tinkerbell-community/terraform-provider-capi/internal/capi"
 )
 
-// --- Schema Tests ---
+// --- Schema tests ---
 
-func TestClusterResource_Schema_ProviderMaps(t *testing.T) {
-	ctx := context.Background()
-	r := NewClusterResource()
-	resp := &resource.SchemaResponse{}
-	r.Schema(ctx, resource.SchemaRequest{}, resp)
-	if resp.Diagnostics.HasError() {
-		t.Fatalf("schema diagnostics: %v", resp.Diagnostics)
-	}
-	if resp.Schema.Version != 4 {
-		t.Errorf("schema version = %d, want 4", resp.Schema.Version)
-	}
-
-	var reference map[string]schema.Attribute
-	for _, name := range []string{"core", "infrastructure", "bootstrap", "control_plane", "ipam", "addon"} {
-		attr, ok := resp.Schema.Attributes[name]
-		if !ok {
-			t.Fatalf("%s attribute missing", name)
-		}
-		m, ok := attr.(schema.MapNestedAttribute)
-		if !ok {
-			t.Fatalf("%s must be MapNestedAttribute, got %T", name, attr)
-		}
-		if name == "infrastructure" && !m.Required {
-			t.Error("infrastructure must be required")
-		}
-		if name != "infrastructure" && !m.Optional {
-			t.Errorf("%s must be optional", name)
-		}
-		// The kinds of the generated cluster objects follow the names in
-		// these three maps, so adding or removing a name replaces the
-		// cluster; core, ipam and addon are converged in place.
-		structural := name == "infrastructure" || name == "bootstrap" || name == "control_plane"
-		if structural && len(m.PlanModifiers) == 0 {
-			t.Errorf("%s must RequiresReplace on a name change", name)
-		}
-		if !structural && len(m.PlanModifiers) != 0 {
-			t.Errorf("%s must be fully mutable", name)
-		}
-		if reference == nil {
-			reference = m.NestedObject.Attributes
-			continue
-		}
-		if len(reference) != len(m.NestedObject.Attributes) {
-			t.Errorf("%s nested object differs from the shared provider object", name)
-		}
-	}
-	for _, name := range []string{"version", "fetch_config", "config_variables", "secret_config_variables", "deployment", "manager", "additional_manifests", "manifest_patches", "patches", "resource_config"} {
-		if _, ok := reference[name]; !ok {
-			t.Errorf("provider object missing %s", name)
-		}
-	}
-	// The framework does not allow dynamic attributes inside collection nested
-	// attributes, so resource_config is YAML/JSON text (yamlencode({...})).
-	if rc, ok := reference["resource_config"].(schema.StringAttribute); !ok || !rc.Optional {
-		t.Errorf("resource_config must be an optional StringAttribute, got %T", reference["resource_config"])
-	}
-	fc, ok := reference["fetch_config"].(schema.SingleNestedAttribute)
-	if !ok {
-		t.Fatal("fetch_config must be a SingleNestedAttribute")
-	}
-	for _, name := range []string{"owner", "repository", "url", "oci"} {
-		if _, ok := fc.Attributes[name]; !ok {
-			t.Errorf("fetch_config missing %s", name)
-		}
-	}
-
-	for _, gone := range []string{"workers", "addons", "template", "flavor"} {
-		if _, ok := resp.Schema.Attributes[gone]; ok {
-			t.Errorf("%s must be removed", gone)
-		}
-	}
-	topo, ok := resp.Schema.Attributes["topology"].(schema.SingleNestedAttribute)
-	if !ok {
-		t.Fatal("topology must be a SingleNestedAttribute")
-	}
-	cp, ok := topo.Attributes["control_plane"].(schema.SingleNestedAttribute)
-	if !ok {
-		t.Fatal("topology.control_plane must be a SingleNestedAttribute")
-	}
-	if _, ok := cp.Attributes["replicas"].(schema.Int64Attribute); !ok {
-		t.Error("topology.control_plane.replicas must be Int64")
-	}
-	if _, ok := cp.Attributes["infrastructure"].(schema.StringAttribute); !ok {
-		t.Error("topology.control_plane.infrastructure must be a StringAttribute (YAML/JSON)")
-	}
-	workers, ok := topo.Attributes["workers"].(schema.SingleNestedAttribute)
-	if !ok {
-		t.Fatal("topology.workers must be a SingleNestedAttribute")
-	}
-	mds, ok := workers.Attributes["machine_deployments"].(schema.ListNestedAttribute)
-	if !ok {
-		t.Fatal("topology.workers.machine_deployments must be a ListNestedAttribute")
-	}
-	for _, name := range []string{"name", "class", "replicas", "failure_domain", "metadata"} {
-		if _, ok := mds.NestedObject.Attributes[name]; !ok {
-			t.Errorf("machine_deployments missing %s", name)
-		}
-	}
-	for _, name := range []string{"infrastructure", "bootstrap"} {
-		if _, ok := mds.NestedObject.Attributes[name].(schema.StringAttribute); !ok {
-			t.Errorf("machine_deployments.%s must be a StringAttribute (YAML/JSON)", name)
-		}
-	}
-	if nameAttr, ok := mds.NestedObject.Attributes["name"].(schema.StringAttribute); !ok || !nameAttr.Required {
-		t.Error("machine_deployments.name must be a required string")
-	}
-}
-
-func TestClusterResource_Schema_NetworkAndClusterClass(t *testing.T) {
+func TestClusterResource_Schema_V5Shape(t *testing.T) {
 	ctx := context.Background()
 	resp := &resource.SchemaResponse{}
 	NewClusterResource().Schema(ctx, resource.SchemaRequest{}, resp)
 	if resp.Diagnostics.HasError() {
-		t.Fatal(resp.Diagnostics)
+		t.Fatalf("schema diagnostics: %v", resp.Diagnostics)
 	}
-
-	cc, ok := resp.Schema.Attributes["cluster_class"].(schema.BoolAttribute)
-	if !ok || !cc.Optional || !cc.Computed || cc.Default == nil || len(cc.PlanModifiers) == 0 {
-		t.Errorf("cluster_class must be an optional+computed bool with a default and RequiresReplace, got %+v", resp.Schema.Attributes["cluster_class"])
+	if resp.Schema.Version != 5 {
+		t.Errorf("schema version = %d, want 5", resp.Schema.Version)
 	}
-
-	network, ok := resp.Schema.Attributes["network"].(schema.SingleNestedAttribute)
-	if !ok || !network.Optional {
-		t.Fatalf("network must be an optional SingleNestedAttribute, got %T", resp.Schema.Attributes["network"])
+	for _, gone := range []string{"cluster_class", "topology", "output", "core", "bootstrap", "ipam", "addon", "cni", "template", "flavor"} {
+		if _, ok := resp.Schema.Attributes[gone]; ok {
+			t.Errorf("%s must be gone from the top level", gone)
+		}
 	}
-	if len(network.PlanModifiers) != 0 {
-		t.Error("network must update in place")
+	if ns, ok := resp.Schema.Attributes["namespace"].(schema.StringAttribute); !ok || !ns.Optional || !ns.Computed || len(ns.PlanModifiers) == 0 {
+		t.Error("namespace must be an optional, computed, RequiresReplace string")
 	}
-	ep, ok := network.Attributes["control_plane_endpoint"].(schema.SingleNestedAttribute)
+	infra, ok := resp.Schema.Attributes["infrastructure"].(schema.SingleNestedAttribute)
+	if !ok || !infra.Optional {
+		t.Fatal("infrastructure must be an optional SingleNestedAttribute")
+	}
+	if p, ok := infra.Attributes["provider"].(schema.StringAttribute); !ok || !p.Required {
+		t.Error("infrastructure.provider must be required")
+	}
+	if _, ok := infra.Attributes["spec"].(schema.DynamicAttribute); !ok {
+		t.Error("infrastructure.spec must be dynamic")
+	}
+	cp, ok := resp.Schema.Attributes["control_plane"].(schema.SingleNestedAttribute)
 	if !ok {
-		t.Fatal("network.control_plane_endpoint must be a SingleNestedAttribute")
+		t.Fatal("control_plane must be a SingleNestedAttribute")
 	}
-	if host, ok := ep.Attributes["host"].(schema.StringAttribute); !ok || !host.Required {
-		t.Error("control_plane_endpoint.host must be a required string")
+	for _, name := range []string{"provider", "replicas", "infrastructure", "spec"} {
+		if _, ok := cp.Attributes[name]; !ok {
+			t.Errorf("control_plane missing %s", name)
+		}
 	}
-	if port, ok := ep.Attributes["port"].(schema.Int64Attribute); !ok || !port.Optional {
-		t.Error("control_plane_endpoint.port must be an optional int64")
+	if ref, ok := cp.Attributes["infrastructure"].(schema.SingleNestedAttribute); !ok || ref.Required {
+		t.Error("control_plane.infrastructure must be an optional template ref")
 	}
-	for _, name := range []string{"pods", "services"} {
-		ranges, ok := network.Attributes[name].(schema.SingleNestedAttribute)
+	class, ok := resp.Schema.Attributes["class"].(schema.SingleNestedAttribute)
+	if !ok || !class.Optional {
+		t.Fatal("class must be an optional SingleNestedAttribute")
+	}
+	if n, ok := class.Attributes["name"].(schema.StringAttribute); !ok || !n.Required {
+		t.Error("class.name must be required")
+	}
+	mgmt, ok := resp.Schema.Attributes["management"].(schema.SingleNestedAttribute)
+	if !ok {
+		t.Fatal("management must be a SingleNestedAttribute")
+	}
+	for _, gone := range []string{"kubeconfig", "skip_init", "uninstall", "namespace", "addons"} {
+		if _, ok := mgmt.Attributes[gone]; ok {
+			t.Errorf("management.%s must be gone", gone)
+		}
+	}
+	providers, ok := mgmt.Attributes["providers"].(schema.SingleNestedAttribute)
+	if !ok || !providers.Optional {
+		t.Fatal("management.providers must be an optional SingleNestedAttribute")
+	}
+	reference := providerNestedObject().Attributes
+	for _, name := range providerMapAttrs {
+		m, ok := providers.Attributes[name].(schema.MapNestedAttribute)
 		if !ok {
-			t.Fatalf("network.%s must be a SingleNestedAttribute", name)
+			t.Fatalf("management.providers.%s must be a MapNestedAttribute", name)
 		}
-		if _, ok := ranges.Attributes["cidr_blocks"].(schema.ListAttribute); !ok {
-			t.Errorf("network.%s.cidr_blocks must be a ListAttribute", name)
+		if m.Required {
+			t.Errorf("management.providers.%s must be optional", name)
 		}
-	}
-	if _, ok := network.Attributes["service_domain"].(schema.StringAttribute); !ok {
-		t.Error("network.service_domain must be a string")
-	}
-}
-
-func TestClusterResource_SchemaRequiredAttributes(t *testing.T) {
-	ctx := context.Background()
-	r := NewClusterResource()
-	req := resource.SchemaRequest{}
-	resp := &resource.SchemaResponse{}
-	r.Schema(ctx, req, resp)
-
-	// name is required
-	nameAttr, ok := resp.Schema.Attributes["name"].(schema.StringAttribute)
-	if !ok || !nameAttr.Required {
-		t.Error("name should be Required")
-	}
-
-	// infrastructure is required
-	infraAttr, ok := resp.Schema.Attributes["infrastructure"].(schema.MapNestedAttribute)
-	if !ok || !infraAttr.Required {
-		t.Error("infrastructure should be Required")
-	}
-
-	// bootstrap is optional
-	bsAttr, ok := resp.Schema.Attributes["bootstrap"].(schema.MapNestedAttribute)
-	if !ok || !bsAttr.Optional {
-		t.Error("bootstrap should be Optional")
-	}
-}
-
-func TestClusterResource_SchemaStatusComputed(t *testing.T) {
-	ctx := context.Background()
-	r := NewClusterResource()
-	req := resource.SchemaRequest{}
-	resp := &resource.SchemaResponse{}
-	r.Schema(ctx, req, resp)
-
-	statusAttr, ok := resp.Schema.Attributes["status"].(schema.SingleNestedAttribute)
-	if !ok || !statusAttr.Computed {
-		t.Error("status should be Computed")
-	}
-	if statusAttr.Optional {
-		t.Error("status should not be Optional")
-	}
-
-	// All status children should be computed
-	for childName, child := range statusAttr.Attributes {
-		childStr, ok := child.(schema.StringAttribute)
-		if !ok {
-			t.Errorf("status.%s should be StringAttribute", childName)
-			continue
+		if len(m.NestedObject.Attributes) != len(reference) {
+			t.Errorf("management.providers.%s nested object differs from the shared provider object", name)
 		}
-		if !childStr.Computed {
-			t.Errorf("status.%s should be Computed", childName)
+		switch name {
+		case "infrastructure", "bootstrap", "control_plane":
+			if len(m.PlanModifiers) != 1 {
+				t.Errorf("management.providers.%s must RequiresReplace on a name change", name)
+			}
+		default:
+			if len(m.PlanModifiers) != 0 {
+				t.Errorf("management.providers.%s must be fully mutable", name)
+			}
 		}
 	}
-}
-
-// --- Extraction Helper Tests ---
-
-func TestExtractManagement_Null(t *testing.T) {
-	ctx := context.Background()
-	data := &ClusterResourceModel{
-		Management: types.ObjectNull(managementAttrTypes()),
+	bs, ok := mgmt.Attributes["bootstrap"].(schema.SingleNestedAttribute)
+	if !ok {
+		t.Fatal("management.bootstrap must be a SingleNestedAttribute")
 	}
-	mgmt, diags := extractManagement(ctx, data)
-	if diags.HasError() {
-		t.Fatalf("unexpected error: %v", diags)
+	if of, ok := bs.Attributes["on_failure"].(schema.StringAttribute); !ok || !of.Computed {
+		t.Error("management.bootstrap.on_failure must be a computed string with a default")
 	}
-	if mgmt != nil {
-		t.Error("expected nil for null management")
+	wait, ok := resp.Schema.Attributes["wait"].(schema.SingleNestedAttribute)
+	if !ok {
+		t.Fatal("wait must be a SingleNestedAttribute")
 	}
-}
-
-func TestExtractManagement_Populated(t *testing.T) {
-	ctx := context.Background()
-	mgmt := ManagementModel{
-		Kubeconfig:  types.StringValue("/path/to/kubeconfig"),
-		SkipInit:    types.BoolValue(false),
-		SelfManaged: types.BoolValue(true),
-		Namespace:   types.StringValue("capi-system"),
-		Bootstrap:   types.ObjectNull(managementBootstrapAttrTypes()),
+	if _, ok := wait.Attributes["enabled"]; ok {
+		t.Error("wait.enabled is gone: wait.conditions replaces it")
 	}
-	mgmtVal, diags := types.ObjectValueFrom(ctx, managementAttrTypes(), mgmt)
-	if diags.HasError() {
-		t.Fatalf("setup error: %v", diags)
+	if c, ok := wait.Attributes["conditions"].(schema.ListAttribute); !ok || !c.Computed {
+		t.Error("wait.conditions must be a computed list with a default")
 	}
-
-	data := &ClusterResourceModel{Management: mgmtVal}
-	result, d := extractManagement(ctx, data)
-	if d.HasError() {
-		t.Fatalf("unexpected error: %v", d)
+	status, ok := resp.Schema.Attributes["status"].(schema.SingleNestedAttribute)
+	if !ok || !status.Computed || status.Optional {
+		t.Fatal("status must be computed only")
 	}
-	if result == nil {
-		t.Fatal("expected non-nil management")
+	for _, name := range []string{"phase", "error", "endpoint", "ca_certificate", "description", "bootstrap_cluster", "conditions"} {
+		if _, ok := status.Attributes[name]; !ok {
+			t.Errorf("status missing %s", name)
+		}
 	}
-	if result.Kubeconfig.ValueString() != "/path/to/kubeconfig" {
-		t.Errorf("kubeconfig = %q, want %q", result.Kubeconfig.ValueString(), "/path/to/kubeconfig")
+	if _, ok := status.Attributes["kubeconfig"]; ok {
+		t.Error("status.kubeconfig is gone: ephemeral.capi_kubeconfig replaces it")
 	}
-	if !result.SelfManaged.ValueBool() {
-		t.Error("self_managed should be true")
-	}
-	if result.Namespace.ValueString() != "capi-system" {
-		t.Errorf("namespace = %q, want %q", result.Namespace.ValueString(), "capi-system")
+	if _, ok := resp.Schema.Attributes["provider_secrets"].(schema.DynamicAttribute); !ok {
+		t.Error("provider_secrets must be dynamic")
 	}
 }
 
-func TestExtractProviders_Populated(t *testing.T) {
-	ctx := context.Background()
-	pm := emptyProviderModel()
-	pm.Version = types.StringValue("v0.7.9")
-	m := mustProviderMap(t, ctx, map[string]ProviderModel{"tinkerbell": pm})
-	got, diags := extractProviders(ctx, m)
-	if diags.HasError() {
-		t.Fatalf("unexpected error: %v", diags)
-	}
-	if got["tinkerbell"].Version.ValueString() != "v0.7.9" {
-		t.Errorf("version = %q", got["tinkerbell"].Version.ValueString())
-	}
-}
-
-func TestExtractProviders_Null(t *testing.T) {
-	got, diags := extractProviders(context.Background(), types.MapNull(providerMapType().ElemType))
-	if diags.HasError() || got != nil {
-		t.Errorf("null map must yield nil, got %v %v", got, diags)
-	}
-}
-
-func TestExtractTopology_Null(t *testing.T) {
-	ctx := context.Background()
-	cp, mds, diags := extractTopology(ctx, &ClusterResourceModel{Topology: types.ObjectNull(topologyAttrTypes())})
-	if diags.HasError() || cp.Replicas != nil || cp.Infrastructure != nil || mds != nil {
-		t.Errorf("null topology must yield nils, got %+v %v %v", cp, mds, diags)
-	}
-}
-
-func TestLegacyTopologyObject(t *testing.T) {
-	ctx := context.Background()
-	obj, diags := legacyTopologyObject(ctx, types.Int64Value(3), types.Int64Value(2))
-	if diags.HasError() {
-		t.Fatal(diags)
-	}
-	cp, mds, diags := extractTopology(ctx, &ClusterResourceModel{Topology: obj})
-	if diags.HasError() {
-		t.Fatal(diags)
-	}
-	if cp.Replicas == nil || *cp.Replicas != 3 {
-		t.Errorf("cp = %+v", cp)
-	}
-	if len(mds) != 1 || mds[0].Name != "md-0" || mds[0].Replicas == nil || *mds[0].Replicas != 2 {
-		t.Errorf("mds = %+v", mds)
-	}
-	if obj, _ := legacyTopologyObject(ctx, types.Int64Null(), types.Int64Null()); !obj.IsNull() {
-		t.Error("no counts must yield a null topology")
-	}
-}
-
-// --- Status Tests ---
-
-func TestSetStatus(t *testing.T) {
-	ctx := context.Background()
-	data := &ClusterResourceModel{}
-
-	result := &capi.ClusterResult{
-		Endpoint:           "https://10.0.0.1:6443",
-		Kubeconfig:         "apiVersion: v1\nclusters: []",
-		CACertificate:      "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----",
-		ClusterDescription: "Cluster ready",
-		BootstrapCluster:   &capi.Cluster{Name: "kind-bootstrap-1234"},
-	}
-
-	diags := setStatus(ctx, data, result)
-	if diags.HasError() {
-		t.Fatalf("unexpected error: %v", diags)
-	}
-
-	st, d := extractStatus(ctx, data)
-	if d.HasError() {
-		t.Fatalf("extract error: %v", d)
-	}
-	if st.Endpoint.ValueString() != "https://10.0.0.1:6443" {
-		t.Errorf("endpoint = %q", st.Endpoint.ValueString())
-	}
-	if st.BootstrapCluster.ValueString() != "kind-bootstrap-1234" {
-		t.Errorf("bootstrap_cluster = %q", st.BootstrapCluster.ValueString())
-	}
-}
-
-func TestSetStatus_NilBootstrap(t *testing.T) {
-	ctx := context.Background()
-	data := &ClusterResourceModel{}
-
-	result := &capi.ClusterResult{
-		Endpoint:   "https://10.0.0.1:6443",
-		Kubeconfig: "kubeconfig-data",
-	}
-
-	diags := setStatus(ctx, data, result)
-	if diags.HasError() {
-		t.Fatalf("unexpected error: %v", diags)
-	}
-
-	st, _ := extractStatus(ctx, data)
-	if !st.BootstrapCluster.IsNull() {
-		t.Error("bootstrap_cluster should be null when bootstrap is nil")
-	}
-}
-
-func TestNullStatus(t *testing.T) {
-	ctx := context.Background()
-	data := &ClusterResourceModel{}
-
-	diags := nullStatus(ctx, data)
-	if diags.HasError() {
-		t.Fatalf("unexpected error: %v", diags)
-	}
-
-	st, _ := extractStatus(ctx, data)
-	if !st.Endpoint.IsNull() {
-		t.Error("expected null endpoint")
-	}
-	if !st.Kubeconfig.IsNull() {
-		t.Error("expected null kubeconfig")
-	}
-}
-
-// --- BuildCreateOptions Tests ---
+// --- builders ---
 
 func mustProviderMap(t *testing.T, ctx context.Context, entries map[string]ProviderModel) types.Map {
 	t.Helper()
@@ -410,278 +152,77 @@ func mustProviderMap(t *testing.T, ctx context.Context, entries map[string]Provi
 
 func emptyProviderModel() ProviderModel { return nullProviderModel() }
 
+func templateRef(t *testing.T, ctx context.Context, kind, name string) types.Object {
+	t.Helper()
+	return mustObject(t, ctx, templateRefAttrTypes(), TemplateRefModel{
+		APIGroup: types.StringValue("infrastructure.cluster.x-k8s.io"), APIVersion: types.StringValue("infrastructure.cluster.x-k8s.io/v1beta1"),
+		Kind: types.StringValue(kind), Name: types.StringValue(name), Namespace: types.StringValue("default"),
+	})
+}
+
+func controlPlaneValue(t *testing.T, ctx context.Context, provider string, replicas int64, ref types.Object, spec types.Dynamic) types.Object {
+	t.Helper()
+	cp := ControlPlaneSpecModel{Provider: stringOrNull(provider), Replicas: types.Int64Value(replicas), Infrastructure: ref, MachineSpec: types.DynamicNull(), Spec: spec}
+	if replicas == 0 {
+		cp.Replicas = types.Int64Null()
+	}
+	return mustObject(t, ctx, controlPlaneSpecAttrTypes(), cp)
+}
+
+// baseModel is a direct-mode docker cluster on an external management cluster.
 func baseModel(t *testing.T, ctx context.Context) *ClusterResourceModel {
 	t.Helper()
 	return &ClusterResourceModel{
-		Name:           types.StringValue("test"),
-		Core:           types.MapNull(providerMapType().ElemType),
-		Infrastructure: mustProviderMap(t, ctx, map[string]ProviderModel{"docker": emptyProviderModel()}),
-		Bootstrap:      types.MapNull(providerMapType().ElemType),
-		ControlPlane:   types.MapNull(providerMapType().ElemType),
-		IPAM:           types.MapNull(providerMapType().ElemType),
-		Addon:          types.MapNull(providerMapType().ElemType),
-		Topology:       types.ObjectNull(topologyAttrTypes()),
-		ClusterClass:   types.BoolValue(false),
-		Network:        types.ObjectNull(clusterNetworkAttrTypes()),
-		Management:     types.ObjectNull(managementAttrTypes()),
-		Inventory:      types.ObjectNull(inventoryAttrTypes()),
-		Wait:           types.ObjectNull(waitAttrTypes()),
-		Output:         types.ObjectNull(outputAttrTypes()),
+		Name:            types.StringValue("test"),
+		Namespace:       types.StringValue("default"),
+		Network:         types.ObjectNull(clusterNetworkAttrTypes()),
+		Infrastructure:  mustObject(t, ctx, infrastructureSpecAttrTypes(), InfrastructureSpecModel{Provider: types.StringValue("docker"), Spec: types.DynamicNull()}),
+		ControlPlane:    controlPlaneValue(t, ctx, "kubeadm", 1, templateRef(t, ctx, "DockerMachineTemplate", "cp-aaaa"), types.DynamicNull()),
+		Class:           types.ObjectNull(classRefAttrTypes()),
+		Management:      types.ObjectNull(managementAttrTypes()),
+		Manifests:       types.ObjectNull(manifestsAttrTypes()),
+		Inventory:       types.ObjectNull(inventoryAttrTypes()),
+		Wait:            types.ObjectNull(waitAttrTypes()),
+		Status:          types.ObjectNull(statusAttrTypes()),
+		ProviderSecrets: types.DynamicNull(),
 	}
+}
+
+// providersValue builds management.providers from per-type maps.
+func providersValue(t *testing.T, ctx context.Context, maps map[string]types.Map) types.Object {
+	t.Helper()
+	null := types.MapNull(providerMapType().ElemType)
+	pv := ProvidersModel{Core: null, Infrastructure: null, Bootstrap: null, ControlPlane: null, IPAM: null, Addon: null}
+	for name, m := range maps {
+		switch name {
+		case "core":
+			pv.Core = m
+		case "infrastructure":
+			pv.Infrastructure = m
+		case "bootstrap":
+			pv.Bootstrap = m
+		case "control_plane":
+			pv.ControlPlane = m
+		case "ipam":
+			pv.IPAM = m
+		case "addon":
+			pv.Addon = m
+		default:
+			t.Fatalf("unknown provider map %s", name)
+		}
+	}
+	return mustObject(t, ctx, providersAttrTypes(), pv)
+}
+
+// selfManagedWith builds a self-managed management block with the given providers.
+func selfManagedWith(t *testing.T, ctx context.Context, providers types.Object, bootstrap types.Object) types.Object {
+	t.Helper()
+	return mustObject(t, ctx, managementAttrTypes(), ManagementModel{SelfManaged: types.BoolValue(true), Providers: providers, Bootstrap: bootstrap})
 }
 
 func selfManaged(t *testing.T, ctx context.Context) types.Object {
 	t.Helper()
-	v, d := types.ObjectValueFrom(ctx, managementAttrTypes(), ManagementModel{
-		Kubeconfig: types.StringNull(), SkipInit: types.BoolValue(false), SelfManaged: types.BoolValue(true),
-		Namespace: types.StringNull(), Bootstrap: types.ObjectNull(managementBootstrapAttrTypes()),
-	})
-	if d.HasError() {
-		t.Fatal(d)
-	}
-	return v
-}
-
-func topologyValue(t *testing.T, ctx context.Context, cpReplicas int64, mds []MachineDeploymentModel) types.Object {
-	t.Helper()
-	cp, d := types.ObjectValueFrom(ctx, controlPlaneTopologyAttrTypes(), ControlPlaneTopologyModel{Replicas: types.Int64Value(cpReplicas), Infrastructure: types.StringNull()})
-	if d.HasError() {
-		t.Fatal(d)
-	}
-	workers := types.ObjectNull(workersTopologyAttrTypes())
-	if mds != nil {
-		list, d := types.ListValueFrom(ctx, types.ObjectType{AttrTypes: machineDeploymentAttrTypes()}, mds)
-		if d.HasError() {
-			t.Fatal(d)
-		}
-		workers, d = types.ObjectValueFrom(ctx, workersTopologyAttrTypes(), WorkersTopologyModel{MachineDeployments: list})
-		if d.HasError() {
-			t.Fatal(d)
-		}
-	}
-	topo, d := types.ObjectValueFrom(ctx, topologyAttrTypes(), TopologyModel{ControlPlane: cp, Workers: workers})
-	if d.HasError() {
-		t.Fatal(d)
-	}
-	return topo
-}
-
-func machineDeployment(t *testing.T, ctx context.Context, name string, replicas int64, labels map[string]string) MachineDeploymentModel {
-	t.Helper()
-	meta := types.ObjectNull(topologyMetadataAttrTypes())
-	if labels != nil {
-		l, d := types.MapValueFrom(ctx, types.StringType, labels)
-		if d.HasError() {
-			t.Fatal(d)
-		}
-		meta, d = types.ObjectValueFrom(ctx, topologyMetadataAttrTypes(), TopologyMetadataModel{Labels: l, Annotations: types.MapNull(types.StringType)})
-		if d.HasError() {
-			t.Fatal(d)
-		}
-	}
-	return MachineDeploymentModel{
-		Name: types.StringValue(name), Class: types.StringNull(), Replicas: types.Int64Value(replicas),
-		FailureDomain: types.StringNull(), Metadata: meta,
-		Infrastructure: types.StringNull(), Bootstrap: types.StringNull(),
-	}
-}
-
-func TestYAMLObject_ConvertsYAMLAndJSON(t *testing.T) {
-	want := map[string]any{
-		"replicas": int64(3), "ratio": 1.5, "enabled": true,
-		"nested": map[string]any{"talosVersion": "v1.13"},
-		"list":   []any{"a", int64(2)},
-		"none":   nil,
-	}
-	cases := map[string]string{
-		"yaml": "replicas: 3\nratio: 1.5\nenabled: true\nnested:\n  talosVersion: v1.13\nlist: [a, 2]\nnone: null\n",
-		"json": `{"replicas":3,"ratio":1.5,"enabled":true,"nested":{"talosVersion":"v1.13"},"list":["a",2],"none":null}`,
-	}
-	for name, in := range cases {
-		got, diags := yamlObject(types.StringValue(in), "test")
-		if diags.HasError() {
-			t.Fatalf("%s: %v", name, diags)
-		}
-		if !reflect.DeepEqual(got, want) {
-			t.Errorf("%s: yamlObject = %#v\nwant %#v", name, got, want)
-		}
-	}
-}
-
-func TestYAMLObject_NullUnknownAndBlankYieldNil(t *testing.T) {
-	for name, s := range map[string]types.String{"null": types.StringNull(), "unknown": types.StringUnknown(), "blank": types.StringValue("  \n")} {
-		got, diags := yamlObject(s, "test")
-		if diags.HasError() || got != nil {
-			t.Errorf("%s: got %v %v, want nil without diagnostics", name, got, diags)
-		}
-	}
-}
-
-func TestYAMLObject_RejectsNonObjectAndInvalidYAML(t *testing.T) {
-	const where = "infrastructure[\"docker\"].resource_config"
-	_, diags := yamlObject(types.StringValue("- just\n- a list\n"), where)
-	if !hasErrorContaining(diags, where) || !hasErrorContaining(diags, "object") {
-		t.Errorf("a list must be rejected naming the attribute: %v", diags)
-	}
-	_, diags = yamlObject(types.StringValue("key: [unterminated"), where)
-	if !hasErrorContaining(diags, where) {
-		t.Errorf("invalid YAML must be rejected naming the attribute: %v", diags)
-	}
-}
-
-func TestProviderMapRequiresReplace_IgnoresResourceConfig(t *testing.T) {
-	ctx := context.Background()
-	base := emptyProviderModel()
-	base.Version = types.StringValue("v0.7.1")
-	state := mustProviderMap(t, ctx, map[string]ProviderModel{"talos": base})
-
-	rcOnly := base
-	rcOnly.ResourceConfig = types.StringValue("rolloutStrategy: {type: OnDelete}")
-	if got := requiresReplace(t, ctx, state, mustProviderMap(t, ctx, map[string]ProviderModel{"talos": rcOnly})); got {
-		t.Error("a resource_config change must update in place")
-	}
-
-	bumped := rcOnly
-	bumped.Version = types.StringValue("v0.8.0")
-	if got := requiresReplace(t, ctx, state, mustProviderMap(t, ctx, map[string]ProviderModel{"talos": bumped})); got {
-		t.Error("a version change is an in-place provider upgrade")
-	}
-	if got := requiresReplace(t, ctx, state, mustProviderMap(t, ctx, map[string]ProviderModel{"kubeadm": base})); !got {
-		t.Error("a provider name change must still replace")
-	}
-	if got := requiresReplace(t, ctx, state, mustProviderMap(t, ctx, map[string]ProviderModel{"talos": base, "kubeadm": base})); !got {
-		t.Error("an added provider name must still replace")
-	}
-}
-
-func requiresReplace(t *testing.T, ctx context.Context, state, plan types.Map) bool {
-	t.Helper()
-	nonNull := tftypes.NewValue(tftypes.String, "x")
-	resp := &planmodifier.MapResponse{PlanValue: plan}
-	providerMapRequiresReplace().PlanModifyMap(ctx, planmodifier.MapRequest{
-		StateValue: state, PlanValue: plan,
-		State: tfsdk.State{Raw: nonNull}, Plan: tfsdk.Plan{Raw: nonNull},
-	}, resp)
-	if resp.Diagnostics.HasError() {
-		t.Fatal(resp.Diagnostics)
-	}
-	return resp.RequiresReplace
-}
-
-func TestBuildCreateOptions_Minimal(t *testing.T) {
-	ctx := context.Background()
-	opts, diags := buildCreateOptions(ctx, baseModel(t, ctx))
-	if diags.HasError() {
-		t.Fatalf("unexpected error: %v", diags)
-	}
-	infra, ok := opts.Providers.Infrastructure()
-	if !ok || infra.InitString() != "docker" {
-		t.Errorf("infra = %+v %v", infra, ok)
-	}
-	if !opts.WaitForReady {
-		t.Error("WaitForReady should default to true")
-	}
-	if opts.ControlPlane.Replicas != nil || opts.MachineDeployments != nil {
-		t.Error("counts must be nil without topology")
-	}
-	if opts.Network.ControlPlaneEndpoint != nil || opts.Network.PodCIDRs != nil || opts.ClusterClass {
-		t.Errorf("network and cluster_class must be unset by default: %+v %v", opts.Network, opts.ClusterClass)
-	}
-}
-
-func TestBuildCreateOptions_Full(t *testing.T) {
-	ctx := context.Background()
-	data := baseModel(t, ctx)
-	data.KubernetesVersion = types.StringValue("v1.34.0")
-	data.ClusterClass = types.BoolValue(true)
-	data.Network = networkValue(t, ctx, "10.0.0.160", 6443, []string{"10.244.0.0/16"}, []string{"10.96.0.0/12"}, "cluster.local")
-
-	fetch, _ := types.ObjectValueFrom(ctx, fetchConfigAttrTypes(), FetchConfigModel{
-		Owner: types.StringValue("tinkerbell-community"), Repository: types.StringNull(), URL: types.StringNull(), OCI: types.StringNull(),
-	})
-	gates, _ := types.MapValueFrom(ctx, types.BoolType, map[string]bool{"ClusterTopology": true})
-	mgr, _ := types.ObjectValueFrom(ctx, managerAttrTypes(), ManagerModel{
-		ProfilerAddress: types.StringNull(), MaxConcurrentReconciles: types.Int64Null(), Verbosity: types.Int64Null(),
-		FeatureGates: gates, AdditionalArgs: types.MapNull(types.StringType),
-	})
-	tink := emptyProviderModel()
-	tink.Version = types.StringValue("v0.7.9")
-	tink.FetchConfig = fetch
-	tink.Manager = mgr
-	tink.ResourceConfig = types.StringValue(`{"templateInline": "version: \"0.1\""}`)
-	data.Infrastructure = mustProviderMap(t, ctx, map[string]ProviderModel{"tinkerbell": tink})
-
-	talosBS := emptyProviderModel()
-	talosBS.Version = types.StringValue("v0.8.2")
-	data.Bootstrap = mustProviderMap(t, ctx, map[string]ProviderModel{"talos": talosBS})
-	talosCP := emptyProviderModel()
-	talosCP.Version = types.StringValue("v0.7.1")
-	data.ControlPlane = mustProviderMap(t, ctx, map[string]ProviderModel{"talos": talosCP})
-	core := emptyProviderModel()
-	core.Version = types.StringValue("v1.12.2")
-	data.Core = mustProviderMap(t, ctx, map[string]ProviderModel{"cluster-api": core})
-	data.Addon = mustProviderMap(t, ctx, map[string]ProviderModel{"helm": emptyProviderModel()})
-	md := machineDeployment(t, ctx, "md-0", 5, map[string]string{"tier": "worker"})
-	md.Bootstrap = types.StringValue("talosVersion: v1.14")
-	data.Topology = topologyValue(t, ctx, 3, []MachineDeploymentModel{md})
-	cpTopo, _ := types.ObjectValueFrom(ctx, controlPlaneTopologyAttrTypes(), ControlPlaneTopologyModel{
-		Replicas:       types.Int64Value(3),
-		Infrastructure: types.StringValue("hardwareName: cp-1"),
-	})
-	var topo TopologyModel
-	if d := data.Topology.As(ctx, &topo, basetypes.ObjectAsOptions{}); d.HasError() {
-		t.Fatal(d)
-	}
-	topo.ControlPlane = cpTopo
-	data.Topology, _ = types.ObjectValueFrom(ctx, topologyAttrTypes(), topo)
-
-	opts, diags := buildCreateOptions(ctx, data)
-	if diags.HasError() {
-		t.Fatalf("unexpected error: %v", diags)
-	}
-	infra, _ := opts.Providers.Infrastructure()
-	if infra.InitString() != "tinkerbell:v0.7.9" || infra.FetchConfig == nil || infra.FetchConfig.Owner != "tinkerbell-community" {
-		t.Errorf("infra = %+v", infra)
-	}
-	if infra.Manager == nil || !infra.Manager.FeatureGates["ClusterTopology"] {
-		t.Errorf("infra manager = %+v", infra.Manager)
-	}
-	if got := opts.Providers.InitStrings(capi.ProviderTypeBootstrap); len(got) != 1 || got[0] != "talos:v0.8.2" {
-		t.Errorf("bootstrap = %v", got)
-	}
-	if got := opts.Providers.InitStrings(capi.ProviderTypeControlPlane); len(got) != 1 || got[0] != "talos:v0.7.1" {
-		t.Errorf("control plane = %v", got)
-	}
-	if got := opts.Providers.InitStrings(capi.ProviderTypeCore); len(got) != 1 || got[0] != "cluster-api:v1.12.2" {
-		t.Errorf("core = %v", got)
-	}
-	if got := opts.Providers.InitStrings(capi.ProviderTypeAddon); len(got) != 1 || got[0] != "helm" {
-		t.Errorf("addon = %v", got)
-	}
-	if opts.ControlPlane.Replicas == nil || *opts.ControlPlane.Replicas != 3 {
-		t.Error("control plane replicas should be 3")
-	}
-	if len(opts.MachineDeployments) != 1 || *opts.MachineDeployments[0].Replicas != 5 || opts.MachineDeployments[0].Labels["tier"] != "worker" {
-		t.Errorf("machine deployments = %+v", opts.MachineDeployments)
-	}
-	if opts.KubernetesVersion != "v1.34.0" || !opts.ClusterClass {
-		t.Errorf("k8s/cluster_class = %q/%v", opts.KubernetesVersion, opts.ClusterClass)
-	}
-	if ep := opts.Network.ControlPlaneEndpoint; ep == nil || ep.Host != "10.0.0.160" || ep.Port != 6443 {
-		t.Errorf("endpoint = %+v", ep)
-	}
-	if len(opts.Network.PodCIDRs) != 1 || opts.Network.PodCIDRs[0] != "10.244.0.0/16" || opts.Network.ServiceCIDRs[0] != "10.96.0.0/12" || opts.Network.ServiceDomain != "cluster.local" {
-		t.Errorf("network = %+v", opts.Network)
-	}
-	if infra.ResourceConfig["templateInline"] != "version: \"0.1\"" {
-		t.Errorf("infra resource_config = %v", infra.ResourceConfig)
-	}
-	if opts.ControlPlane.Infrastructure["hardwareName"] != "cp-1" {
-		t.Errorf("control plane infrastructure = %v", opts.ControlPlane.Infrastructure)
-	}
-	if opts.MachineDeployments[0].Bootstrap["talosVersion"] != "v1.14" || opts.MachineDeployments[0].Infrastructure != nil {
-		t.Errorf("machine deployment dynamics = %+v", opts.MachineDeployments[0])
-	}
+	return selfManagedWith(t, ctx, types.ObjectNull(providersAttrTypes()), types.ObjectNull(managementBootstrapAttrTypes()))
 }
 
 func networkValue(t *testing.T, ctx context.Context, host string, port int64, pods, services []string, domain string) types.Object {
@@ -710,10 +251,348 @@ func networkValue(t *testing.T, ctx context.Context, host string, port int64, po
 	return net
 }
 
+// --- extraction ---
+
+func TestExtractManagement_Null(t *testing.T) {
+	ctx := context.Background()
+	data := &ClusterResourceModel{Management: types.ObjectNull(managementAttrTypes())}
+	mgmt, diags := extractManagement(ctx, data)
+	if mgmt != nil || diags.HasError() {
+		t.Errorf("null management = %v %v", mgmt, diags)
+	}
+}
+
+func TestExtractManagement_Populated(t *testing.T) {
+	ctx := context.Background()
+	data := &ClusterResourceModel{Management: selfManaged(t, ctx)}
+	mgmt, diags := extractManagement(ctx, data)
+	if diags.HasError() || mgmt == nil || !mgmt.SelfManaged.ValueBool() || !mgmt.Providers.IsNull() {
+		t.Errorf("management = %+v %v", mgmt, diags)
+	}
+}
+
+func TestProviderMaps_ReadFromManagementProviders(t *testing.T) {
+	ctx := context.Background()
+	data := baseModel(t, ctx)
+	if maps := data.providerMaps(ctx); len(maps) != 6 {
+		t.Fatalf("maps = %d", len(maps))
+	}
+	for _, pm := range data.providerMaps(ctx) {
+		if !pm.Map.IsNull() {
+			t.Errorf("%s must be null without management.providers", pm.Type)
+		}
+	}
+	tink := emptyProviderModel()
+	tink.Version = types.StringValue("v0.7.9")
+	data.Management = selfManagedWith(t, ctx, providersValue(t, ctx, map[string]types.Map{
+		"infrastructure": mustProviderMap(t, ctx, map[string]ProviderModel{"tinkerbell": tink}),
+		"addon":          mustProviderMap(t, ctx, map[string]ProviderModel{"helm": emptyProviderModel()}),
+	}), types.ObjectNull(managementBootstrapAttrTypes()))
+	set, diags := extractProviderSet(ctx, data)
+	if diags.HasError() {
+		t.Fatal(diags)
+	}
+	if infra, ok := set.Infrastructure(); !ok || infra.InitString() != "tinkerbell:v0.7.9" {
+		t.Errorf("infrastructure = %+v", infra)
+	}
+	if got := set.InitStrings(capi.ProviderTypeAddon); len(got) != 1 || got[0] != "helm" {
+		t.Errorf("addon = %v", got)
+	}
+}
+
+func TestExtractProviders_Null(t *testing.T) {
+	ctx := context.Background()
+	entries, diags := extractProviders(ctx, types.MapNull(providerMapType().ElemType))
+	if entries != nil || diags.HasError() {
+		t.Errorf("null map = %v %v", entries, diags)
+	}
+}
+
+func TestExtractControlPlaneAndClass(t *testing.T) {
+	ctx := context.Background()
+	data := baseModel(t, ctx)
+	cp, diags := extractControlPlane(ctx, data)
+	if diags.HasError() || cp == nil || cp.Provider.ValueString() != "kubeadm" || cp.Replicas.ValueInt64() != 1 {
+		t.Errorf("control plane = %+v %v", cp, diags)
+	}
+	if class, _ := extractClass(ctx, data); class != nil {
+		t.Error("no class by default")
+	}
+	data.Class = mustObject(t, ctx, classRefAttrTypes(), ClassRefModel{Name: types.StringValue("main"), Namespace: types.StringValue("classes")})
+	class, diags := extractClass(ctx, data)
+	if diags.HasError() || class == nil || class.Name != "main" || class.Namespace != "classes" {
+		t.Errorf("class = %+v %v", class, diags)
+	}
+}
+
+// --- status ---
+
+func TestSetStatusWithFallback(t *testing.T) {
+	ctx := context.Background()
+	data := &ClusterResourceModel{}
+	result := &capi.ClusterResult{
+		Endpoint:         "https://new-endpoint:6443",
+		BootstrapCluster: &capi.Cluster{Name: "test-bootstrap"},
+		Conditions:       []capi.Condition{{Type: "Available", Status: "True"}},
+	}
+	prev := &StatusModel{
+		Endpoint: types.StringValue("https://old-endpoint:6443"), CACertificate: types.StringValue("old-ca"),
+		Description: types.StringNull(), BootstrapCluster: types.StringNull(), Conditions: types.ListNull(types.ObjectType{AttrTypes: conditionAttrTypes()}),
+	}
+	if diags := setStatusWithFallback(ctx, data, result, prev, capi.PhaseReady); diags.HasError() {
+		t.Fatalf("unexpected error: %v", diags)
+	}
+	st := extractStatus(ctx, data)
+	if st.Endpoint.ValueString() != "https://new-endpoint:6443" || st.CACertificate.ValueString() != "old-ca" || st.Phase.ValueString() != "ready" || !st.Error.IsNull() {
+		t.Errorf("status = %+v", st)
+	}
+	if st.BootstrapCluster.ValueString() != "test-bootstrap" || st.Conditions.IsNull() {
+		t.Errorf("status = %+v", st)
+	}
+	// Without a bootstrap in the result, the bootstrap is gone.
+	result.BootstrapCluster = nil
+	_ = setStatusWithFallback(ctx, data, result, prev, capi.PhaseReady)
+	st = extractStatus(ctx, data)
+	if !st.BootstrapCluster.IsNull() {
+		t.Error("bootstrap_cluster must clear once the bootstrap is gone")
+	}
+}
+
+func TestSetPartialStatus(t *testing.T) {
+	ctx := context.Background()
+	data := &ClusterResourceModel{}
+	pe := &capi.PhaseError{Phase: capi.PhasePaused, Bootstrap: &capi.Cluster{Name: "test-bootstrap"}, Err: context.DeadlineExceeded}
+	if diags := setPartialStatus(ctx, data, pe, nil); diags.HasError() {
+		t.Fatal(diags)
+	}
+	st := extractStatus(ctx, data)
+	if st.Phase.ValueString() != "paused" || !strings.Contains(st.Error.ValueString(), "deadline") || st.BootstrapCluster.ValueString() != "test-bootstrap" {
+		t.Errorf("partial status = %+v", st)
+	}
+}
+
+func TestNullStatus(t *testing.T) {
+	ctx := context.Background()
+	data := &ClusterResourceModel{}
+	if diags := nullStatus(ctx, data); diags.HasError() {
+		t.Fatal(diags)
+	}
+	st := extractStatus(ctx, data)
+	if !st.Endpoint.IsNull() || !st.Phase.IsNull() || !st.Conditions.IsNull() {
+		t.Errorf("null status = %+v", st)
+	}
+}
+
+// --- yamlObject ---
+
+func TestYAMLObject_ConvertsYAMLAndJSON(t *testing.T) {
+	want := map[string]any{"a": map[string]any{"b": int64(1)}, "list": []any{"x"}}
+	for _, in := range []string{"a:\n  b: 1\nlist: [x]\n", `{"a": {"b": 1}, "list": ["x"]}`} {
+		got, diags := yamlObject(types.StringValue(in), "x")
+		if diags.HasError() {
+			t.Fatal(diags)
+		}
+		if got["a"].(map[string]any)["b"] != want["a"].(map[string]any)["b"] { //nolint:forcetypeassert // test fixture
+			t.Errorf("yamlObject(%q) = %#v", in, got)
+		}
+	}
+}
+
+func TestYAMLObject_NullUnknownAndBlankYieldNil(t *testing.T) {
+	for _, in := range []types.String{types.StringNull(), types.StringUnknown(), types.StringValue("  \n")} {
+		if got, diags := yamlObject(in, "x"); got != nil || diags.HasError() {
+			t.Errorf("yamlObject(%v) = %v %v", in, got, diags)
+		}
+	}
+}
+
+func TestYAMLObject_RejectsNonObjectAndInvalidYAML(t *testing.T) {
+	for _, in := range []string{"- a\n- b\n", "just a string", "a: [unclosed"} {
+		if _, diags := yamlObject(types.StringValue(in), "x"); !diags.HasError() {
+			t.Errorf("yamlObject(%q) must fail", in)
+		}
+	}
+}
+
+// --- provider map plan modifier ---
+
+func TestProviderMapRequiresReplace_IgnoresResourceConfig(t *testing.T) {
+	ctx := context.Background()
+	a := emptyProviderModel()
+	a.ResourceConfig = types.StringValue("x: 1")
+	b := emptyProviderModel()
+	b.ResourceConfig = types.StringValue("x: 2")
+	state := mustProviderMap(t, ctx, map[string]ProviderModel{"tinkerbell": a})
+	plan := mustProviderMap(t, ctx, map[string]ProviderModel{"tinkerbell": b})
+	if requiresReplace(t, ctx, state, plan) {
+		t.Error("a resource_config change must not replace the cluster")
+	}
+	renamed := mustProviderMap(t, ctx, map[string]ProviderModel{"docker": b})
+	if !requiresReplace(t, ctx, state, renamed) {
+		t.Error("a provider name change must replace the cluster")
+	}
+}
+
+func requiresReplace(t *testing.T, ctx context.Context, state, plan types.Map) bool {
+	t.Helper()
+	nonNull := tftypes.NewValue(tftypes.String, "x")
+	resp := &planmodifier.MapResponse{PlanValue: plan}
+	providerMapRequiresReplace().PlanModifyMap(ctx, planmodifier.MapRequest{
+		StateValue: state, PlanValue: plan,
+		State: tfsdk.State{Raw: nonNull}, Plan: tfsdk.Plan{Raw: nonNull},
+	}, resp)
+	if resp.Diagnostics.HasError() {
+		t.Fatal(resp.Diagnostics)
+	}
+	return resp.RequiresReplace
+}
+
+// --- buildCreateOptions ---
+
+func TestBuildCreateOptions_Minimal(t *testing.T) {
+	ctx := context.Background()
+	opts, diags := buildCreateOptions(ctx, baseModel(t, ctx))
+	if diags.HasError() {
+		t.Fatalf("unexpected error: %v", diags)
+	}
+	if opts.Infrastructure.Provider != "docker" || opts.Infrastructure.Spec != nil {
+		t.Errorf("infrastructure = %+v", opts.Infrastructure)
+	}
+	if opts.ControlPlane.Provider != "kubeadm" || opts.ControlPlane.Replicas == nil || *opts.ControlPlane.Replicas != 1 || opts.ControlPlane.Template == nil || opts.ControlPlane.Template.Name != "cp-aaaa" || opts.ControlPlane.Template.Kind != "DockerMachineTemplate" {
+		t.Errorf("control plane = %+v", opts.ControlPlane)
+	}
+	if !opts.WaitForReady || opts.Wait.Conditions != nil {
+		t.Errorf("wait defaults: ready=%v conditions=%v", opts.WaitForReady, opts.Wait.Conditions)
+	}
+	if opts.Class != nil || opts.SelfManaged || len(opts.Providers) != 0 || opts.Namespace != "default" {
+		t.Errorf("defaults: class=%v self=%v providers=%v ns=%s", opts.Class, opts.SelfManaged, opts.Providers, opts.Namespace)
+	}
+	if opts.Network.ControlPlaneEndpoint != nil || opts.Network.PodCIDRs != nil {
+		t.Errorf("network must be unset by default: %+v", opts.Network)
+	}
+}
+
+func TestBuildCreateOptions_Full(t *testing.T) {
+	ctx := context.Background()
+	data := baseModel(t, ctx)
+	data.Namespace = types.StringValue("capi")
+	data.KubernetesVersion = types.StringValue("v1.34.0")
+	data.Network = networkValue(t, ctx, "10.0.0.160", 6443, []string{"10.244.0.0/16"}, []string{"10.96.0.0/12"}, "cluster.local")
+
+	fetch, _ := types.ObjectValueFrom(ctx, fetchConfigAttrTypes(), FetchConfigModel{
+		Owner: types.StringValue("tinkerbell-community"), Repository: types.StringNull(), URL: types.StringNull(), OCI: types.StringNull(),
+	})
+	gates, _ := types.MapValueFrom(ctx, types.BoolType, map[string]bool{"ClusterTopology": true})
+	mgr, _ := types.ObjectValueFrom(ctx, managerAttrTypes(), ManagerModel{
+		ProfilerAddress: types.StringNull(), MaxConcurrentReconciles: types.Int64Null(), Verbosity: types.Int64Null(),
+		FeatureGates: gates, AdditionalArgs: types.MapNull(types.StringType),
+	})
+	tink := emptyProviderModel()
+	tink.Version = types.StringValue("v0.7.9")
+	tink.FetchConfig = fetch
+	tink.Manager = mgr
+	tink.ResourceConfig = types.StringValue(`{"templateInline": "version: \"0.1\""}`)
+	talosBS := emptyProviderModel()
+	talosBS.Version = types.StringValue("v0.8.2")
+	talosCP := emptyProviderModel()
+	talosCP.Version = types.StringValue("v0.7.1")
+	core := emptyProviderModel()
+	core.Version = types.StringValue("v1.12.2")
+	data.Management = selfManagedWith(t, ctx, providersValue(t, ctx, map[string]types.Map{
+		"infrastructure": mustProviderMap(t, ctx, map[string]ProviderModel{"tinkerbell": tink}),
+		"bootstrap":      mustProviderMap(t, ctx, map[string]ProviderModel{"talos": talosBS}),
+		"control_plane":  mustProviderMap(t, ctx, map[string]ProviderModel{"talos": talosCP}),
+		"core":           mustProviderMap(t, ctx, map[string]ProviderModel{"cluster-api": core}),
+		"addon":          mustProviderMap(t, ctx, map[string]ProviderModel{"helm": emptyProviderModel()}),
+	}), types.ObjectNull(managementBootstrapAttrTypes()))
+	data.Infrastructure = mustObject(t, ctx, infrastructureSpecAttrTypes(), InfrastructureSpecModel{
+		Provider: types.StringValue("tinkerbell"), Spec: types.DynamicValue(mustObj(t, map[string]attr.Value{"imageLookupFormat": types.StringValue("x")})),
+	})
+	data.ControlPlane = controlPlaneValue(t, ctx, "talos", 3, templateRef(t, ctx, "TinkerbellMachineTemplate", "cp-1234"),
+		types.DynamicValue(mustObj(t, map[string]attr.Value{"controlPlaneConfig": mustObj(t, map[string]attr.Value{"controlplane": mustObj(t, map[string]attr.Value{"talosVersion": types.StringValue("v1.13")})})})))
+	conditions, _ := types.ListValueFrom(ctx, types.StringType, []string{"ControlPlaneInitialized", "Available"})
+	data.Wait = mustObject(t, ctx, waitAttrTypes(), WaitModel{Conditions: conditions, Timeout: types.StringValue("90m")})
+
+	opts, diags := buildCreateOptions(ctx, data)
+	if diags.HasError() {
+		t.Fatalf("unexpected error: %v", diags)
+	}
+	if opts.Namespace != "capi" || !opts.SelfManaged || opts.KubernetesVersion != "v1.34.0" {
+		t.Errorf("identity = %s self=%v version=%s", opts.Namespace, opts.SelfManaged, opts.KubernetesVersion)
+	}
+	infra, _ := opts.Providers.Infrastructure()
+	if infra.InitString() != "tinkerbell:v0.7.9" || infra.FetchConfig == nil || infra.FetchConfig.Owner != "tinkerbell-community" || infra.ResourceConfig["templateInline"] != "version: \"0.1\"" {
+		t.Errorf("infra = %+v", infra)
+	}
+	if infra.Manager == nil || !infra.Manager.FeatureGates["ClusterTopology"] {
+		t.Errorf("infra manager = %+v", infra.Manager)
+	}
+	for typ, want := range map[capi.ProviderType]string{capi.ProviderTypeBootstrap: "talos:v0.8.2", capi.ProviderTypeControlPlane: "talos:v0.7.1", capi.ProviderTypeCore: "cluster-api:v1.12.2", capi.ProviderTypeAddon: "helm"} {
+		if got := opts.Providers.InitStrings(typ); len(got) != 1 || got[0] != want {
+			t.Errorf("%s = %v, want %s", typ, got, want)
+		}
+	}
+	if opts.Infrastructure.Provider != "tinkerbell" || opts.Infrastructure.Spec["imageLookupFormat"] != "x" {
+		t.Errorf("infrastructure = %+v", opts.Infrastructure)
+	}
+	if opts.ControlPlane.Provider != "talos" || *opts.ControlPlane.Replicas != 3 || opts.ControlPlane.Template.Name != "cp-1234" || opts.ControlPlane.Template.APIVersion != "infrastructure.cluster.x-k8s.io/v1beta1" {
+		t.Errorf("control plane = %+v", opts.ControlPlane)
+	}
+	if v, _ := opts.ControlPlane.Spec["controlPlaneConfig"].(map[string]any); v == nil || v["controlplane"].(map[string]any)["talosVersion"] != "v1.13" { //nolint:forcetypeassert // test fixture
+		t.Errorf("control plane spec = %v", opts.ControlPlane.Spec)
+	}
+	if ep := opts.Network.ControlPlaneEndpoint; ep == nil || ep.Host != "10.0.0.160" || ep.Port != 6443 || opts.Network.ServiceDomain != "cluster.local" {
+		t.Errorf("network = %+v", opts.Network)
+	}
+	if !opts.WaitForReady || len(opts.Wait.Conditions) != 2 || opts.Wait.Conditions[1] != "Available" || opts.Wait.Timeout.Minutes() != 90 {
+		t.Errorf("wait = %v %v %v", opts.WaitForReady, opts.Wait.Conditions, opts.Wait.Timeout)
+	}
+}
+
+func TestBuildCreateOptions_OwnMachineSpec(t *testing.T) {
+	ctx := context.Background()
+	data := baseModel(t, ctx)
+	data.ControlPlane = mustObject(t, ctx, controlPlaneSpecAttrTypes(), ControlPlaneSpecModel{
+		Provider: types.StringValue("kubeadm"), Replicas: types.Int64Value(1), Infrastructure: types.ObjectNull(templateRefAttrTypes()),
+		MachineSpec: types.DynamicValue(mustObj(t, map[string]attr.Value{"hardwareName": types.StringValue("cp-1")})), Spec: types.DynamicNull(),
+	})
+	opts, diags := buildCreateOptions(ctx, data)
+	if diags.HasError() {
+		t.Fatal(diags)
+	}
+	if opts.ControlPlane.Template != nil || opts.ControlPlane.TemplateSpec["hardwareName"] != "cp-1" {
+		t.Errorf("control plane = %+v", opts.ControlPlane)
+	}
+}
+
+func TestBuildCreateOptions_ClassAndNoWait(t *testing.T) {
+	ctx := context.Background()
+	data := baseModel(t, ctx)
+	data.KubernetesVersion = types.StringValue("v1.34.0")
+	data.Infrastructure = types.ObjectNull(infrastructureSpecAttrTypes())
+	data.Class = mustObject(t, ctx, classRefAttrTypes(), ClassRefModel{Name: types.StringValue("main"), Namespace: types.StringNull()})
+	data.ControlPlane = controlPlaneValue(t, ctx, "", 3, types.ObjectNull(templateRefAttrTypes()), types.DynamicNull())
+	empty, _ := types.ListValueFrom(ctx, types.StringType, []string{})
+	data.Wait = mustObject(t, ctx, waitAttrTypes(), WaitModel{Conditions: empty, Timeout: types.StringNull()})
+	opts, diags := buildCreateOptions(ctx, data)
+	if diags.HasError() {
+		t.Fatal(diags)
+	}
+	if opts.Class == nil || opts.Class.Name != "main" || opts.Infrastructure.Provider != "" || opts.ControlPlane.Template != nil || *opts.ControlPlane.Replicas != 3 {
+		t.Errorf("class options = %+v %+v %+v", opts.Class, opts.Infrastructure, opts.ControlPlane)
+	}
+	if opts.WaitForReady {
+		t.Error("an empty condition list waits for nothing")
+	}
+}
+
 func TestBuildCreateOptions_ProviderOrderIsDeterministic(t *testing.T) {
 	ctx := context.Background()
 	data := baseModel(t, ctx)
-	data.Addon = mustProviderMap(t, ctx, map[string]ProviderModel{"zeta": emptyProviderModel(), "alpha": emptyProviderModel(), "mid": emptyProviderModel()})
+	data.Management = selfManagedWith(t, ctx, providersValue(t, ctx, map[string]types.Map{
+		"infrastructure": mustProviderMap(t, ctx, map[string]ProviderModel{"docker": emptyProviderModel()}),
+		"addon":          mustProviderMap(t, ctx, map[string]ProviderModel{"zeta": emptyProviderModel(), "alpha": emptyProviderModel(), "mid": emptyProviderModel()}),
+	}), types.ObjectNull(managementBootstrapAttrTypes()))
 	opts, diags := buildCreateOptions(ctx, data)
 	if diags.HasError() {
 		t.Fatal(diags)
@@ -724,7 +603,7 @@ func TestBuildCreateOptions_ProviderOrderIsDeterministic(t *testing.T) {
 	}
 }
 
-// --- Validation Tests ---
+// --- Validation ---
 
 func validateWith(t *testing.T, ctx context.Context, mutate func(*ClusterResourceModel)) diag.Diagnostics {
 	t.Helper()
@@ -751,343 +630,156 @@ func TestValidateLifecycleConfig_Docker(t *testing.T) {
 	}
 }
 
-func TestValidateLifecycleConfig_InfrastructureExactlyOne(t *testing.T) {
+func TestValidateLifecycleConfig_SelfManagedNeedsOneInfrastructure(t *testing.T) {
 	ctx := context.Background()
 	diags := validateWith(t, ctx, func(d *ClusterResourceModel) {
-		d.Infrastructure = mustProviderMap(t, ctx, map[string]ProviderModel{"docker": emptyProviderModel(), "aws": emptyProviderModel()})
+		d.Management = selfManaged(t, ctx)
 	})
-	if !hasErrorContaining(diags, "exactly one") {
-		t.Errorf("two infrastructure providers must be rejected: %v", diags)
+	if !hasErrorContaining(diags, "exactly one provider") {
+		t.Errorf("a self-managed cluster without management.providers.infrastructure must be rejected: %v", diags)
 	}
 	diags = validateWith(t, ctx, func(d *ClusterResourceModel) {
-		d.Infrastructure = mustProviderMap(t, ctx, map[string]ProviderModel{})
+		d.Management = selfManagedWith(t, ctx, providersValue(t, ctx, map[string]types.Map{
+			"infrastructure": mustProviderMap(t, ctx, map[string]ProviderModel{"docker": emptyProviderModel(), "aws": emptyProviderModel()}),
+		}), types.ObjectNull(managementBootstrapAttrTypes()))
 	})
-	if !hasErrorContaining(diags, "exactly one") {
-		t.Errorf("empty infrastructure map must be rejected: %v", diags)
+	if !hasErrorContaining(diags, "exactly one provider") {
+		t.Errorf("two infrastructure providers must be rejected: %v", diags)
 	}
 }
 
 func TestValidateLifecycleConfig_UnsupportedProvider(t *testing.T) {
 	ctx := context.Background()
 	diags := validateWith(t, ctx, func(d *ClusterResourceModel) {
-		d.Infrastructure = mustProviderMap(t, ctx, map[string]ProviderModel{"gcp": emptyProviderModel()})
+		d.Infrastructure = mustObject(t, ctx, infrastructureSpecAttrTypes(), InfrastructureSpecModel{Provider: types.StringValue("metal3"), Spec: types.DynamicNull()})
 	})
 	if !hasErrorContaining(diags, "not supported") {
-		t.Errorf("gcp must be rejected: %v", diags)
+		t.Errorf("unsupported provider must be rejected: %v", diags)
 	}
 }
 
-func TestValidateLifecycleConfig_TinkerbellRequiresSelfManaged(t *testing.T) {
+func TestValidateLifecycleConfig_ProvidersMustAgree(t *testing.T) {
 	ctx := context.Background()
 	diags := validateWith(t, ctx, func(d *ClusterResourceModel) {
-		d.Infrastructure = mustProviderMap(t, ctx, map[string]ProviderModel{"tinkerbell": emptyProviderModel()})
+		d.Management = selfManagedWith(t, ctx, providersValue(t, ctx, map[string]types.Map{
+			"infrastructure": mustProviderMap(t, ctx, map[string]ProviderModel{"tinkerbell": emptyProviderModel()}),
+			"control_plane":  mustProviderMap(t, ctx, map[string]ProviderModel{"talos": emptyProviderModel()}),
+		}), types.ObjectNull(managementBootstrapAttrTypes()))
 	})
-	if !hasErrorContaining(diags, "self_managed") {
-		t.Errorf("tinkerbell without self_managed must fail: %v", diags)
+	if !hasErrorContaining(diags, `infrastructure.provider "docker"`) || !hasErrorContaining(diags, `control_plane.provider "kubeadm"`) {
+		t.Errorf("the cluster's providers must be the ones management.providers installs: %v", diags)
 	}
 }
 
-func TestValidateLifecycleConfig_TinkerbellWithTalos(t *testing.T) {
+func TestValidateLifecycleConfig_TinkerbellProviders(t *testing.T) {
 	ctx := context.Background()
+	tinkerbell := func(d *ClusterResourceModel, bootstrap, cp string) {
+		d.Infrastructure = mustObject(t, ctx, infrastructureSpecAttrTypes(), InfrastructureSpecModel{Provider: types.StringValue("tinkerbell"), Spec: types.DynamicNull()})
+		d.ControlPlane = controlPlaneValue(t, ctx, cp, 1, templateRef(t, ctx, "TinkerbellMachineTemplate", "cp-1"), types.DynamicNull())
+		d.Management = selfManagedWith(t, ctx, providersValue(t, ctx, map[string]types.Map{
+			"infrastructure": mustProviderMap(t, ctx, map[string]ProviderModel{"tinkerbell": emptyProviderModel()}),
+			"bootstrap":      mustProviderMap(t, ctx, map[string]ProviderModel{bootstrap: emptyProviderModel()}),
+			"control_plane":  mustProviderMap(t, ctx, map[string]ProviderModel{cp: emptyProviderModel()}),
+		}), types.ObjectNull(managementBootstrapAttrTypes()))
+	}
+	if diags := validateWith(t, ctx, func(d *ClusterResourceModel) { tinkerbell(d, "talos", "talos") }); diags.HasError() {
+		t.Errorf("tinkerbell with talos is valid: %v", diags)
+	}
+	if diags := validateWith(t, ctx, func(d *ClusterResourceModel) { tinkerbell(d, "microk8s", "talos") }); !hasErrorContaining(diags, "kubeadm or talos") {
+		t.Errorf("tinkerbell rejects other bootstrap providers: %v", diags)
+	}
+	// Tinkerbell on an external management cluster that already runs it is fine.
 	diags := validateWith(t, ctx, func(d *ClusterResourceModel) {
-		d.Infrastructure = mustProviderMap(t, ctx, map[string]ProviderModel{"tinkerbell": emptyProviderModel()})
-		d.Management = selfManaged(t, ctx)
-		d.Bootstrap = mustProviderMap(t, ctx, map[string]ProviderModel{"talos": emptyProviderModel()})
-		d.ControlPlane = mustProviderMap(t, ctx, map[string]ProviderModel{"talos": emptyProviderModel()})
+		d.Infrastructure = mustObject(t, ctx, infrastructureSpecAttrTypes(), InfrastructureSpecModel{Provider: types.StringValue("tinkerbell"), Spec: types.DynamicNull()})
+		d.ControlPlane = controlPlaneValue(t, ctx, "talos", 1, templateRef(t, ctx, "TinkerbellMachineTemplate", "cp-1"), types.DynamicNull())
 	})
 	if diags.HasError() {
-		t.Errorf("tinkerbell+talos should be valid: %v", diags)
-	}
-}
-
-func TestValidateLifecycleConfig_TinkerbellInvalidBootstrap(t *testing.T) {
-	ctx := context.Background()
-	diags := validateWith(t, ctx, func(d *ClusterResourceModel) {
-		d.Infrastructure = mustProviderMap(t, ctx, map[string]ProviderModel{"tinkerbell": emptyProviderModel()})
-		d.Management = selfManaged(t, ctx)
-		d.Bootstrap = mustProviderMap(t, ctx, map[string]ProviderModel{"microk8s": emptyProviderModel()})
-	})
-	if !hasErrorContaining(diags, "bootstrap") {
-		t.Errorf("microk8s bootstrap must be rejected for tinkerbell: %v", diags)
+		t.Errorf("tinkerbell on an external management cluster is valid: %v", diags)
 	}
 }
 
 func TestValidateLifecycleConfig_FetchConfigExclusivity(t *testing.T) {
 	ctx := context.Background()
-	mk := func(fc FetchConfigModel) func(*ClusterResourceModel) {
-		return func(d *ClusterResourceModel) {
-			obj, _ := types.ObjectValueFrom(ctx, fetchConfigAttrTypes(), fc)
-			pm := emptyProviderModel()
-			pm.FetchConfig = obj
-			d.Addon = mustProviderMap(t, ctx, map[string]ProviderModel{"helm": pm})
-		}
-	}
-	null := types.StringNull()
-	if diags := validateWith(t, ctx, mk(FetchConfigModel{Owner: types.StringValue("a"), Repository: null, URL: types.StringValue("https://x"), OCI: null})); !hasErrorContaining(diags, "fetch_config") {
-		t.Errorf("owner+url must fail: %v", diags)
-	}
-	if diags := validateWith(t, ctx, mk(FetchConfigModel{Owner: null, Repository: null, URL: types.StringValue("https://x"), OCI: types.StringValue("oci://y")})); !hasErrorContaining(diags, "fetch_config") {
-		t.Errorf("url+oci must fail: %v", diags)
-	}
-	if diags := validateWith(t, ctx, mk(FetchConfigModel{Owner: types.StringValue("a"), Repository: types.StringValue("b"), URL: null, OCI: null})); diags.HasError() {
-		t.Errorf("owner+repository is valid: %v", diags)
-	}
-}
-
-func TestValidateLifecycleConfig_PatchExclusivity(t *testing.T) {
-	ctx := context.Background()
-	diags := validateWith(t, ctx, func(d *ClusterResourceModel) {
-		pm := emptyProviderModel()
-		pm.ManifestPatches, _ = types.ListValueFrom(ctx, types.StringType, []string{"{}"})
-		pm.Patches, _ = types.ListValueFrom(ctx, types.ObjectType{AttrTypes: patchAttrTypes()},
-			[]PatchModel{{Patch: types.StringValue("{}"), Target: types.ObjectNull(patchSelectorAttrTypes())}})
-		d.Addon = mustProviderMap(t, ctx, map[string]ProviderModel{"helm": pm})
+	fetch, _ := types.ObjectValueFrom(ctx, fetchConfigAttrTypes(), FetchConfigModel{
+		Owner: types.StringValue("me"), Repository: types.StringNull(), URL: types.StringValue("https://x/y.yaml"), OCI: types.StringNull(),
 	})
-	if !hasErrorContaining(diags, "manifest_patches") {
-		t.Errorf("patches and manifest_patches together must fail: %v", diags)
-	}
-}
-
-func TestValidateLifecycleConfig_DuplicateMachineDeployment(t *testing.T) {
-	ctx := context.Background()
+	p := emptyProviderModel()
+	p.FetchConfig = fetch
 	diags := validateWith(t, ctx, func(d *ClusterResourceModel) {
-		d.Topology = topologyValue(t, ctx, 1, []MachineDeploymentModel{
-			machineDeployment(t, ctx, "md-0", 1, nil), machineDeployment(t, ctx, "md-0", 2, nil),
-		})
+		d.Management = selfManagedWith(t, ctx, providersValue(t, ctx, map[string]types.Map{
+			"infrastructure": mustProviderMap(t, ctx, map[string]ProviderModel{"docker": p}),
+		}), types.ObjectNull(managementBootstrapAttrTypes()))
 	})
-	if !hasErrorContaining(diags, "Duplicate machine deployment") {
-		t.Errorf("duplicate names must fail: %v", diags)
+	if !hasErrorContaining(diags, "url") {
+		t.Errorf("url and owner are exclusive: %v", diags)
 	}
 }
 
 func TestValidateLifecycleConfig_ResourceConfigOnlyOnClusterProviders(t *testing.T) {
 	ctx := context.Background()
-	rc := types.StringValue("x: y")
-	for _, allowed := range []string{"infrastructure", "control_plane", "bootstrap"} {
-		diags := validateWith(t, ctx, func(d *ClusterResourceModel) {
-			pm := emptyProviderModel()
-			pm.ResourceConfig = rc
-			switch allowed {
-			case "infrastructure":
-				d.Infrastructure = mustProviderMap(t, ctx, map[string]ProviderModel{"docker": pm})
-			case "control_plane":
-				d.ControlPlane = mustProviderMap(t, ctx, map[string]ProviderModel{"kubeadm": pm})
-			case "bootstrap":
-				d.Bootstrap = mustProviderMap(t, ctx, map[string]ProviderModel{"kubeadm": pm})
-			}
-		})
-		if diags.HasError() {
-			t.Errorf("resource_config on %s must be valid: %v", allowed, diags)
-		}
-	}
-	for _, denied := range []string{"core", "ipam", "addon"} {
-		diags := validateWith(t, ctx, func(d *ClusterResourceModel) {
-			pm := emptyProviderModel()
-			pm.ResourceConfig = rc
-			switch denied {
-			case "core":
-				d.Core = mustProviderMap(t, ctx, map[string]ProviderModel{"cluster-api": pm})
-			case "ipam":
-				d.IPAM = mustProviderMap(t, ctx, map[string]ProviderModel{"in-cluster": pm})
-			case "addon":
-				d.Addon = mustProviderMap(t, ctx, map[string]ProviderModel{"helm": pm})
-			}
-		})
-		if !hasErrorContaining(diags, "resource_config") {
-			t.Errorf("resource_config on %s must be rejected: %v", denied, diags)
-		}
-	}
-}
-
-func TestValidateLifecycleConfig_ResourceConfigMustBeObject(t *testing.T) {
-	ctx := context.Background()
+	p := emptyProviderModel()
+	p.ResourceConfig = types.StringValue("x: 1")
 	diags := validateWith(t, ctx, func(d *ClusterResourceModel) {
-		pm := emptyProviderModel()
-		pm.ResourceConfig = types.StringValue("- not\n- an object\n")
-		d.Infrastructure = mustProviderMap(t, ctx, map[string]ProviderModel{"docker": pm})
+		d.Management = selfManagedWith(t, ctx, providersValue(t, ctx, map[string]types.Map{
+			"infrastructure": mustProviderMap(t, ctx, map[string]ProviderModel{"docker": emptyProviderModel()}),
+			"addon":          mustProviderMap(t, ctx, map[string]ProviderModel{"helm": p}),
+		}), types.ObjectNull(managementBootstrapAttrTypes()))
 	})
-	if !hasErrorContaining(diags, "infrastructure[\"docker\"].resource_config") {
-		t.Errorf("a non-object resource_config must be rejected naming the attribute: %v", diags)
+	if !hasErrorContaining(diags, "resource_config") {
+		t.Errorf("resource_config on an addon must be rejected: %v", diags)
 	}
 }
 
-func TestValidateLifecycleConfig_TopologyDynamicsMustBeObjects(t *testing.T) {
-	ctx := context.Background()
-	diags := validateWith(t, ctx, func(d *ClusterResourceModel) {
-		md := machineDeployment(t, ctx, "md-0", 1, nil)
-		md.Bootstrap = types.StringValue("[x]")
-		d.Topology = topologyValue(t, ctx, 1, []MachineDeploymentModel{md})
-	})
-	if !hasErrorContaining(diags, "machine_deployments[0].bootstrap") {
-		t.Errorf("a non-object bootstrap must be rejected naming the attribute: %v", diags)
-	}
-}
+// --- inventory ---
 
-func TestValidateLifecycleConfig_SharedClassMustAgree(t *testing.T) {
-	ctx := context.Background()
-	diags := validateWith(t, ctx, func(d *ClusterResourceModel) {
-		d.ClusterClass = types.BoolValue(true)
-		a := machineDeployment(t, ctx, "md-a", 1, nil)
-		a.Class = types.StringValue("worker")
-		a.Infrastructure = types.StringValue("hardwareName: a")
-		b := machineDeployment(t, ctx, "md-b", 1, nil)
-		b.Class = types.StringValue("worker")
-		b.Infrastructure = types.StringValue("hardwareName: b")
-		d.Topology = topologyValue(t, ctx, 1, []MachineDeploymentModel{a, b})
+func inventoryWith(t *testing.T, ctx context.Context, machines []testMachine) types.Object {
+	t.Helper()
+	return mustObject(t, ctx, inventoryAttrTypes(), InventoryModel{
+		Manage: types.BoolValue(true), Source: types.StringNull(), Machine: buildTestMachineList(ctx, t, machines),
 	})
-	if !hasErrorContaining(diags, `class "worker"`) {
-		t.Errorf("deployments sharing a class with different specs must be rejected: %v", diags)
-	}
 }
-
-// --- Inventory Validation Tests ---
 
 func TestValidateInventory_SourceAndMachineMutuallyExclusive(t *testing.T) {
 	ctx := context.Background()
-
-	machineVal := buildTestMachineList(ctx, t, []testMachine{
-		{hostname: "m1", ip: "10.0.0.1", mac: "aa:bb:cc:dd:ee:01"},
-	})
-	inv := &InventoryModel{
-		Source:  types.StringValue("/path/to/hardware.csv"),
-		Machine: machineVal,
-	}
-
+	inv := &InventoryModel{Manage: types.BoolValue(true), Source: types.StringValue("x.csv"), Machine: buildTestMachineList(ctx, t, []testMachine{{hostname: "a", ip: "10.0.0.1", mac: "aa"}})}
 	var diags diag.Diagnostics
 	validateInventory(ctx, inv, 0, 0, &diags)
-	if !diags.HasError() {
-		t.Error("expected error for source+machine conflict")
+	if !hasErrorContaining(diags, "not both") {
+		t.Errorf("source and machine must be exclusive: %v", diags)
 	}
 }
 
-func TestValidateInventory_DuplicateHostnames(t *testing.T) {
+func TestValidateInventory_Duplicates(t *testing.T) {
 	ctx := context.Background()
-	machineVal := buildTestMachineList(ctx, t, []testMachine{
-		{hostname: "m1", ip: "10.0.0.1", mac: "aa:bb:cc:dd:ee:01"},
-		{hostname: "m1", ip: "10.0.0.2", mac: "aa:bb:cc:dd:ee:02"},
-	})
-
-	inv := &InventoryModel{
-		Source:  types.StringNull(),
-		Machine: machineVal,
-	}
-
-	var diags diag.Diagnostics
-	validateInventory(ctx, inv, 0, 0, &diags)
-	if !diags.HasError() {
-		t.Error("expected error for duplicate hostname")
+	for name, machines := range map[string][]testMachine{
+		"hostname": {{hostname: "a", ip: "10.0.0.1", mac: "aa"}, {hostname: "a", ip: "10.0.0.2", mac: "bb"}},
+		"ip":       {{hostname: "a", ip: "10.0.0.1", mac: "aa"}, {hostname: "b", ip: "10.0.0.1", mac: "bb"}},
+		"mac":      {{hostname: "a", ip: "10.0.0.1", mac: "aa"}, {hostname: "b", ip: "10.0.0.2", mac: "aa"}},
+	} {
+		inv := &InventoryModel{Manage: types.BoolValue(true), Source: types.StringNull(), Machine: buildTestMachineList(ctx, t, machines)}
+		var diags diag.Diagnostics
+		validateInventory(ctx, inv, 0, 0, &diags)
+		if !hasErrorContaining(diags, "Duplicate") {
+			t.Errorf("duplicate %s must be rejected: %v", name, diags)
+		}
 	}
 }
 
-func TestValidateInventory_DuplicateIPs(t *testing.T) {
+func TestValidateInventory_ControlPlaneSeats(t *testing.T) {
 	ctx := context.Background()
-	machineVal := buildTestMachineList(ctx, t, []testMachine{
-		{hostname: "m1", ip: "10.0.0.1", mac: "aa:bb:cc:dd:ee:01"},
-		{hostname: "m2", ip: "10.0.0.1", mac: "aa:bb:cc:dd:ee:02"},
+	machines := []testMachine{{hostname: "cp-1", ip: "10.0.0.1", mac: "aa", role: "cp"}, {hostname: "w-1", ip: "10.0.0.2", mac: "bb", role: "worker"}}
+	diags := validateWith(t, ctx, func(d *ClusterResourceModel) {
+		d.ControlPlane = controlPlaneValue(t, ctx, "kubeadm", 3, templateRef(t, ctx, "DockerMachineTemplate", "cp"), types.DynamicNull())
+		d.Inventory = inventoryWith(t, ctx, machines)
 	})
-
-	inv := &InventoryModel{
-		Source:  types.StringNull(),
-		Machine: machineVal,
+	if !hasErrorContaining(diags, "control plane") {
+		t.Errorf("three control-plane replicas on one cp machine must be rejected: %v", diags)
 	}
-
-	var diags diag.Diagnostics
-	validateInventory(ctx, inv, 0, 0, &diags)
-	if !diags.HasError() {
-		t.Error("expected error for duplicate IP")
-	}
-}
-
-func TestValidateInventory_DuplicateMACs(t *testing.T) {
-	ctx := context.Background()
-	machineVal := buildTestMachineList(ctx, t, []testMachine{
-		{hostname: "m1", ip: "10.0.0.1", mac: "aa:bb:cc:dd:ee:01"},
-		{hostname: "m2", ip: "10.0.0.2", mac: "aa:bb:cc:dd:ee:01"},
+	diags = validateWith(t, ctx, func(d *ClusterResourceModel) {
+		d.Inventory = inventoryWith(t, ctx, machines)
 	})
-
-	inv := &InventoryModel{
-		Source:  types.StringNull(),
-		Machine: machineVal,
-	}
-
-	var diags diag.Diagnostics
-	validateInventory(ctx, inv, 0, 0, &diags)
-	if !diags.HasError() {
-		t.Error("expected error for duplicate MAC")
-	}
-}
-
-func TestValidateInventory_InsufficientControlPlane(t *testing.T) {
-	ctx := context.Background()
-	machineVal := buildTestMachineList(ctx, t, []testMachine{
-		{hostname: "cp1", ip: "10.0.0.1", mac: "aa:bb:cc:dd:ee:01", role: "cp"},
-		{hostname: "w1", ip: "10.0.0.2", mac: "aa:bb:cc:dd:ee:02", role: "worker"},
-	})
-
-	inv := &InventoryModel{
-		Source:  types.StringNull(),
-		Machine: machineVal,
-	}
-
-	var diags diag.Diagnostics
-	validateInventory(ctx, inv, 3, 0, &diags)
-	if !diags.HasError() {
-		t.Error("expected error for insufficient CP machines")
-	}
-}
-
-func TestValidateInventory_Valid(t *testing.T) {
-	ctx := context.Background()
-	machineVal := buildTestMachineList(ctx, t, []testMachine{
-		{hostname: "cp1", ip: "10.0.0.1", mac: "aa:bb:cc:dd:ee:01", role: "cp"},
-		{hostname: "cp2", ip: "10.0.0.2", mac: "aa:bb:cc:dd:ee:02", role: "cp"},
-		{hostname: "cp3", ip: "10.0.0.3", mac: "aa:bb:cc:dd:ee:03", role: "cp"},
-		{hostname: "w1", ip: "10.0.0.10", mac: "aa:bb:cc:dd:ee:10", role: "worker"},
-		{hostname: "w2", ip: "10.0.0.11", mac: "aa:bb:cc:dd:ee:11", role: "worker"},
-	})
-
-	inv := &InventoryModel{
-		Source:  types.StringNull(),
-		Machine: machineVal,
-	}
-
-	var diags diag.Diagnostics
-	validateInventory(ctx, inv, 3, 2, &diags)
 	if diags.HasError() {
-		t.Errorf("expected no errors, got: %v", diags)
-	}
-}
-
-// --- StatusWithFallback Tests ---
-
-func TestSetStatusWithFallback_UsesResultFirst(t *testing.T) {
-	ctx := context.Background()
-	data := &ClusterResourceModel{}
-
-	result := &capi.ClusterResult{
-		Endpoint:   "https://new-endpoint:6443",
-		Kubeconfig: "new-kubeconfig",
-	}
-	prev := &StatusModel{
-		Endpoint:         types.StringValue("https://old-endpoint:6443"),
-		Kubeconfig:       types.StringValue("old-kubeconfig"),
-		CACertificate:    types.StringValue("old-ca"),
-		Description:      types.StringNull(),
-		BootstrapCluster: types.StringNull(),
-	}
-
-	diags := setStatusWithFallback(ctx, data, result, prev)
-	if diags.HasError() {
-		t.Fatalf("unexpected error: %v", diags)
-	}
-
-	st, _ := extractStatus(ctx, data)
-	if st.Endpoint.ValueString() != "https://new-endpoint:6443" {
-		t.Errorf("endpoint should be from result, got %q", st.Endpoint.ValueString())
-	}
-	// CA cert should fall back since result has empty
-	if st.CACertificate.ValueString() != "old-ca" {
-		t.Errorf("ca_cert should fallback, got %q", st.CACertificate.ValueString())
+		t.Errorf("one replica on one cp machine is fine: %v", diags)
 	}
 }
 
@@ -1119,15 +811,13 @@ func buildTestMachineList(ctx context.Context, t *testing.T, machines []testMach
 			t.Fatalf("build network: %v", d)
 		}
 
-		var labels types.Map
+		labels := types.MapNull(types.StringType)
 		if m.role != "" {
 			labelsMap, d := types.MapValueFrom(ctx, types.StringType, map[string]string{"type": m.role})
 			if d.HasError() {
 				t.Fatalf("build labels: %v", d)
 			}
 			labels = labelsMap
-		} else {
-			labels = types.MapNull(types.StringType)
 		}
 
 		diskVal := types.ObjectNull(diskAttrTypes())
@@ -1168,8 +858,6 @@ func buildTestMachineList(ctx context.Context, t *testing.T, machines []testMach
 	return machineList
 }
 
-// --- StringOrNull Tests ---
-
 func TestStringOrNull(t *testing.T) {
 	if v := stringOrNull("hello"); v.ValueString() != "hello" {
 		t.Errorf("expected hello, got %q", v.ValueString())
@@ -1179,18 +867,10 @@ func TestStringOrNull(t *testing.T) {
 	}
 }
 
-// --- Upgrade State Tests ---
-
 func TestClusterResource_UpgradeState(t *testing.T) {
 	ctx := context.Background()
-	r := &ClusterResource{}
-	upgraders := r.UpgradeState(ctx)
-
-	v0, ok := upgraders[0]
-	if !ok || v0.PriorSchema == nil || v0.StateUpgrader == nil {
-		t.Error("expected v0 upgrader with PriorSchema and StateUpgrader")
-	}
-	for _, v := range []int64{1, 2} {
+	upgraders := (&ClusterResource{}).UpgradeState(ctx)
+	for _, v := range []int64{0, 1, 2, 3, 4} {
 		up, ok := upgraders[v]
 		if !ok || up.PriorSchema != nil || up.StateUpgrader == nil {
 			t.Errorf("expected raw-JSON v%d upgrader without PriorSchema", v)
