@@ -23,7 +23,7 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 
 	"github.com/tinkerbell-community/terraform-provider-capi/internal/capi"
-	"github.com/tinkerbell-community/terraform-provider-capi/internal/capi/talos"
+	"github.com/tinkerbell-community/terraform-provider-capi/internal/capi/bmc"
 )
 
 const k3sKubeconfig = `apiVersion: v1
@@ -86,7 +86,7 @@ func (n *fakeNode) setUp(up bool) {
 type fakeBMC struct {
 	mu         sync.Mutex
 	node       *fakeNode
-	power      talos.PowerState
+	power      bmc.PowerState
 	media      string
 	redirected bool
 	bootsAfter int
@@ -97,7 +97,7 @@ type fakeBMC struct {
 func (f *fakeBMC) record(c string) { f.calls = append(f.calls, c) }
 
 func (f *fakeBMC) boot() {
-	f.power = talos.PowerOn
+	f.power = bmc.PowerOn
 	if f.media == "" && !f.redirected {
 		return
 	}
@@ -108,7 +108,7 @@ func (f *fakeBMC) boot() {
 	f.node.setUp(true)
 }
 
-func (f *fakeBMC) PowerState(context.Context) (talos.PowerState, error) {
+func (f *fakeBMC) PowerState(context.Context) (bmc.PowerState, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.power, nil
@@ -126,7 +126,7 @@ func (f *fakeBMC) PowerOff(context.Context) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.record("power-off")
-	f.power = talos.PowerOff
+	f.power = bmc.PowerOff
 	f.node.setUp(false)
 	return nil
 }
@@ -140,7 +140,7 @@ func (f *fakeBMC) PowerCycle(context.Context) error {
 	return nil
 }
 
-func (f *fakeBMC) SetBootDevice(_ context.Context, dev talos.BootDevice, _, _ bool) error {
+func (f *fakeBMC) SetBootDevice(_ context.Context, dev bmc.BootDevice, _, _ bool) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.record("boot-device:" + string(dev))
@@ -201,7 +201,7 @@ func (h *fakeHandle) Close() error {
 
 func (f *fakeAMT) RedirectSupported(context.Context) bool { return true }
 
-func (f *fakeAMT) RedirectISO(_ context.Context, iso string) (talos.RedirectHandle, error) {
+func (f *fakeAMT) RedirectISO(_ context.Context, iso string) (bmc.RedirectHandle, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.record("redirect:" + iso)
@@ -229,13 +229,13 @@ func (k *fakeKube) NodeReady(context.Context) (bool, error) {
 
 type fakeInstaller struct {
 	kubeconfig string
-	addons     talos.Addons
+	addons     capi.AddonSet
 	calls      int
 }
 
-func (i *fakeInstaller) Install(_ context.Context, kubeconfigPath string, addons talos.Addons) error {
+func (i *fakeInstaller) Install(_ context.Context, cluster *capi.Cluster, addons capi.AddonSet) error {
 	i.calls++
-	i.kubeconfig = kubeconfigPath
+	i.kubeconfig = cluster.KubeconfigPath
 	i.addons = addons
 	return nil
 }
@@ -256,11 +256,11 @@ func testKey(t *testing.T) string {
 func testConfig(t *testing.T) Config {
 	t.Helper()
 	return Config{
-		Machine: Machine{Hostname: "nuc", Address: "10.0.0.50", BMC: talos.BMCCredentials{Address: "10.0.1.50", Username: "admin", Password: "x"}},
-		Boot:    talos.BootConfig{Method: talos.BootMethodVirtualMedia, Timeout: 300 * time.Millisecond, Attempts: 2, Device: talos.BootDeviceUSB},
+		Machine: Machine{Hostname: "nuc", Address: "10.0.0.50", BMC: bmc.Credentials{Address: "10.0.1.50", Username: "admin", Password: "x"}},
+		Boot:    bmc.BootConfig{Method: bmc.BootMethodVirtualMedia, Timeout: 300 * time.Millisecond, Attempts: 2, Device: bmc.BootDeviceUSB},
 		ISO:     "http://files.example/kairos.iso.custom.iso",
 		SSH:     SSHConfig{PrivateKey: testKey(t)},
-		Addons:  talos.Addons{Helm: []talos.HelmRelease{{Name: "tinkerbell", Namespace: "tink", Chart: "oci://x/tinkerbell"}}},
+		Addons:  capi.AddonSet{Helm: []capi.HelmRelease{{Name: "tinkerbell", Namespace: "tink", Chart: "oci://x/tinkerbell"}}},
 	}
 }
 
@@ -273,30 +273,30 @@ type harness struct {
 	dir       string
 }
 
-func newHarness(t *testing.T, cfg Config, bmc talos.BMC, node *fakeNode) *harness {
+func newHarness(t *testing.T, cfg Config, client bmc.Client, node *fakeNode) *harness {
 	t.Helper()
 	if node == nil {
 		node = &fakeNode{}
 	}
 	var base *fakeBMC
-	switch b := bmc.(type) {
+	switch b := client.(type) {
 	case *fakeBMC:
 		base = b
 	case *fakeAMT:
 		base = b.fakeBMC
 	case nil:
 		base = &fakeBMC{}
-		bmc = base
+		client = base
 	}
 	base.node = node
 	if base.power == "" {
-		base.power = talos.PowerOff
+		base.power = bmc.PowerOff
 	}
 	h := &harness{node: node, bmc: base, kube: &fakeKube{}, installer: &fakeInstaller{}, dir: t.TempDir()}
 	h.b = New(cfg,
-		WithBMC(bmc),
+		WithBMC(client),
 		WithSSHFactory(func(SSHConfig, string) SSH { return node }),
-		WithKubeFactory(func(string) (talos.Kube, error) { return h.kube, nil }),
+		WithKubeFactory(func(string) (Kube, error) { return h.kube, nil }),
 		WithAddonInstaller(h.installer),
 		WithLogger(log.New(io.Discard, "", 0)),
 		WithTempDir(h.dir),
@@ -343,7 +343,7 @@ func TestCreate_BootsReadsKubeconfigAndInstallsAddons(t *testing.T) {
 }
 
 func TestCreate_PowersARunningNodeOffFirst(t *testing.T) {
-	bmc := &fakeBMC{power: talos.PowerOn}
+	bmc := &fakeBMC{power: bmc.PowerOn}
 	h := newHarness(t, testConfig(t), bmc, nil)
 	if _, err := h.b.Create(context.Background(), capi.BootstrapOptions{Name: "x"}); err != nil {
 		t.Fatal(err)
@@ -433,7 +433,7 @@ func TestCreate_KubeconfigTimeout(t *testing.T) {
 func TestCreate_ValidatesFirst(t *testing.T) {
 	cfg := testConfig(t)
 	cfg.ISO = ""
-	cfg.Boot.Method = talos.BootMethodHTTP
+	cfg.Boot.Method = bmc.BootMethodHTTP
 	cfg.SSH.PrivateKey = "not a key"
 	h := newHarness(t, cfg, nil, nil)
 	_, err := h.b.Create(context.Background(), capi.BootstrapOptions{})
@@ -453,7 +453,7 @@ func TestCreate_ValidatesFirst(t *testing.T) {
 
 func TestConfig_DefaultsAndValidation(t *testing.T) {
 	cfg := Config{SSH: SSHConfig{PrivateKey: testKey(t), HostKey: "ssh-ed25519 AAAA"}}.withDefaults()
-	if cfg.SSH.User != "kairos" || cfg.SSH.Port != 22 || cfg.Boot.Method != talos.BootMethodAuto || cfg.Boot.Attempts != 3 || cfg.Boot.Timeout != talos.DefaultBootTimeout {
+	if cfg.SSH.User != "kairos" || cfg.SSH.Port != 22 || cfg.Boot.Method != bmc.BootMethodAuto || cfg.Boot.Attempts != 3 || cfg.Boot.Timeout != bmc.DefaultBootTimeout {
 		t.Errorf("defaults = %+v", cfg)
 	}
 	err := cfg.Validate()
@@ -490,7 +490,7 @@ func TestDelete_EjectsAndPowersOff(t *testing.T) {
 }
 
 func TestDelete_WithoutACreateStillPowersOff(t *testing.T) {
-	h := newHarness(t, testConfig(t), &fakeBMC{power: talos.PowerOn}, &fakeNode{up: true})
+	h := newHarness(t, testConfig(t), &fakeBMC{power: bmc.PowerOn}, &fakeNode{up: true})
 	if err := h.b.Delete(context.Background(), &capi.Cluster{Name: "x-bootstrap"}); err != nil {
 		t.Fatal(err)
 	}

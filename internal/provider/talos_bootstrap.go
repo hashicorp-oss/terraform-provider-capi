@@ -18,6 +18,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/types/basetypes"
 
 	"github.com/tinkerbell-community/terraform-provider-capi/internal/capi"
+	"github.com/tinkerbell-community/terraform-provider-capi/internal/capi/addons"
 	"github.com/tinkerbell-community/terraform-provider-capi/internal/capi/kairos"
 	"github.com/tinkerbell-community/terraform-provider-capi/internal/capi/talos"
 )
@@ -179,7 +180,7 @@ func (r *ClusterResource) managerFor(ctx context.Context, data *ClusterResourceM
 	return capi.NewManager(
 		capi.WithLogger(logger),
 		capi.WithBootstrapper(bootstrapper),
-		capi.WithAddonInstaller(talos.NewManagementAddonInstaller(logger)),
+		capi.WithAddonInstaller(addons.NewInstaller(logger)),
 	), diags
 }
 

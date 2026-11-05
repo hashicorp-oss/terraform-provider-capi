@@ -36,7 +36,7 @@ import (
 	"sigs.k8s.io/yaml"
 
 	"github.com/tinkerbell-community/terraform-provider-capi/internal/capi"
-	"github.com/tinkerbell-community/terraform-provider-capi/internal/capi/talos"
+	"github.com/tinkerbell-community/terraform-provider-capi/internal/capi/addons"
 )
 
 // Ensure provider defined types fully satisfy framework interfaces.
@@ -908,7 +908,7 @@ func (r *ClusterResource) Configure(ctx context.Context, req resource.ConfigureR
 	logger := log.New(os.Stderr, "[capi-tf] ", log.LstdFlags)
 	r.manager = capi.NewManager(
 		capi.WithLogger(logger),
-		capi.WithAddonInstaller(talos.NewManagementAddonInstaller(logger)),
+		capi.WithAddonInstaller(addons.NewInstaller(logger)),
 	)
 }
 

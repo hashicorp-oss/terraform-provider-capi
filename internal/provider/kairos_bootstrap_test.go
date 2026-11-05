@@ -14,7 +14,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/types"
 
 	"github.com/tinkerbell-community/terraform-provider-capi/internal/capi"
-	"github.com/tinkerbell-community/terraform-provider-capi/internal/capi/talos"
+	"github.com/tinkerbell-community/terraform-provider-capi/internal/capi/bmc"
 )
 
 // kairosMachines is an inventory with the disposable node (no disk) and one
@@ -119,10 +119,10 @@ func TestBuildKairosBootstrapConfig(t *testing.T) {
 	if cfg.SSH.User != "kairos" || cfg.SSH.Port != 2222 || cfg.SSH.HostKey != "ssh-ed25519 AAAA" || !strings.Contains(cfg.SSH.PrivateKey, "PRIVATE KEY") {
 		t.Errorf("ssh = %+v", cfg.SSH)
 	}
-	if cfg.Boot.Method != talos.BootMethodVirtualMedia || cfg.Boot.Attempts != 2 || cfg.Boot.Device != talos.BootDeviceUSB || cfg.Boot.Timeout.Minutes() != 10 {
+	if cfg.Boot.Method != bmc.BootMethodVirtualMedia || cfg.Boot.Attempts != 2 || cfg.Boot.Device != bmc.BootDeviceUSB || cfg.Boot.Timeout.Minutes() != 10 {
 		t.Errorf("boot = %+v", cfg.Boot)
 	}
-	if len(cfg.Addons.Helm) != 1 || cfg.Addons.Helm[0].Name != "metrics" || len(cfg.Addons.CNI) != 0 {
+	if len(cfg.Addons.Helm) != 1 || cfg.Addons.Helm[0].Name != "metrics" {
 		t.Errorf("addons = %+v", cfg.Addons)
 	}
 

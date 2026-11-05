@@ -10,8 +10,8 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/types/basetypes"
 
+	"github.com/tinkerbell-community/terraform-provider-capi/internal/capi/bmc"
 	"github.com/tinkerbell-community/terraform-provider-capi/internal/capi/kairos"
-	"github.com/tinkerbell-community/terraform-provider-capi/internal/capi/talos"
 )
 
 // buildKairosBootstrapConfig assembles the Kairos bootstrapper configuration
@@ -37,10 +37,10 @@ func buildKairosBootstrapConfig(ctx context.Context, data *ClusterResourceModel)
 		return nil, diags
 	}
 	var network NetworkModel
-	var bmc BMCModel
+	var controller BMCModel
 	lenient := basetypes.ObjectAsOptions{UnhandledNullAsEmpty: true, UnhandledUnknownAsEmpty: true}
 	diags.Append(m.Network.As(ctx, &network, lenient)...)
-	diags.Append(m.BMC.As(ctx, &bmc, lenient)...)
+	diags.Append(m.BMC.As(ctx, &controller, lenient)...)
 
 	k, d := extractKairos(ctx, bs)
 	diags.Append(d...)
@@ -62,10 +62,10 @@ func buildKairosBootstrapConfig(ctx context.Context, data *ClusterResourceModel)
 		Machine: kairos.Machine{
 			Hostname: m.Hostname.ValueString(),
 			Address:  network.IPAddress.ValueString(),
-			BMC: talos.BMCCredentials{
-				Address:  bmc.Address.ValueString(),
-				Username: bmc.Username.ValueString(),
-				Password: bmc.Password.ValueString(),
+			BMC: bmc.Credentials{
+				Address:  controller.Address.ValueString(),
+				Username: controller.Username.ValueString(),
+				Password: controller.Password.ValueString(),
 			},
 		},
 		ISO: k.ISO.ValueString(),
@@ -79,13 +79,13 @@ func buildKairosBootstrapConfig(ctx context.Context, data *ClusterResourceModel)
 	if a := k.Address.ValueString(); a != "" {
 		cfg.Machine.Address = a
 	}
-	cfg.Boot, d = bootConfigFromModel(ctx, bs)
+	boot, d := bootConfigFromModel(ctx, bs)
 	diags.Append(d...)
+	cfg.Boot = bmc.BootConfig{Method: bmc.BootMethod(boot.Method), Timeout: boot.Timeout, Attempts: boot.Attempts, Device: bmc.BootDevice(boot.Device)}
 
 	ad, d := extractBootstrapAddons(ctx, bs)
 	diags.Append(d...)
-	set, d := addonSetFromModel(ctx, ad)
+	cfg.Addons, d = addonSetFromModel(ctx, ad)
 	diags.Append(d...)
-	cfg.Addons = talos.Addons{Prerequisites: set.Prerequisites, Helm: set.Helm, Manifests: set.Manifests}
 	return cfg, diags
 }

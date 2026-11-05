@@ -17,7 +17,8 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 
 	"github.com/tinkerbell-community/terraform-provider-capi/internal/capi"
-	"github.com/tinkerbell-community/terraform-provider-capi/internal/capi/talos"
+	"github.com/tinkerbell-community/terraform-provider-capi/internal/capi/addons"
+	"github.com/tinkerbell-community/terraform-provider-capi/internal/capi/bmc"
 )
 
 // kubeconfigCommand reads the k3s admin kubeconfig on the node. k3s writes it
@@ -85,16 +86,16 @@ func (t Timeouts) withDefaults(boot time.Duration) Timeouts {
 type Option func(*Bootstrapper)
 
 // WithBMC overrides the BMC implementation.
-func WithBMC(b talos.BMC) Option { return func(bs *Bootstrapper) { bs.bmc = b } }
+func WithBMC(b bmc.Client) Option { return func(bs *Bootstrapper) { bs.client = b } }
 
 // WithSSHFactory overrides how the node is reached over SSH.
 func WithSSHFactory(f SSHFactory) Option { return func(bs *Bootstrapper) { bs.newSSH = f } }
 
 // WithKubeFactory overrides how the Kubernetes probe is built.
-func WithKubeFactory(f talos.KubeFactory) Option { return func(bs *Bootstrapper) { bs.kube = f } }
+func WithKubeFactory(f KubeFactory) Option { return func(bs *Bootstrapper) { bs.kube = f } }
 
 // WithAddonInstaller overrides addon installation.
-func WithAddonInstaller(a talos.AddonInstaller) Option {
+func WithAddonInstaller(a capi.AddonInstaller) Option {
 	return func(bs *Bootstrapper) { bs.addons = a }
 }
 
@@ -110,16 +111,16 @@ func WithTempDir(dir string) Option { return func(bs *Bootstrapper) { bs.tempDir
 // Bootstrapper implements capi.Bootstrapper for a disposable Kairos node.
 type Bootstrapper struct {
 	cfg      Config
-	bmc      talos.BMC
+	client   bmc.Client
 	newSSH   SSHFactory
-	kube     talos.KubeFactory
-	addons   talos.AddonInstaller
+	kube     KubeFactory
+	addons   capi.AddonInstaller
 	logger   *log.Logger
 	timeouts Timeouts
 	tempDir  string
 
 	mu    sync.Mutex
-	media *talos.MediaBoot
+	media *bmc.MediaBoot
 }
 
 var _ capi.Bootstrapper = (*Bootstrapper)(nil)
@@ -136,28 +137,28 @@ func New(cfg Config, opts ...Option) *Bootstrapper {
 	if b.logger == nil {
 		b.logger = log.New(os.Stderr, "[kairos-bootstrap] ", log.LstdFlags)
 	}
-	if b.bmc == nil {
-		b.bmc = talos.NewBMCLib(cfg.Machine.BMC, b.logger)
+	if b.client == nil {
+		b.client = bmc.New(cfg.Machine.BMC, b.logger)
 	}
 	if b.newSSH == nil {
 		b.newSSH = NewSSH
 	}
 	if b.kube == nil {
-		b.kube = talos.NewClientGoKube
+		b.kube = NewClientGoKube
 	}
 	if b.addons == nil {
-		b.addons = talos.NewAddonInstaller(talos.NewSDKHelmClient(b.logger), capi.NewDynamicApplier(), b.logger)
+		b.addons = addons.NewInstaller(b.logger)
 	}
 	return b
 }
 
 // mediaBoot returns the boot layer, keeping one across Create and Delete so
 // a storage-redirection session opened by a boot is the one released later.
-func (b *Bootstrapper) mediaBoot() *talos.MediaBoot {
+func (b *Bootstrapper) mediaBoot() *bmc.MediaBoot {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.media == nil {
-		m := talos.NewMediaBoot(b.bmc, b.cfg.Boot.Device, b.logger)
+		m := bmc.NewMediaBoot(b.client, b.cfg.Boot.Device, b.logger)
 		m.PowerDown, m.Poll = b.timeouts.PowerDown, b.timeouts.Poll
 		m.Retries, m.RetryBase, m.RetryMax = b.timeouts.BMCRetries, b.timeouts.RetryBase, b.timeouts.RetryMax
 		b.media = m
@@ -205,7 +206,7 @@ func (b *Bootstrapper) Create(ctx context.Context, opts capi.BootstrapOptions) (
 	if !b.cfg.Addons.Empty() {
 		actx, cancel := context.WithTimeout(ctx, b.timeouts.Addons)
 		defer cancel()
-		if err := b.addons.Install(actx, kubeconfigPath, b.cfg.Addons); err != nil {
+		if err := b.addons.Install(actx, &capi.Cluster{Name: name, KubeconfigPath: kubeconfigPath}, b.cfg.Addons); err != nil {
 			return fail("addons", err)
 		}
 	}
@@ -230,7 +231,7 @@ func (b *Bootstrapper) boot(ctx context.Context, name string, node SSH) error {
 		if err := media.Boot(ctx, b.cfg.ISO); err != nil {
 			return err
 		}
-		err := talos.WaitFor(ctx, b.timeouts.Boot, b.timeouts.Poll, func(ctx context.Context) (bool, error) {
+		err := bmc.WaitFor(ctx, b.timeouts.Boot, b.timeouts.Poll, func(ctx context.Context) (bool, error) {
 			return b.answers(ctx, node), nil
 		})
 		if err == nil {
@@ -255,7 +256,7 @@ func (b *Bootstrapper) fetchKubeconfig(ctx context.Context, node SSH) ([]byte, e
 	server := "https://" + net.JoinHostPort(b.cfg.Machine.Address, apiPort)
 	var raw []byte
 	var lastErr error
-	err := talos.WaitFor(ctx, b.timeouts.Kubeconfig, b.timeouts.Poll, func(ctx context.Context) (bool, error) {
+	err := bmc.WaitFor(ctx, b.timeouts.Kubeconfig, b.timeouts.Poll, func(ctx context.Context) (bool, error) {
 		pctx, cancel := context.WithTimeout(ctx, b.timeouts.Probe)
 		defer cancel()
 		out, err := node.Run(pctx, kubeconfigCommand)
@@ -301,7 +302,7 @@ func (b *Bootstrapper) waitKubernetes(ctx context.Context, kubeconfigPath string
 	if err != nil {
 		return err
 	}
-	err = talos.WaitFor(ctx, b.timeouts.Kubernetes, b.timeouts.Poll, func(ctx context.Context) (bool, error) {
+	err = bmc.WaitFor(ctx, b.timeouts.Kubernetes, b.timeouts.Poll, func(ctx context.Context) (bool, error) {
 		if ok, err := kube.APIReachable(ctx); err != nil || !ok {
 			return false, err
 		}
@@ -324,7 +325,7 @@ func (b *Bootstrapper) Delete(ctx context.Context, cluster *capi.Cluster) error 
 		name = cluster.Name
 	}
 	b.mediaBoot().Detach(ctx)
-	if err := talos.Retry(ctx, b.timeouts.BMCRetries, b.timeouts.RetryBase, b.timeouts.RetryMax, b.bmc.PowerOff); err != nil {
+	if err := bmc.Retry(ctx, b.timeouts.BMCRetries, b.timeouts.RetryBase, b.timeouts.RetryMax, b.client.PowerOff); err != nil {
 		return &capi.BootstrapError{ClusterName: name, Operation: "delete", Err: err}
 	}
 	if cluster != nil && cluster.KubeconfigPath != "" {

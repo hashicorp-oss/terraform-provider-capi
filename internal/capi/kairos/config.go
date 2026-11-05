@@ -14,7 +14,8 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
-	"github.com/tinkerbell-community/terraform-provider-capi/internal/capi/talos"
+	"github.com/tinkerbell-community/terraform-provider-capi/internal/capi"
+	"github.com/tinkerbell-community/terraform-provider-capi/internal/capi/bmc"
 )
 
 // Defaults applied by Config.withDefaults.
@@ -42,7 +43,7 @@ type Machine struct {
 	// Kubernetes API. The ISO's cloud-config gives the node this address.
 	Address string
 	// BMC boots and powers the machine.
-	BMC talos.BMCCredentials
+	BMC bmc.Credentials
 }
 
 // SSHConfig is how the live node is reached.
@@ -66,26 +67,26 @@ type Config struct {
 	Machine Machine
 	// Boot controls how the ISO is booted. Only virtual media applies to a
 	// live ISO; method http (a UKI over UEFI HTTP boot) is rejected.
-	Boot talos.BootConfig
+	Boot bmc.BootConfig
 	// ISO is the user-built Kairos live image (AuroraBoot's
 	// kairos.iso.custom.iso): an http(s) URL the BMC can fetch, or with Intel
 	// AMT storage redirection also a local path.
 	ISO string
 	SSH SSHConfig
 	// Addons are installed on the live cluster before it manages anything.
-	// k3s brings its own CNI, so Addons.CNI is normally empty.
-	Addons talos.Addons
+	// k3s brings its own CNI.
+	Addons capi.AddonSet
 }
 
 func (c Config) withDefaults() Config {
 	if c.Boot.Method == "" {
-		c.Boot.Method = talos.BootMethodAuto
+		c.Boot.Method = bmc.BootMethodAuto
 	}
 	if c.Boot.Timeout == 0 {
-		c.Boot.Timeout = talos.DefaultBootTimeout
+		c.Boot.Timeout = bmc.DefaultBootTimeout
 	}
 	if c.Boot.Attempts <= 0 {
-		c.Boot.Attempts = talos.DefaultBootAttempts
+		c.Boot.Attempts = bmc.DefaultBootAttempts
 	}
 	if c.SSH.User == "" {
 		c.SSH.User = DefaultSSHUser
@@ -119,8 +120,8 @@ func (c Config) Validate() error {
 		}
 	}
 	switch c.Boot.Method {
-	case talos.BootMethodAuto, talos.BootMethodVirtualMedia:
-	case talos.BootMethodHTTP:
+	case bmc.BootMethodAuto, bmc.BootMethodVirtualMedia:
+	case bmc.BootMethodHTTP:
 		errs = append(errs, errors.New(`boot method "http" boots a UKI over UEFI HTTP boot, not a live ISO; use "virtual_media"`))
 	default:
 		errs = append(errs, fmt.Errorf("unknown boot method %q", c.Boot.Method))
