@@ -171,6 +171,10 @@ func (p *CapiProvider) Configure(ctx context.Context, req provider.ConfigureRequ
 func (p *CapiProvider) Resources(ctx context.Context) []func() resource.Resource {
 	return []func() resource.Resource{
 		NewClusterResource,
+		NewObjectResource,
+		NewMachineTemplateResource,
+		NewControlPlaneTemplateResource,
+		NewBootstrapTemplateResource,
 	}
 }
 
