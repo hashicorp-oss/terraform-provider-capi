@@ -50,8 +50,8 @@ func NewClusterResource() resource.Resource {
 
 // ClusterResource defines the resource implementation.
 type ClusterResource struct {
-	providerData *CapiProviderModel
-	manager      *capi.Manager
+	pd      *providerData
+	manager *capi.Manager
 }
 
 func (r *ClusterResource) Metadata(ctx context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
@@ -791,16 +791,16 @@ func (r *ClusterResource) Configure(ctx context.Context, req resource.ConfigureR
 		return
 	}
 
-	providerData, ok := req.ProviderData.(*CapiProviderModel)
+	pd, ok := req.ProviderData.(*providerData)
 	if !ok {
 		resp.Diagnostics.AddError(
 			"Unexpected Resource Configure Type",
-			fmt.Sprintf("Expected *CapiProviderModel, got: %T.", req.ProviderData),
+			fmt.Sprintf("Expected *providerData, got: %T.", req.ProviderData),
 		)
 		return
 	}
 
-	r.providerData = providerData
+	r.pd = pd
 	logger := log.New(os.Stderr, "[capi-tf] ", log.LstdFlags)
 	r.manager = capi.NewManager(
 		capi.WithLogger(logger),
@@ -1378,6 +1378,12 @@ func (r *ClusterResource) resolveManagementKubeconfig(ctx context.Context, plan 
 		}
 	}
 
+	// The provider block's management cluster, as for every other resource.
+	if r.pd != nil {
+		if conn, err := r.pd.management(ctx); err == nil {
+			return conn.KubeconfigPath
+		}
+	}
 	return ""
 }
 

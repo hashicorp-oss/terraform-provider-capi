@@ -30,9 +30,11 @@ type CapiProvider struct {
 	version string
 }
 
-// CapiProviderModel describes the provider data model.
+// CapiProviderModel describes the provider data model: the management
+// cluster every resource talks to, the way the aws provider block is the AWS
+// API. Either a kubeconfig's content or the `kubernetes` block names it.
 type CapiProviderModel struct {
-	Endpoint   types.String `tfsdk:"endpoint"`
+	Kubeconfig types.String `tfsdk:"kubeconfig"`
 	Kubernetes types.Object `tfsdk:"kubernetes"`
 }
 
@@ -62,14 +64,15 @@ func (p *CapiProvider) Metadata(ctx context.Context, req provider.MetadataReques
 
 func (p *CapiProvider) Schema(ctx context.Context, req provider.SchemaRequest, resp *provider.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		MarkdownDescription: "Terraform provider for managing Cluster API resources using clusterctl",
+		MarkdownDescription: "Manages Cluster API clusters, their objects and their providers through clusterctl's own libraries. The provider block names the management cluster, the way the aws provider block names the AWS API: `kubeconfig` (content, typically an ephemeral `capi_kubeconfig`), or the `kubernetes` block with a config path and context, or a host and credentials. A `capi_cluster` that bootstraps its own management cluster needs neither.",
 		Attributes: map[string]schema.Attribute{
-			"endpoint": schema.StringAttribute{
-				MarkdownDescription: "Example provider attribute",
+			"kubeconfig": schema.StringAttribute{
+				MarkdownDescription: "Kubeconfig content of the management cluster. Feed it from an ephemeral `capi_kubeconfig` so it never enters state. Takes precedence over `kubernetes`.",
 				Optional:            true,
+				Sensitive:           true,
 			},
 			"kubernetes": schema.SingleNestedAttribute{
-				MarkdownDescription: "Kubernetes configuration for the management cluster",
+				MarkdownDescription: "Kubernetes connection to the management cluster, with the attributes of the `kubernetes` provider: `config_path`/`config_paths` with `config_context*`, or `host` with a token, a client certificate or basic auth. `KUBE_CONFIG_PATH` and `KUBE_CONFIG_PATHS` are read when neither is set.",
 				Optional:            true,
 				Attributes:          kubernetesConfigSchema(),
 			},
@@ -156,12 +159,13 @@ func (p *CapiProvider) Configure(ctx context.Context, req provider.ConfigureRequ
 		return
 	}
 
-	// Configuration values are now available.
-	// if data.Endpoint.IsNull() { /* ... */ }
-
-	// Pass provider configuration to resources
-	resp.DataSourceData = &data
-	resp.ResourceData = &data
+	// The management connection is built on first use (see providerData), so
+	// an empty provider block is valid for a cluster that bootstraps its own.
+	pd := &providerData{model: data}
+	resp.DataSourceData = pd
+	resp.ResourceData = pd
+	resp.EphemeralResourceData = pd
+	resp.ActionData = pd
 }
 
 func (p *CapiProvider) Resources(ctx context.Context) []func() resource.Resource {
@@ -171,11 +175,16 @@ func (p *CapiProvider) Resources(ctx context.Context) []func() resource.Resource
 }
 
 func (p *CapiProvider) EphemeralResources(ctx context.Context) []func() ephemeral.EphemeralResource {
-	return []func() ephemeral.EphemeralResource{}
+	return []func() ephemeral.EphemeralResource{
+		NewKubeconfigEphemeralResource,
+	}
 }
 
 func (p *CapiProvider) DataSources(ctx context.Context) []func() datasource.DataSource {
-	return []func() datasource.DataSource{}
+	return []func() datasource.DataSource{
+		NewClusterDataSource,
+		NewProviderComponentsDataSource,
+	}
 }
 
 func (p *CapiProvider) Functions(ctx context.Context) []func() function.Function {

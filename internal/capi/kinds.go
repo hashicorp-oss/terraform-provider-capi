@@ -85,6 +85,10 @@ func (r *CRDKindResolver) Kinds(ctx context.Context, mgmt *Cluster) (*KindCatalo
 // hardcoded table of provider kinds.
 type KindCatalog struct {
 	crds []apiextv1.CustomResourceDefinition
+	// coreVersion stands in for the core Cluster CRD's storage version when
+	// the catalog was built from a single provider's release, which ships no
+	// core CRD.
+	coreVersion string
 }
 
 // NewKindCatalog builds a catalog from a CRD list.
@@ -95,6 +99,9 @@ func NewKindCatalog(crds []apiextv1.CustomResourceDefinition) *KindCatalog {
 // CoreVersion returns the storage version of the core Cluster CRD, which is
 // the CAPI contract every provider is resolved against.
 func (c *KindCatalog) CoreVersion() (string, error) {
+	if c.coreVersion != "" {
+		return c.coreVersion, nil
+	}
 	for _, crd := range c.crds {
 		if crd.Name != coreClustersCRD {
 			continue
