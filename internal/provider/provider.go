@@ -177,6 +177,8 @@ func (p *CapiProvider) Resources(ctx context.Context) []func() resource.Resource
 		NewBootstrapTemplateResource,
 		NewMachineDeploymentResource,
 		NewMachineHealthCheckResource,
+		NewHelmChartProxyResource,
+		NewClusterResourceSetResource,
 	}
 }
 

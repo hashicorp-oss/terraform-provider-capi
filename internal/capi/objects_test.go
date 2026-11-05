@@ -28,6 +28,7 @@ var testKinds = map[schema.GroupVersionKind]string{
 	{Group: "cluster.x-k8s.io", Version: "v1beta2", Kind: "MachineSet"}:                               "machinesets",
 	{Group: "cluster.x-k8s.io", Version: "v1beta2", Kind: "ClusterClass"}:                             "clusterclasses",
 	{Group: "controlplane.cluster.x-k8s.io", Version: "v1beta1", Kind: "TalosControlPlane"}:           "taloscontrolplanes",
+	{Group: "", Version: "v1", Kind: "Secret"}:                                                        "secrets",
 }
 
 // newFakeObjectClient builds an ObjectClient on client-go's fake dynamic
