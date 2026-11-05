@@ -203,7 +203,13 @@ func (p *CapiProvider) Functions(ctx context.Context) []func() function.Function
 }
 
 func (p *CapiProvider) Actions(ctx context.Context) []func() action.Action {
-	return []func() action.Action{}
+	return []func() action.Action{
+		NewPauseAction,
+		NewResumeAction,
+		NewRolloutRestartAction,
+		NewRemediateMachineAction,
+		NewMoveAction,
+	}
 }
 
 func New(version string) func() provider.Provider {

@@ -1,6 +1,6 @@
 # EKS-shaped resources: implementation plan
 
-Date: 2026-11-05. Status: in progress. Design:
+Date: 2026-11-05. Status: executed (steps 1-7). Design:
 `docs/superpowers/specs/2026-11-04-provider-design.md` §12 build order.
 
 The provider block becomes the management cluster (as the aws provider block
@@ -53,7 +53,12 @@ resumable workflow (`capi.Phase`, `PhaseError`, `KeepBootstrapOnFailure`),
 `wait.conditions`, the connection derived from `provider_secrets` after the
 pivot, `control_plane.machine_spec` for the self-rendered control-plane
 template, raw-JSON upgraders for every version incl. v0, examples, `.test`
-and CLAUDE.md ported).
+and CLAUDE.md ported), 7 (34cd4e3 → actions `capi_pause`,
+`capi_resume`, `capi_rollout_restart`, `capi_remediate_machine`, `capi_move`
+as one-shot merge patches and `clusterctl move`).
+
+Every step is built, tested, linted and documented; nothing has run against
+a live management cluster or hardware yet.
 
 1. **Connection, credentials, reads.** Provider `kubeconfig` and
    `kubernetes` block; ephemeral `capi_kubeconfig` (from the management
