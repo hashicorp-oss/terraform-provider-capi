@@ -71,6 +71,18 @@ func NewObjectClientFor(cluster *Cluster, dyn dynamic.Interface, mapper meta.RES
 	return &ObjectClient{cluster: cluster, dyn: dyn, mapper: mapper, resetMapper: reset, fieldManager: fieldManager}
 }
 
+// WithFieldManager returns a client sharing this one's connection that
+// applies under another field manager, so a resource can own its part of an
+// object (one topology entry of a Cluster) independently of the rest.
+func (c *ObjectClient) WithFieldManager(fieldManager string) *ObjectClient {
+	if fieldManager == "" {
+		fieldManager = DefaultFieldManager
+	}
+	cp := *c
+	cp.fieldManager = fieldManager
+	return &cp
+}
+
 // Cluster is the cluster the client talks to.
 func (c *ObjectClient) Cluster() *Cluster { return c.cluster }
 

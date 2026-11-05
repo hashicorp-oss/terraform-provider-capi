@@ -34,6 +34,10 @@ network, the control plane, the create-only bootstrap, waits, status.
 Each step: `go build ./...`, `go test ./internal/...`, gated lint, docs
 regenerated, `.test` plan, one commit.
 
+Done: 1 (7514ba7), 2 (b0a3ea1), 3 (`capi_machine_deployment` with
+per-Machine failure reporting on a stuck rollout, `capi_machine_health_check`
+with the v1beta2 and legacy shapes, examples for every resource so far).
+
 1. **Connection, credentials, reads.** Provider `kubeconfig` and
    `kubernetes` block; ephemeral `capi_kubeconfig` (from the management
    cluster's `<name>-kubeconfig` Secret, or derived from `provider_secrets`);
