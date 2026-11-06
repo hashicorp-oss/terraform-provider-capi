@@ -190,6 +190,27 @@ func (m *Manager) CreateCluster(ctx context.Context, opts CreateClusterOptions) 
 		return nil, &PhaseError{Phase: phase, Bootstrap: bootstrapCluster, Err: err}
 	}
 
+	cp := opts.Checkpoint
+	if cp == nil {
+		cp = &Checkpoint{}
+	}
+	namespace := opts.Namespace
+	if namespace == "" {
+		namespace = "default"
+	}
+	waitOpts := opts.Wait
+	if waitOpts.Timeout == 0 {
+		waitOpts = DefaultWaitOptions()
+	}
+
+	// A self-managed create that already moved management: the bootstrap
+	// cluster holds none of the cluster's objects any more, so the run
+	// continues on the cluster itself and never touches the bootstrap's
+	// providers, addons or objects again.
+	if needsBootstrap && opts.SelfManaged && cp.Done(StepMoved) {
+		return m.resumeAfterMove(ctx, opts, cp, namespace, waitOpts, advance, func() Phase { return phase })
+	}
+
 	// Step 1: Create or use existing management cluster
 	if needsBootstrap {
 		advance(PhaseBootstrapping)
@@ -203,6 +224,7 @@ func (m *Manager) CreateCluster(ctx context.Context, opts CreateClusterOptions) 
 		if err != nil {
 			return fail(fmt.Errorf("creating bootstrap cluster: %w", err))
 		}
+		cp.recordBootstrap(bootstrapCluster.Name)
 		mgmtCluster = bootstrapCluster
 		m.logger.Printf("Bootstrap cluster created: %s (kubeconfig: %s)", bootstrapCluster.Name, bootstrapCluster.KubeconfigPath)
 	} else {
@@ -216,10 +238,6 @@ func (m *Manager) CreateCluster(ctx context.Context, opts CreateClusterOptions) 
 	// All addon providers (including those with customizations) go through
 	// clusterctl init. Customized addons have their component YAML modified
 	// transparently via the injected RepositoryClientFactory in the installer.
-	namespace := opts.Namespace
-	if namespace == "" {
-		namespace = "default"
-	}
 	if !opts.SkipInit {
 		if err := m.reconcileProviders(ctx, mgmtCluster, opts); err != nil {
 			return fail(err)
@@ -229,8 +247,10 @@ func (m *Manager) CreateCluster(ctx context.Context, opts CreateClusterOptions) 
 	pivot := opts.SelfManaged && needsBootstrap
 
 	// Step 2b: the bootstrap cluster's own stack (a Tinkerbell on host
-	// networking), uninstalled again before management moves away.
-	if needsBootstrap {
+	// networking), uninstalled again before management moves away. A resume
+	// after the handover removed it must not bring it back: the workload's
+	// Tinkerbell already answers DHCP.
+	if needsBootstrap && !cp.Done(StepBootstrapAddonsRemoved) {
 		if err := m.installAddons(ctx, mgmtCluster, opts.BootstrapAddons); err != nil {
 			return fail(fmt.Errorf("installing bootstrap addons: %w", err))
 		}
@@ -292,11 +312,6 @@ func (m *Manager) CreateCluster(ctx context.Context, opts CreateClusterOptions) 
 		result.ProviderSecrets = bootstrapCluster.ProviderSecrets
 	}
 
-	waitOpts := opts.Wait
-	if waitOpts.Timeout == 0 {
-		waitOpts = DefaultWaitOptions()
-	}
-
 	// Step 5: Wait for cluster readiness. A pivot only waits for the control
 	// plane to initialize here (phase one); full readiness is waited for on
 	// the new management cluster after the move (phase two), because machines
@@ -350,7 +365,7 @@ func (m *Manager) CreateCluster(ctx context.Context, opts CreateClusterOptions) 
 		// Tinkerbell down, and wait for the workload's own addons (CAAPH
 		// installs them once the control plane is initialized) so its
 		// Tinkerbell is up before anything else needs provisioning.
-		if err := m.handOver(ctx, mgmtCluster, workloadCluster, opts, namespace, waitOpts, advance); err != nil {
+		if err := m.handOver(ctx, mgmtCluster, workloadCluster, opts, cp, namespace, waitOpts, advance); err != nil {
 			return fail(err)
 		}
 
@@ -364,60 +379,120 @@ func (m *Manager) CreateCluster(ctx context.Context, opts CreateClusterOptions) 
 		if err := m.moveWithRetry(ctx, mgmtCluster, workloadCluster, MoveOptions{Namespace: namespace}); err != nil {
 			return fail(fmt.Errorf("moving CAPI management: %w", err))
 		}
+		// The point of no return: the objects live on the cluster now. Record
+		// it with what reaches the cluster before anything else can fail.
+		cp.Mark(StepMoved)
+		cp.WorkloadKubeconfig = kubeconfig
+		advance(PhaseMoved)
 
-		// 7f: what the move does not carry: the inventory (now including the
-		// bootstrap machine as a normal netboot target; clusterctl moves
-		// Hardware and rufio Machines but not their BMC Secrets) and the
-		// caller's management manifests.
-		var post [][]byte
-		if inventory, err := inventoryManifest(opts, namespace, true); err != nil {
-			return fail(fmt.Errorf("rendering inventory for the workload cluster: %w", err))
-		} else if inventory != nil {
-			post = append(post, inventory)
+		if err := m.finishPivot(ctx, opts, cp, namespace, waitOpts, bootstrapCluster, workloadCluster, result, advance, func() Phase { return phase }); err != nil {
+			return nil, err
 		}
-		post = append(post, opts.ManagementManifests...)
-		for i, manifest := range post {
-			if err := m.applier.Apply(ctx, workloadCluster, manifest); err != nil {
-				return fail(fmt.Errorf("applying post-move manifest %d to the workload cluster: %w", i, err))
-			}
-		}
-
-		// Update the result to reflect the new management cluster
-		result.Cluster.KubeconfigPath = workloadKubeconfigPath
 		mgmtCluster = workloadCluster
-		m.logger.Printf("CAPI management pivoted to %s", opts.Name)
+	}
 
-		// Step 8: Clean up the bootstrap cluster; its provisioning stack goes with it.
-		if bootstrapCluster != nil {
-			m.logger.Printf("Deleting bootstrap cluster %s", bootstrapCluster.Name)
-			if err := m.bootstrapper.Delete(ctx, bootstrapCluster); err != nil {
-				m.logger.Printf("Warning: failed to delete bootstrap cluster %s: %v", bootstrapCluster.Name, err)
-				// Don't fail the operation - the workload cluster is running
-			} else {
-				result.BootstrapCluster = nil
-			}
-		}
+	return m.complete(ctx, mgmtCluster, opts, namespace, result, advance), nil
+}
 
-		// Step 8b: the root credential of a cluster that now manages itself:
-		// the secrets bundle its providers generated, which is all a later
-		// run needs to derive a kubeconfig when nothing else holds one.
-		if secrets := m.rootSecrets(ctx, workloadCluster, opts.Name, namespace); len(secrets) > 0 {
-			result.ProviderSecrets = secrets
-		}
-		advance(PhasePivoted)
+// resumeAfterMove continues a self-managed create whose clusterctl move
+// already finished: on the cluster itself, through the kubeconfig the
+// checkpoint recorded at the move.
+func (m *Manager) resumeAfterMove(ctx context.Context, opts CreateClusterOptions, cp *Checkpoint, namespace string, waitOpts WaitOptions, advance func(Phase), phase func() Phase) (*ClusterResult, error) {
+	advance(PhaseMoved)
+	if cp.WorkloadKubeconfig == "" {
+		return nil, &PhaseError{Phase: phase(), Err: fmt.Errorf("resuming cluster %s after the move: the checkpoint records no kubeconfig for it", opts.Name)}
+	}
+	m.logger.Printf("Resuming cluster %s on itself: management already moved there", opts.Name)
+	path := filepath.Join(os.TempDir(), fmt.Sprintf("%s-workload-kubeconfig", opts.Name))
+	if err := os.WriteFile(path, []byte(cp.WorkloadKubeconfig), 0o600); err != nil {
+		return nil, &PhaseError{Phase: phase(), Err: fmt.Errorf("writing workload kubeconfig: %w", err)}
+	}
+	workload := &Cluster{Name: opts.Name, KubeconfigPath: path, Namespace: namespace}
+	var bootstrap *Cluster
+	if !cp.Done(StepBootstrapDeleted) && cp.Bootstrap != nil && cp.Bootstrap.Name != "" {
+		bootstrap = &Cluster{Name: cp.Bootstrap.Name, ProviderSecrets: opts.ProviderSecrets}
+	}
+	result := &ClusterResult{
+		Cluster:          &Cluster{Name: opts.Name, Namespace: namespace},
+		BootstrapCluster: bootstrap,
+		Kubeconfig:       cp.WorkloadKubeconfig,
+	}
+	result.Endpoint, result.CACertificate = kubeconfigEndpoint(cp.WorkloadKubeconfig)
+	if err := m.finishPivot(ctx, opts, cp, namespace, waitOpts, bootstrap, workload, result, advance, phase); err != nil {
+		return nil, err
+	}
+	return m.complete(ctx, workload, opts, namespace, result, advance), nil
+}
 
-		// Phase two: full readiness on the new management cluster. The
-		// bootstrap cluster is gone, so a failure here leaves nothing to
-		// clean up and the next run resumes against the cluster itself.
-		if opts.WaitForReady {
-			m.logger.Printf("Waiting for cluster %s to become ready", opts.Name)
-			if err := m.waiter.WaitForClusterReady(ctx, workloadCluster, opts.Name, namespace, waitOpts); err != nil {
-				return nil, &PhaseError{Phase: phase, Bootstrap: result.BootstrapCluster, Err: fmt.Errorf("waiting for cluster readiness after the pivot: %w", err)}
-			}
-			m.logger.Printf("Cluster %s is ready", opts.Name)
+// finishPivot is what follows the move: the inventory and management
+// manifests the move does not carry, the bootstrap cluster's teardown, the
+// root credential, and full readiness on the cluster. Every step is safe to
+// repeat except the teardown, which the checkpoint records. A failure keeps
+// the bootstrap cluster (it holds nothing any more) and returns what the run
+// has so far, so a resume can connect to the cluster.
+func (m *Manager) finishPivot(ctx context.Context, opts CreateClusterOptions, cp *Checkpoint, namespace string, waitOpts WaitOptions, bootstrap, workload *Cluster, result *ClusterResult, advance func(Phase), phase func() Phase) error {
+	failed := func(err error) error {
+		return &PhaseError{Phase: phase(), Bootstrap: bootstrap, Result: result, Err: err}
+	}
+
+	// 7f: what the move does not carry: the inventory (now including the
+	// bootstrap machine as a normal netboot target; clusterctl moves
+	// Hardware and rufio Machines but not their BMC Secrets) and the
+	// caller's management manifests.
+	var post [][]byte
+	if inventory, err := inventoryManifest(opts, namespace, true); err != nil {
+		return failed(fmt.Errorf("rendering inventory for the workload cluster: %w", err))
+	} else if inventory != nil {
+		post = append(post, inventory)
+	}
+	post = append(post, opts.ManagementManifests...)
+	for i, manifest := range post {
+		if err := m.applier.Apply(ctx, workload, manifest); err != nil {
+			return failed(fmt.Errorf("applying post-move manifest %d to the workload cluster: %w", i, err))
 		}
 	}
 
+	result.Cluster.KubeconfigPath = workload.KubeconfigPath
+	m.logger.Printf("CAPI management pivoted to %s", opts.Name)
+
+	// Step 8: Clean up the bootstrap cluster; its provisioning stack goes
+	// with it. Once done it is never attempted again: a Kairos bootstrap
+	// node is provisioned as a cluster member from here on.
+	if bootstrap != nil && !cp.Done(StepBootstrapDeleted) {
+		m.logger.Printf("Deleting bootstrap cluster %s", bootstrap.Name)
+		if err := m.bootstrapper.Delete(ctx, bootstrap); err != nil {
+			// Not fatal: the workload cluster runs; a resume retries.
+			m.logger.Printf("Warning: failed to delete bootstrap cluster %s: %v", bootstrap.Name, err)
+		} else {
+			cp.Mark(StepBootstrapDeleted)
+			bootstrap = nil
+			result.BootstrapCluster = nil
+		}
+	}
+
+	// Step 8b: the root credential of a cluster that now manages itself:
+	// the secrets bundle its providers generated, which is all a later
+	// run needs to derive a kubeconfig when nothing else holds one.
+	if secrets := m.rootSecrets(ctx, workload, opts.Name, namespace); len(secrets) > 0 {
+		result.ProviderSecrets = secrets
+	}
+	advance(PhasePivoted)
+
+	// Phase two: full readiness on the new management cluster. A failure
+	// here resumes against the cluster itself.
+	if opts.WaitForReady {
+		m.logger.Printf("Waiting for cluster %s to become ready", opts.Name)
+		if err := m.waiter.WaitForClusterReady(ctx, workload, opts.Name, namespace, waitOpts); err != nil {
+			return failed(fmt.Errorf("waiting for cluster readiness after the pivot: %w", err))
+		}
+		m.logger.Printf("Cluster %s is ready", opts.Name)
+	}
+	return nil
+}
+
+// complete describes the cluster and reads its conditions on the cluster
+// that now manages it, and finishes the workflow.
+func (m *Manager) complete(ctx context.Context, mgmtCluster *Cluster, opts CreateClusterOptions, namespace string, result *ClusterResult, advance func(Phase)) *ClusterResult {
 	// Step 9: Get cluster description and conditions
 	description, err := m.describer.Describe(ctx, mgmtCluster, opts.Name, namespace)
 	if err != nil {
@@ -432,7 +507,7 @@ func (m *Manager) CreateCluster(ctx context.Context, opts CreateClusterOptions) 
 	advance(PhaseReady)
 	result.Phase = PhaseReady
 	m.logger.Printf("Cluster %s creation completed successfully", opts.Name)
-	return result, nil
+	return result
 }
 
 // reconcileProviders converges a management cluster on the configured
@@ -551,11 +626,19 @@ func (m *Manager) deleteSelfManaged(ctx context.Context, opts DeleteClusterOptio
 		}
 		// Gone from the workload cluster: deleted out of band, or moved by
 		// an earlier deletion to a bootstrap cluster that outlived a failure.
+		if opts.Checkpoint != nil && opts.Checkpoint.MovedTo != nil && opts.Checkpoint.MovedTo.Name != "" {
+			bootstrapName = opts.Checkpoint.MovedTo.Name
+		}
 		exists, err := m.bootstrapper.Exists(ctx, bootstrapName)
 		if err != nil {
 			return fmt.Errorf("checking for a bootstrap cluster left by an earlier deletion of %s: %w", opts.Name, err)
 		}
 		if !exists {
+			if opts.Checkpoint != nil && opts.Checkpoint.MovedTo != nil {
+				// An earlier deletion moved the objects there: they are lost
+				// with it, and the machines may still be provisioned.
+				return fmt.Errorf("an earlier deletion of %s moved its CAPI objects to bootstrap cluster %s, which no longer exists: the machines may still be provisioned and powered on; release them by hand, then remove the resource from state", opts.Name, bootstrapName)
+			}
 			m.logger.Printf("Cluster %s/%s no longer exists on itself; nothing to move", namespace, opts.Name)
 			return nil
 		}
@@ -623,6 +706,13 @@ func (m *Manager) deleteSelfManaged(ctx context.Context, opts DeleteClusterOptio
 	m.logger.Printf("Moving CAPI management of %s to %s", opts.Name, bootstrap.Name)
 	if err := m.moveWithRetry(ctx, workload, bootstrap, MoveOptions{Namespace: namespace}); err != nil {
 		return fmt.Errorf("moving CAPI management to %s (left in place for recovery): %w", bootstrap.Name, err)
+	}
+	// From here the bootstrap cluster holds the only copy of the objects.
+	if opts.Checkpoint != nil {
+		if opts.Checkpoint.MovedTo == nil {
+			opts.Checkpoint.MovedTo = &BootstrapRecord{}
+		}
+		opts.Checkpoint.MovedTo.Name = bootstrap.Name
 	}
 	if err := m.deleteClusterObject(ctx, bootstrap, opts.Name, namespace, waitOpts); err != nil {
 		return fmt.Errorf("%w (bootstrap cluster %s left in place for recovery)", err, bootstrap.Name)
@@ -762,7 +852,7 @@ func controlPlaneEndpoint(obj *unstructured.Unstructured) string {
 // drain, the bootstrap addons are uninstalled, and the workload cluster's
 // own addons, declared as CAAPH HelmChartProxies on the bootstrap cluster,
 // are waited for. From here the workload Tinkerbell is the only responder.
-func (m *Manager) handOver(ctx context.Context, bootstrap, workload *Cluster, opts CreateClusterOptions, namespace string, waitOpts WaitOptions, advance func(Phase)) error {
+func (m *Manager) handOver(ctx context.Context, bootstrap, workload *Cluster, opts CreateClusterOptions, cp *Checkpoint, namespace string, waitOpts WaitOptions, advance func(Phase)) error {
 	m.logger.Printf("Pausing cluster %s for the handover", opts.Name)
 	if err := m.applier.Pause(ctx, bootstrap, opts.Name, namespace); err != nil {
 		return fmt.Errorf("pausing cluster %s before the move: %w", opts.Name, err)
@@ -771,7 +861,7 @@ func (m *Manager) handOver(ctx context.Context, bootstrap, workload *Cluster, op
 		return fmt.Errorf("waiting for provisioning to go idle before the move: %w", err)
 	}
 	advance(PhasePaused)
-	if !opts.BootstrapAddons.Empty() {
+	if !opts.BootstrapAddons.Empty() && !cp.Done(StepBootstrapAddonsRemoved) {
 		m.logger.Printf("Uninstalling the bootstrap addons from %s", bootstrap.Name)
 		if m.addons == nil {
 			return fmt.Errorf("uninstalling addons on %s: no addon installer configured", bootstrap.Name)
@@ -779,6 +869,7 @@ func (m *Manager) handOver(ctx context.Context, bootstrap, workload *Cluster, op
 		if err := m.addons.Uninstall(ctx, bootstrap, opts.BootstrapAddons); err != nil {
 			return fmt.Errorf("uninstalling the bootstrap addons: %w", err)
 		}
+		cp.Mark(StepBootstrapAddonsRemoved)
 	}
 	m.logger.Printf("Waiting for the addons of cluster %s", workload.Name)
 	if err := m.waiter.WaitForAddons(ctx, bootstrap, opts.Name, namespace, waitOpts); err != nil {

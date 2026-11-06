@@ -201,6 +201,12 @@ type CreateClusterOptions struct {
 	// creation fails, so the next run resumes on it.
 	KeepBootstrapOnFailure bool
 
+	// Checkpoint is the progress of an earlier run of a self-managed create
+	// (nil or empty for a fresh one). The workflow skips the steps it
+	// records and records each one as it completes, so the caller can
+	// persist it whatever the outcome.
+	Checkpoint *Checkpoint
+
 	// Variables are clusterctl variables (${VAR}) substituted into provider
 	// component YAML at init.
 	Variables map[string]string
@@ -406,6 +412,10 @@ const (
 	// PhaseHandedOver: the bootstrap stack is down and the workload's addons
 	// are up; the workload cluster is the only provisioning engine.
 	PhaseHandedOver Phase = "handed_over"
+	// PhaseMoved: clusterctl move finished; the cluster's objects live on
+	// the cluster itself. What remains is re-applying the inventory there,
+	// tearing the bootstrap cluster down and capturing the root credential.
+	PhaseMoved Phase = "moved"
 	// PhasePivoted: management moved to the workload cluster and the
 	// bootstrap cluster is gone.
 	PhasePivoted Phase = "pivoted"
@@ -419,7 +429,11 @@ const (
 type PhaseError struct {
 	Phase     Phase
 	Bootstrap *Cluster
-	Err       error
+	// Result is what the run produced before it stopped once the cluster
+	// was reachable (endpoint, CA certificate, root credential), so a
+	// resumed run can connect to it; nil before that.
+	Result *ClusterResult
+	Err    error
 }
 
 func (e *PhaseError) Error() string { return fmt.Sprintf("%s (phase %s)", e.Err, e.Phase) }
@@ -736,6 +750,11 @@ type DeleteClusterOptions struct {
 	// (clusterctl delete --all, keeping CRDs and namespaces) once the cluster
 	// is gone. Meant for a management cluster this resource initialised.
 	UninstallProviders bool
+
+	// Checkpoint is the progress of an earlier, failed deletion of a
+	// self-managed cluster; the deletion records the move into it so the
+	// caller can persist it if this one fails too.
+	Checkpoint *DeleteCheckpoint
 }
 
 // Condition is one status condition of a Kubernetes object.

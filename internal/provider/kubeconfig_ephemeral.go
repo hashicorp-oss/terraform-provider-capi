@@ -76,7 +76,7 @@ func (e *KubeconfigEphemeralResource) Schema(_ context.Context, _ ephemeral.Sche
 				Optional:            true,
 			},
 			"ttl": schema.StringAttribute{
-				MarkdownDescription: "Validity of a derived client certificate, as a Go duration. Default `1h`.",
+				MarkdownDescription: "Validity of a derived client certificate, as a Go duration. Default `8h`. Make it outlast the longest run that uses it: Terraform configures a provider block once per run and cannot hand it a renewed certificate, so one that expires mid-apply fails every call after.",
 				Optional:            true,
 			},
 			"raw": schema.StringAttribute{
@@ -123,6 +123,10 @@ func (e *KubeconfigEphemeralResource) Configure(_ context.Context, req ephemeral
 	e.pd = pd
 }
 
+// defaultDerivedTTL is the default validity of a derived certificate: longer
+// than any apply the provider's own waits allow.
+const defaultDerivedTTL = 8 * time.Hour
+
 func (e *KubeconfigEphemeralResource) Open(ctx context.Context, req ephemeral.OpenRequest, resp *ephemeral.OpenResponse) {
 	var data KubeconfigEphemeralModel
 	resp.Diagnostics.Append(req.Config.Get(ctx, &data)...)
@@ -133,7 +137,7 @@ func (e *KubeconfigEphemeralResource) Open(ctx context.Context, req ephemeral.Op
 	if !data.Namespace.IsNull() && data.Namespace.ValueString() != "" {
 		namespace = data.Namespace.ValueString()
 	}
-	ttl := time.Hour
+	ttl := defaultDerivedTTL
 	if !data.TTL.IsNull() && data.TTL.ValueString() != "" {
 		d, err := time.ParseDuration(data.TTL.ValueString())
 		if err != nil {
@@ -157,14 +161,14 @@ func (e *KubeconfigEphemeralResource) Open(ctx context.Context, req ephemeral.Op
 			resp.Diagnostics.AddError("Missing endpoint", "endpoint is required to derive a kubeconfig from secrets: the cluster's API server URL (a capi_cluster's status.endpoint).")
 			return
 		}
+		// No RenewAt: Terraform would call Renew, but a renewed certificate
+		// cannot reach provider blocks already configured with this one, so
+		// the lifetime has to cover the run instead.
 		raw, err = capi.DeriveKubeconfig(root, data.Endpoint.ValueString(), data.Cluster.ValueString(), ttl, time.Now())
 		if err != nil {
 			resp.Diagnostics.AddError("Deriving kubeconfig", err.Error())
 			return
 		}
-		// Leave a margin so a run that started with a fresh certificate does
-		// not outlive it by a few seconds.
-		resp.RenewAt = time.Now().Add(ttl - 2*time.Minute)
 	case !data.Secrets.IsNull() && !data.Secrets.IsUnknown():
 		resp.Diagnostics.AddError("No root credential", "secrets is set but empty; pass a capi_cluster's provider_secrets, or unset it to read the kubeconfig from the management cluster.")
 		return

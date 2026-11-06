@@ -185,14 +185,34 @@ manifests: `internal/capi/testdata/golden/` (`UPDATE_GOLDEN=1 go test
   (`ManagementKubeconfig = ""`, `SelfManaged`, `KeepBootstrapOnFailure` when
   `on_failure = resume`).
 - **Phases** (`capi.Phase`): bootstrapping → initialized →
-  control_plane_initialized → paused → handed_over → pivoted → ready, reported
+  control_plane_initialized → paused → handed_over → moved → pivoted → ready, reported
   through `CreateClusterOptions.OnPhase` and carried by `*capi.PhaseError`
   (with the bootstrap cluster left in place). With `on_failure = resume` a
   failure saves `status.phase`/`status.error` with a warning; `ModifyPlan`
   marks `status` unknown for any non-terminal phase so the next apply re-runs
   the workflow (every step is check-before-act: kind reuses an existing
   cluster, Kairos reuses a node answering over SSH, init converges, objects
-  are server-side applied). `fail` returns the error (taint and replace).
+  are server-side applied). `fail` returns the error (taint and replace),
+  except after the move: from `moved` on a failure is always kept for the
+  resume, since a replace would provision the machines a second time.
+- **Private state** (`cluster_checkpoint.go`, `internal/capi/checkpoint.go`):
+  `status.phase` stays the visible summary (only a visible change plans the
+  resuming apply); key `create` holds a versioned `capi.Checkpoint`: steps
+  that must not run twice (`bootstrap_addons_removed`, `moved`,
+  `bootstrap_deleted`), the bootstrap record (type, name, and for kind the
+  host it runs on), the workload kubeconfig from the move until the root
+  credential is captured, attempts. The manager skips recorded steps; after
+  `moved` it resumes on the cluster itself (`resumeAfterMove` →
+  `finishPivot`), never on the bootstrap. `foreignKind` stops a resume,
+  refresh connection or destroy (in `ModifyPlan`, at plan time) that needs a
+  kind bootstrap living on another host. Key `delete` holds
+  `DeleteCheckpoint.MovedTo` after a failed reverse pivot; a lost bootstrap is
+  then an error, not a silent success. Private state is saved only when an
+  RPC returns (written on every path), never diffed, never readable by
+  other resources (so `provider_secrets` stays an attribute), and survives
+  state upgrades untouched (hence the `v` field). Unit tests use
+  `fakePrivate`; `TestClusterResource_ModifyPlan_DestroyNeedsTheBootstrapHost`
+  feeds real private bytes through the protocol server.
 - **Pivot** (`Manager.CreateCluster`, at most one DHCP responder at any step):
   bootstrap → providers + `bootstrap.addons` → inventory (bootstrap machine
   excluded) + `manifests.management` → cluster objects →
@@ -265,7 +285,14 @@ and nothing rolls), `output`/`status.kubeconfig` dropped, `wait.enabled` →
   `v1alpha1.tinkerbell.org/provisioned`; `adopted` = provisioned + PXE off.
 - **Provider**: `ClusterctlInstaller.Init` with `NoDefaults` (clusterctl's
   `-` provider for bootstrap/control-plane) so no kubeadm sneaks in; the core
-  is still added on a first init. Declare `core` and depend on it.
+  is still added on a first init. Declare `core` and depend on it. A provider
+  already installed at create (or imported) is adopted: private key
+  `adopted`, version still converged, destroy leaves it installed (warning in
+  `ModifyPlan`).
+- **Ephemeral `capi_kubeconfig`**: no `RenewAt` (the resource has no Renew,
+  and a renewed certificate cannot reach configured provider blocks); a
+  derived certificate defaults to 8h. `capi_cluster`'s own derived
+  kubeconfig lives for `wait.timeout` + 1h.
 - **Cluster class**: v1beta2 `templateRef` vs legacy `ref`; `variables` and
   `patches` are dynamic lists passed through.
 

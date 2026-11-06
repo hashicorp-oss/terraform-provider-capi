@@ -962,7 +962,11 @@ func setStatusWithFallback(ctx context.Context, data *ClusterResourceModel, resu
 
 // setPartialStatus records where a create stopped: the phase, the error and
 // the bootstrap cluster left in place.
-func setPartialStatus(ctx context.Context, data *ClusterResourceModel, pe *capi.PhaseError, prevStatus *StatusModel) diag.Diagnostics {
+// setPartialStatus records a failed create's phase and error, with what the
+// run learnt about reaching the cluster. bootstrapDeleted clears the
+// bootstrap name once it is gone: a Kairos node is a cluster member then and
+// must not be powered off as a bootstrap again.
+func setPartialStatus(ctx context.Context, data *ClusterResourceModel, pe *capi.PhaseError, prevStatus *StatusModel, bootstrapDeleted bool) diag.Diagnostics {
 	status := StatusModel{
 		Phase:            types.StringValue(string(pe.Phase)),
 		Error:            types.StringValue(pe.Err.Error()),
@@ -972,13 +976,19 @@ func setPartialStatus(ctx context.Context, data *ClusterResourceModel, pe *capi.
 		BootstrapCluster: types.StringNull(),
 		Conditions:       types.ListNull(types.ObjectType{AttrTypes: conditionAttrTypes()}),
 	}
-	if pe.Bootstrap != nil {
+	switch {
+	case bootstrapDeleted:
+	case pe.Bootstrap != nil:
 		status.BootstrapCluster = types.StringValue(pe.Bootstrap.Name)
-	} else if prevStatus != nil {
+	case prevStatus != nil:
 		status.BootstrapCluster = prevStatus.BootstrapCluster
 	}
 	if prevStatus != nil {
 		status.Endpoint, status.CACertificate = prevStatus.Endpoint, prevStatus.CACertificate
+	}
+	if pe.Result != nil && pe.Result.Endpoint != "" {
+		status.Endpoint = types.StringValue(pe.Result.Endpoint)
+		status.CACertificate = stringOrNull(pe.Result.CACertificate)
 	}
 	val, diags := types.ObjectValueFrom(ctx, statusAttrTypes(), status)
 	if diags.HasError() {

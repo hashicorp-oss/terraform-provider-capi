@@ -362,7 +362,7 @@ func TestSetPartialStatus(t *testing.T) {
 	ctx := context.Background()
 	data := &ClusterResourceModel{}
 	pe := &capi.PhaseError{Phase: capi.PhasePaused, Bootstrap: &capi.Cluster{Name: "test-bootstrap"}, Err: context.DeadlineExceeded}
-	if diags := setPartialStatus(ctx, data, pe, nil); diags.HasError() {
+	if diags := setPartialStatus(ctx, data, pe, nil, false); diags.HasError() {
 		t.Fatal(diags)
 	}
 	st := extractStatus(ctx, data)

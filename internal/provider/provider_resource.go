@@ -23,7 +23,24 @@ var (
 	_ resource.Resource                = &ProviderResource{}
 	_ resource.ResourceWithConfigure   = &ProviderResource{}
 	_ resource.ResourceWithImportState = &ProviderResource{}
+	_ resource.ResourceWithModifyPlan  = &ProviderResource{}
 )
+
+// privateKeyAdopted marks a provider that was already installed when the
+// resource took it over (at create or import). Destroying the resource
+// leaves such a provider installed: whatever installed it (clusterctl by
+// hand, the cluster-api-operator, another configuration) still relies on it.
+const privateKeyAdopted = "adopted"
+
+func providerAdopted(ctx context.Context, r privateReader) (bool, diag.Diagnostics) {
+	var adopted bool
+	diags := loadPrivateJSON(ctx, r, privateKeyAdopted, &adopted)
+	return adopted, diags
+}
+
+func markProviderAdopted(ctx context.Context, w privateWriter) diag.Diagnostics {
+	return w.SetKey(ctx, privateKeyAdopted, []byte("true"))
+}
 
 // providerInstaller is the clusterctl lifecycle the resource drives.
 type providerInstaller interface {
@@ -136,7 +153,7 @@ func (r *ProviderResource) Schema(_ context.Context, _ resource.SchemaRequest, r
 		attrs[name] = a
 	}
 	resp.Schema = schema.Schema{
-		MarkdownDescription: "One CAPI provider on the management cluster the provider block names, driven through the clusterctl lifecycle the way `aws_eks_addon` drives an addon: create is `clusterctl init` (converging: a provider installed at another version is upgraded first), a changed entry is `clusterctl upgrade apply` (a changed customization at the same version re-renders it), destroy is `clusterctl delete` keeping its CRDs. The customizations (`deployment`, `manager`, `patches`, ...) follow the cluster-api-operator provider CRDs without needing the operator. Declare the `core` provider explicitly and have the others depend on it; on a cluster's first init clusterctl adds the core itself when missing, and this resource asks it not to add the kubeadm providers. A provider also declared in a `capi_cluster`'s maps is managed twice; keep it in one place. Import with `type/name`.",
+		MarkdownDescription: "One CAPI provider on the management cluster the provider block names, driven through the clusterctl lifecycle the way `aws_eks_addon` drives an addon: create is `clusterctl init` (converging: a provider installed at another version is upgraded first), a changed entry is `clusterctl upgrade apply` (a changed customization at the same version re-renders it), destroy is `clusterctl delete` keeping its CRDs. A provider that was already installed when the resource was created, or that is imported, is adopted: the resource manages its version, but destroy leaves it installed for whatever installed it (a warning says so at plan time); the adoption is recorded in private state. The customizations (`deployment`, `manager`, `patches`, ...) follow the cluster-api-operator provider CRDs without needing the operator. Declare the `core` provider explicitly and have the others depend on it; on a cluster's first init clusterctl adds the core itself when missing, and this resource asks it not to add the kubeadm providers. A provider also declared in a `capi_cluster`'s maps is managed twice; keep it in one place. Import with `type/name`.",
 		Attributes:          attrs,
 	}
 }
@@ -236,23 +253,45 @@ func (r *ProviderResource) Create(ctx context.Context, req resource.CreateReques
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	set := capi.ProviderSet{}
-	set.Add(cfg)
-	if err := r.installer.Init(ctx, conn.Cluster, capi.InitOptions{Providers: set, Variables: vars, NoDefaults: true}); err != nil {
-		resp.Diagnostics.AddError("Installing provider", err.Error())
-		return
-	}
-	inst, err := r.installed(ctx, conn.Cluster, cfg.Type, cfg.Name)
-	if err != nil {
-		resp.Diagnostics.AddError("Reading provider inventory", err.Error())
-		return
-	}
-	if inst == nil {
-		resp.Diagnostics.AddError("Provider not installed", fmt.Sprintf("clusterctl init returned but the inventory has no %s provider %q.", cfg.Type, cfg.Name))
+	inst, d := r.install(ctx, conn.Cluster, cfg, vars, resp.Private)
+	resp.Diagnostics.Append(d...)
+	if resp.Diagnostics.HasError() {
 		return
 	}
 	resp.Diagnostics.Append(r.fill(ctx, &data, inst)...)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
+}
+
+// install runs clusterctl init for the provider and reads it back. A
+// provider that was already installed is adopted: init converges its
+// version, and the resource records that it did not install it.
+func (r *ProviderResource) install(ctx context.Context, cluster *capi.Cluster, cfg capi.ProviderConfig, vars map[string]string, w privateWriter) (*capi.InstalledProvider, diag.Diagnostics) {
+	var diags diag.Diagnostics
+	before, err := r.installed(ctx, cluster, cfg.Type, cfg.Name)
+	if err != nil {
+		diags.AddError("Reading provider inventory", err.Error())
+		return nil, diags
+	}
+	set := capi.ProviderSet{}
+	set.Add(cfg)
+	if err := r.installer.Init(ctx, cluster, capi.InitOptions{Providers: set, Variables: vars, NoDefaults: true}); err != nil {
+		diags.AddError("Installing provider", err.Error())
+		return nil, diags
+	}
+	inst, err := r.installed(ctx, cluster, cfg.Type, cfg.Name)
+	if err != nil {
+		diags.AddError("Reading provider inventory", err.Error())
+		return nil, diags
+	}
+	if inst == nil {
+		diags.AddError("Provider not installed", fmt.Sprintf("clusterctl init returned but the inventory has no %s provider %q.", cfg.Type, cfg.Name))
+		return nil, diags
+	}
+	if before != nil {
+		diags.Append(markProviderAdopted(ctx, w)...)
+		diags.AddWarning("Provider adopted", fmt.Sprintf("The %s provider %q was already installed (%s in %s) before this resource was created. The resource now manages its version, but destroying it leaves the provider installed, since something else installed it. Remove it with `clusterctl delete` once nothing else relies on it.", cfg.Type, cfg.Name, before.Version, before.Namespace))
+	}
+	return inst, diags
 }
 
 func (r *ProviderResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
@@ -326,6 +365,12 @@ func (r *ProviderResource) Delete(ctx context.Context, req resource.DeleteReques
 	if resp.Diagnostics.HasError() {
 		return
 	}
+	adopted, d := providerAdopted(ctx, req.Private)
+	resp.Diagnostics.Append(d...)
+	if adopted {
+		resp.Diagnostics.AddWarning("Provider left installed", fmt.Sprintf("The %s provider %q was installed before this resource adopted it, so it stays installed; only the resource is removed.", data.Type.ValueString(), data.Name.ValueString()))
+		return
+	}
 	conn, d := r.pd.managementOrDiag(ctx)
 	resp.Diagnostics.Append(d...)
 	cfg, _, d := r.config(ctx, &data)
@@ -333,19 +378,43 @@ func (r *ProviderResource) Delete(ctx context.Context, req resource.DeleteReques
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	inst, err := r.installed(ctx, conn.Cluster, cfg.Type, cfg.Name)
+	resp.Diagnostics.Append(r.uninstall(ctx, conn.Cluster, cfg)...)
+}
+
+// uninstall runs clusterctl delete for a provider the resource installed;
+// one already gone is not an error.
+func (r *ProviderResource) uninstall(ctx context.Context, cluster *capi.Cluster, cfg capi.ProviderConfig) diag.Diagnostics {
+	var diags diag.Diagnostics
+	inst, err := r.installed(ctx, cluster, cfg.Type, cfg.Name)
 	if err != nil {
-		resp.Diagnostics.AddError("Reading provider inventory", err.Error())
-		return
+		diags.AddError("Reading provider inventory", err.Error())
+		return diags
 	}
 	if inst == nil {
-		return
+		return diags
 	}
 	set := capi.ProviderSet{}
 	set.Add(cfg)
-	if err := r.installer.Uninstall(ctx, conn.Cluster, capi.UninstallOptions{Providers: set}); err != nil {
-		resp.Diagnostics.AddError("Deleting provider", err.Error())
+	if err := r.installer.Uninstall(ctx, cluster, capi.UninstallOptions{Providers: set}); err != nil {
+		diags.AddError("Deleting provider", err.Error())
 	}
+	return diags
+}
+
+// ModifyPlan says at plan time when destroying the resource will leave an
+// adopted provider installed.
+func (r *ProviderResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
+	if !req.Plan.Raw.IsNull() || req.State.Raw.IsNull() {
+		return
+	}
+	adopted, d := providerAdopted(ctx, req.Private)
+	resp.Diagnostics.Append(d...)
+	if !adopted {
+		return
+	}
+	var data ProviderResourceModel
+	resp.Diagnostics.Append(req.State.Get(ctx, &data)...)
+	resp.Diagnostics.AddWarning("Provider will be left installed", fmt.Sprintf("The %s provider %q was installed before this resource adopted it: destroying the resource removes it from state and leaves the provider installed.", data.Type.ValueString(), data.Name.ValueString()))
 }
 
 // ImportState takes `type/name`.
@@ -376,5 +445,7 @@ func (r *ProviderResource) ImportState(ctx context.Context, req resource.ImportS
 		ManifestPatches: types.ListNull(types.StringType), Patches: types.ListNull(types.ObjectType{AttrTypes: patchAttrTypes()}), Variables: types.MapNull(types.StringType),
 	}
 	resp.Diagnostics.Append(r.fill(ctx, &data, inst)...)
+	// An imported provider was installed by something else: destroy leaves it.
+	resp.Diagnostics.Append(markProviderAdopted(ctx, resp.Private)...)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 }

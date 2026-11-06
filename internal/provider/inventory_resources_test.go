@@ -363,3 +363,43 @@ func TestReadHardware_Legacy(t *testing.T) {
 		t.Errorf("sparse hardware = %+v", f)
 	}
 }
+
+// A provider installed before the resource existed is adopted: init
+// converges it, the resource records the adoption and warns, and the
+// deletion that follows leaves it installed. One the resource installed
+// itself is deleted as before.
+func TestProviderResource_Adoption(t *testing.T) {
+	ctx := context.Background()
+	cluster := &capi.Cluster{Name: "mgmt"}
+	cfg := capi.ProviderConfig{Type: capi.ProviderTypeInfrastructure, Name: "tinkerbell", Version: "v0.7.9"}
+
+	fake := &fakeInstaller{installed: []capi.InstalledProvider{{Name: "tinkerbell", Type: capi.ProviderTypeInfrastructure, Version: "v0.7.8", Namespace: "capt-system"}}}
+	r := &ProviderResource{installer: fake}
+	store := fakePrivate{}
+	inst, diags := r.install(ctx, cluster, cfg, nil, store)
+	if diags.HasError() || inst == nil {
+		t.Fatal(diags)
+	}
+	if adopted, _ := providerAdopted(ctx, store); !adopted {
+		t.Error("a provider that was already installed is recorded as adopted")
+	}
+	if len(diags.Warnings()) != 1 || !strings.Contains(diags.Warnings()[0].Detail(), "v0.7.8 in capt-system") {
+		t.Errorf("the adoption is announced: %v", diags)
+	}
+
+	fresh := &fakeInstaller{}
+	r = &ProviderResource{installer: fresh}
+	store = fakePrivate{}
+	if _, diags := r.install(ctx, cluster, cfg, nil, store); diags.HasError() || len(diags.Warnings()) != 0 {
+		t.Fatalf("diags = %v", diags)
+	}
+	if adopted, _ := providerAdopted(ctx, store); adopted {
+		t.Error("a provider the resource installed is its own")
+	}
+	if diags := r.uninstall(ctx, cluster, cfg); diags.HasError() || len(fresh.uninstalls) != 1 {
+		t.Errorf("the resource's own provider is deleted: %v %d", diags, len(fresh.uninstalls))
+	}
+	if diags := r.uninstall(ctx, cluster, cfg); diags.HasError() || len(fresh.uninstalls) != 1 {
+		t.Error("a provider already gone is not an error and not deleted twice")
+	}
+}

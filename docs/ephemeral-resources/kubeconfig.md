@@ -13,11 +13,11 @@ A workload cluster's kubeconfig for the life of a Terraform run, never written t
 ## Example Usage
 
 ```terraform
-# A short-lived kubeconfig for the workload cluster, never written to state.
+# A kubeconfig for a workload cluster, never written to state: read from its
+# <cluster>-kubeconfig Secret on the management cluster.
 ephemeral "capi_kubeconfig" "prod" {
   cluster   = capi_cluster.prod.name
   namespace = "capi"
-  ttl       = "1h"
 }
 
 provider "kubernetes" {
@@ -26,6 +26,21 @@ provider "kubernetes" {
   cluster_ca_certificate = ephemeral.capi_kubeconfig.prod.cluster_ca_certificate
   client_certificate     = ephemeral.capi_kubeconfig.prod.client_certificate
   client_key             = ephemeral.capi_kubeconfig.prod.client_key
+}
+
+# A self-managed cluster, reached through a certificate derived from its root
+# credential. The certificate must outlast the run: a provider block is
+# configured once and cannot be handed a renewed one.
+ephemeral "capi_kubeconfig" "self" {
+  cluster  = capi_cluster.mgmt.name
+  secrets  = capi_cluster.mgmt.provider_secrets
+  endpoint = capi_cluster.mgmt.status.endpoint
+  ttl      = "8h"
+}
+
+provider "capi" {
+  alias      = "self"
+  kubeconfig = ephemeral.capi_kubeconfig.self.raw
 }
 ```
 
@@ -41,7 +56,7 @@ provider "kubernetes" {
 - `endpoint` (String) API server URL the derived kubeconfig points at, e.g. `https://10.0.0.160:6443`. Required with `secrets`; a `capi_cluster`'s `status.endpoint`.
 - `namespace` (String) Namespace of the Cluster object on the management cluster. Default `default`.
 - `secrets` (Dynamic, Sensitive) A `capi_cluster`'s `provider_secrets`: the Talos machine-secrets bundle or the kubeadm CA of a self-managed cluster. When set, the kubeconfig is derived from it and nothing is read from a management cluster.
-- `ttl` (String) Validity of a derived client certificate, as a Go duration. Default `1h`.
+- `ttl` (String) Validity of a derived client certificate, as a Go duration. Default `8h`. Make it outlast the longest run that uses it: Terraform configures a provider block once per run and cannot hand it a renewed certificate, so one that expires mid-apply fails every call after.
 
 ### Read-Only
 

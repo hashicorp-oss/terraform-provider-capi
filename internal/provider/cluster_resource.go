@@ -62,17 +62,16 @@ func (r *ClusterResource) Metadata(ctx context.Context, req resource.MetadataReq
 
 // Defaults the schema applies.
 const (
-	defaultWaitTimeout       = "60m"
-	defaultWaitCondition     = "Available"
-	onFailureResume          = "resume"
-	onFailureFail            = "fail"
-	defaultDerivedCredential = time.Hour
+	defaultWaitTimeout   = "60m"
+	defaultWaitCondition = "Available"
+	onFailureResume      = "resume"
+	onFailureFail        = "fail"
 )
 
 func (r *ClusterResource) Schema(ctx context.Context, req resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
 		Version:             5,
-		MarkdownDescription: "A Cluster API cluster, the way `aws_eks_cluster` is an EKS cluster: identity, version, network, the control plane, and, for a cluster that manages itself, the create-only bootstrap that stands it up. On the management cluster the provider block names, create applies the `Cluster`, the `<Infra>Cluster` and the `<CP>ControlPlane` (or a `Cluster` with a topology on `class`) and waits. With `management.self_managed`, create runs the pivot: a bootstrap cluster (kind on the runner, or a disposable Kairos live node), `management.providers`, the seed `inventory` and `manifests.management`, the first control plane, the Tinkerbell handover, `clusterctl move`, and the bootstrap's teardown; progress is recorded in `status.phase` and a failed run resumes from it. Node groups are `capi_machine_deployment`, templates `capi_machine_template`, addons `capi_helm_chart_proxy` and `capi_cluster_resource_set`, machines `capi_hardware`. Import with `[namespace/]name`.",
+		MarkdownDescription: "A Cluster API cluster, the way `aws_eks_cluster` is an EKS cluster: identity, version, network, the control plane, and, for a cluster that manages itself, the create-only bootstrap that stands it up. On the management cluster the provider block names, create applies the `Cluster`, the `<Infra>Cluster` and the `<CP>ControlPlane` (or a `Cluster` with a topology on `class`) and waits. With `management.self_managed`, create runs the pivot: a bootstrap cluster (kind on the runner, or a disposable Kairos live node), `management.providers`, the seed `inventory` and `manifests.management`, the first control plane, the Tinkerbell handover, `clusterctl move`, and the bootstrap's teardown; progress is recorded in `status.phase` (and, in finer detail, in private state) and a failed run resumes from it, skipping what must not run twice. Node groups are `capi_machine_deployment`, templates `capi_machine_template`, addons `capi_helm_chart_proxy` and `capi_cluster_resource_set`, machines `capi_hardware`. Import with `[namespace/]name`.",
 
 		Attributes: map[string]schema.Attribute{
 			"name": schema.StringAttribute{
@@ -251,7 +250,7 @@ func (r *ClusterResource) Schema(ctx context.Context, req resource.SchemaRequest
 								Optional:            true,
 							},
 							"on_failure": schema.StringAttribute{
-								MarkdownDescription: "What a failed create does. `resume` (default): the resource is saved with the phase reached in `status.phase` and the error in `status.error`, nothing is torn down, and the next apply continues from there; `destroy` tears everything down at any phase. `fail`: the apply fails, Terraform taints the resource, and the next apply replaces it (destroy, then create from scratch). `resume` is for an operator at the keyboard with hardware that takes long to come up; `fail` is for CI.",
+								MarkdownDescription: "What a failed create does. `resume` (default): the resource is saved with the phase reached in `status.phase` and the error in `status.error`, nothing is torn down, and the next apply continues from there; `destroy` tears everything down at any phase. `fail`: the apply fails, Terraform taints the resource, and the next apply replaces it (destroy, then create from scratch). `resume` is for an operator at the keyboard with hardware that takes long to come up; `fail` is for CI. Once CAPI management has moved to the cluster, a failure is always kept for the resume whatever this says: replacing the cluster then would provision its machines a second time. A resume or destroy that needs a kind bootstrap cluster stops at plan time when run on another machine than the one it lives on.",
 								Optional:            true,
 								Computed:            true,
 								Default:             stringdefault.StaticString(onFailureResume),
@@ -436,7 +435,7 @@ func (r *ClusterResource) Schema(ctx context.Context, req resource.SchemaRequest
 				MarkdownDescription: "Computed cluster status.",
 				Computed:            true,
 				Attributes: map[string]schema.Attribute{
-					"phase":             schema.StringAttribute{Computed: true, MarkdownDescription: "How far the create workflow came: `bootstrapping`, `initialized`, `control_plane_initialized`, `paused`, `handed_over`, `pivoted`, `ready`. Anything but `ready` is resumed by the next apply."},
+					"phase":             schema.StringAttribute{Computed: true, MarkdownDescription: "How far the create workflow came: `bootstrapping`, `initialized`, `control_plane_initialized`, `paused`, `handed_over`, `moved` (the cluster holds its own CAPI objects; the bootstrap is still to be torn down), `pivoted`, `ready`. Anything but `ready` is resumed by the next apply. The finer progress a resume needs (which steps must not run twice, the bootstrap cluster's identity and the machine a kind bootstrap runs on, a kubeconfig for the cluster until its root credential is captured) is kept in the resource's private state, never shown in plans."},
 					"error":             schema.StringAttribute{Computed: true, MarkdownDescription: "The error that stopped the last create, when `status.phase` is not `ready`."},
 					"endpoint":          schema.StringAttribute{Computed: true, MarkdownDescription: "API server URL."},
 					"ca_certificate":    schema.StringAttribute{Computed: true, Sensitive: true, MarkdownDescription: "CA certificate (PEM)."},
@@ -825,25 +824,66 @@ func (r *ClusterResource) ValidateConfig(ctx context.Context, req resource.Valid
 	}
 }
 
-// ModifyPlan refuses the class/direct switch and turns a create that did
-// not finish into a planned update, so the next apply resumes it.
+// ModifyPlan refuses the class/direct switch, turns a create that did not
+// finish into a planned update so the next apply resumes it, and stops a
+// plan at once when the run would need a kind bootstrap cluster that lives
+// on another machine (resume or destroy alike).
 func (r *ClusterResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
-	if req.State.Raw.IsNull() || req.Plan.Raw.IsNull() {
+	if req.State.Raw.IsNull() {
 		return
 	}
-	var plan, state ClusterResourceModel
-	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
+	var state ClusterResourceModel
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
+	cp, d := loadCheckpoint(ctx, req.Private)
+	resp.Diagnostics.Append(d...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	mgmt, _ := extractManagement(ctx, &state)
+	selfManaged := mgmt != nil && mgmt.SelfManaged.ValueBool()
+	status := extractStatus(ctx, &state)
+	name := state.Name.ValueString()
+
+	if req.Plan.Raw.IsNull() {
+		// Destroy: an unfinished create is torn down through its bootstrap
+		// cluster, an interrupted deletion continues on the one it moved to.
+		if !selfManaged {
+			return
+		}
+		if !onItself(status, cp) {
+			if err := foreignKind(cp.Bootstrap, fmt.Sprintf("The unfinished create of cluster %s", name)); err != nil {
+				resp.Diagnostics.AddError("Bootstrap cluster on another machine", err.Error())
+			}
+			return
+		}
+		dcp, d := loadDeleteCheckpoint(ctx, req.Private)
+		resp.Diagnostics.Append(d...)
+		if err := foreignKind(dcp.MovedTo, fmt.Sprintf("The interrupted deletion of cluster %s", name)); err != nil {
+			resp.Diagnostics.AddError("Bootstrap cluster on another machine", err.Error())
+		}
+		return
+	}
+
+	var plan ClusterResourceModel
+	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
 	if plan.Class.IsNull() != state.Class.IsNull() && !plan.Class.IsUnknown() {
 		resp.RequiresReplace = append(resp.RequiresReplace, path.Root("class"))
 	}
-	status := extractStatus(ctx, &state)
 	if status != nil && !status.Phase.IsNull() && status.Phase.ValueString() != string(capi.PhaseReady) {
-		resp.Diagnostics.AddWarning("Resuming cluster creation", fmt.Sprintf("The last create of cluster %s stopped at phase %s: %s. This apply continues from there.", state.Name.ValueString(), status.Phase.ValueString(), status.Error.ValueString()))
+		where := "This apply continues from there."
+		if cp.Done(capi.StepMoved) && !pivotComplete(status) {
+			where = "Management already moved to the cluster; this apply continues there."
+		}
+		resp.Diagnostics.AddWarning("Resuming cluster creation", fmt.Sprintf("The last create of cluster %s stopped at phase %s: %s.%s %s", name, status.Phase.ValueString(), status.Error.ValueString(), resumeSummary(cp, time.Now()), where))
 		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("status"), types.ObjectUnknown(statusAttrTypes()))...)
+		if selfManaged && !onItself(status, cp) {
+			if err := foreignKind(cp.Bootstrap, fmt.Sprintf("The unfinished create of cluster %s", name)); err != nil {
+				resp.Diagnostics.AddError("Bootstrap cluster on another machine", err.Error())
+			}
+		}
 	}
 }
 
@@ -869,10 +909,12 @@ func (r *ClusterResource) Create(ctx context.Context, req resource.CreateRequest
 	// a node it already owns.
 	seedSecrets, d := providerSecretsFromDynamic(ctx, data.ProviderSecrets)
 	resp.Diagnostics.Append(d...)
-	r.run(ctx, &data, nil, seedSecrets, &resp.Diagnostics)
+	cp := &capi.Checkpoint{}
+	r.run(ctx, &data, nil, seedSecrets, cp, &resp.Diagnostics)
 	if resp.Diagnostics.HasError() {
 		return
 	}
+	resp.Diagnostics.Append(saveCheckpoint(ctx, resp.Private, keptCheckpoint(cp))...)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 }
 
@@ -892,7 +934,15 @@ func (r *ClusterResource) Update(ctx context.Context, req resource.UpdateRequest
 
 	seedSecrets, d := providerSecretsFromDynamic(ctx, state.ProviderSecrets)
 	resp.Diagnostics.Append(d...)
-	r.run(ctx, &plan, &state, seedSecrets, &resp.Diagnostics)
+	cp, d := loadCheckpoint(ctx, req.Private)
+	resp.Diagnostics.Append(d...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	r.run(ctx, &plan, &state, seedSecrets, cp, &resp.Diagnostics)
+	// Recorded whatever the outcome: a failed run's progress is what the
+	// next one resumes from.
+	resp.Diagnostics.Append(saveCheckpoint(ctx, resp.Private, keptCheckpoint(cp))...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
@@ -907,7 +957,7 @@ func (r *ClusterResource) Update(ctx context.Context, req resource.UpdateRequest
 // bootstrap cluster for a self-managed one that has not pivoted yet
 // (a fresh create, or one being resumed); against the cluster itself once
 // it has. state is nil on create.
-func (r *ClusterResource) run(ctx context.Context, data, state *ClusterResourceModel, seedSecrets map[string]string, diags *diag.Diagnostics) {
+func (r *ClusterResource) run(ctx context.Context, data, state *ClusterResourceModel, seedSecrets map[string]string, cp *capi.Checkpoint, diags *diag.Diagnostics) {
 	opts, d := buildCreateOptions(ctx, data)
 	diags.Append(d...)
 	if diags.HasError() {
@@ -921,9 +971,16 @@ func (r *ClusterResource) run(ctx context.Context, data, state *ClusterResourceM
 	if state != nil {
 		prevStatus = extractStatus(ctx, state)
 	}
-	pivoted := prevStatus != nil && !prevStatus.Phase.IsNull() && prevStatus.Phase.ValueString() == string(capi.PhaseReady)
-	resuming := state != nil && !pivoted
+	// complete: the cluster manages itself (or never pivots); a resume
+	// that only has the pivot's tail left goes through the manager, which
+	// finishes it on the cluster.
+	complete := state != nil && pivotComplete(prevStatus)
+	resuming := state != nil && !complete
 	onFailure := bootstrapOnFailure(ctx, data)
+	bootstrapKind := bootstrapType(ctx, data)
+	if bootstrapKind == "" {
+		bootstrapKind = "kind" // management.bootstrap left out
+	}
 
 	var cleanup func()
 	switch {
@@ -938,10 +995,10 @@ func (r *ClusterResource) run(ctx context.Context, data, state *ClusterResourceM
 		opts.ManagementKubeconfig = conn.KubeconfigPath
 		opts.SkipInit = true
 		opts.SelfManaged = false
-	case pivoted:
+	case complete:
 		// The cluster manages itself: reach it through the credential the
 		// pivot captured, and converge its providers on management.providers.
-		kubeconfig, done, err := r.derivedKubeconfig(ctx, state)
+		kubeconfig, done, err := r.selfKubeconfig(ctx, state, cp)
 		if err != nil {
 			diags.AddError("Cluster connection", err.Error())
 			return
@@ -956,10 +1013,26 @@ func (r *ClusterResource) run(ctx context.Context, data, state *ClusterResourceM
 		opts.SkipInit = !added && len(upgrade) == 0 && removed.Empty()
 	default:
 		// A fresh self-managed create, or one resumed from the bootstrap
-		// cluster the last run left in place: every step is check-before-act.
+		// cluster the last run left in place (or, after the move, from the
+		// cluster itself): the manager skips what the checkpoint records.
+		what := fmt.Sprintf("The unfinished create of cluster %s", data.Name.ValueString())
+		if err := foreignKind(cp.Bootstrap, what); err != nil {
+			if !cp.Done(capi.StepMoved) {
+				diags.AddError("Bootstrap cluster on another machine", err.Error())
+				return
+			}
+			// After the move the bootstrap holds nothing: finish here and
+			// leave the kind cluster to the machine it runs on.
+			if !cp.Done(capi.StepBootstrapDeleted) {
+				cp.Mark(capi.StepBootstrapDeleted)
+				diags.AddWarning("Bootstrap cluster left behind", fmt.Sprintf("Kind cluster %s on host %s holds nothing since the move and is not deleted from here; delete it there with `kind delete cluster --name %s`.", cp.Bootstrap.Name, cp.Bootstrap.Host, cp.Bootstrap.Name))
+			}
+		}
 		opts.ManagementKubeconfig = ""
 		opts.SelfManaged = true
 		opts.KeepBootstrapOnFailure = onFailure == onFailureResume
+		opts.Checkpoint = cp
+		startAttempt(cp, time.Now())
 	}
 	if cleanup != nil {
 		defer cleanup()
@@ -974,16 +1047,31 @@ func (r *ClusterResource) run(ctx context.Context, data, state *ClusterResourceM
 		return
 	}
 	result, err := mgr.CreateCluster(ctx, *opts)
+	if opts.Checkpoint != nil {
+		stampBootstrap(cp, bootstrapKind)
+	}
 	if err != nil {
 		var pe *capi.PhaseError
-		if selfManaged && !pivoted && onFailure == onFailureResume && errors.As(err, &pe) {
+		moved := cp.Done(capi.StepMoved)
+		// Once management moved, a failure is always kept for the resume:
+		// replacing the resource would provision the machines a second time
+		// while the cluster already manages them.
+		if selfManaged && !complete && (onFailure == onFailureResume || moved) && errors.As(err, &pe) {
+			cp.LastError = pe.Err.Error()
 			// Keep what exists: the phase, the error and the bootstrap
 			// cluster, so the next apply continues from here.
 			data.Id = types.StringValue(data.Name.ValueString())
 			r.ensureManagementComputed(ctx, data)
 			r.ensureWaitComputed(ctx, data)
-			diags.Append(setPartialStatus(ctx, data, pe, prevStatus)...)
-			if data.ProviderSecrets.IsUnknown() {
+			diags.Append(setPartialStatus(ctx, data, pe, prevStatus, cp.Done(capi.StepBootstrapDeleted))...)
+			switch {
+			case pe.Result != nil && len(pe.Result.ProviderSecrets) > 0:
+				secretsVal, sd := providerSecretsToDynamic(ctx, pe.Result.ProviderSecrets)
+				diags.Append(sd...)
+				data.ProviderSecrets = secretsVal
+			case state != nil && !state.ProviderSecrets.IsUnknown():
+				data.ProviderSecrets = state.ProviderSecrets
+			case data.ProviderSecrets.IsUnknown():
 				data.ProviderSecrets = types.DynamicNull()
 			}
 			verb := "create"
@@ -991,10 +1079,24 @@ func (r *ClusterResource) run(ctx context.Context, data, state *ClusterResourceM
 				verb = "resume"
 			}
 			diags.AddWarning("Cluster creation incomplete", fmt.Sprintf("Cluster %s stopped at phase %s during %s: %s. Nothing was torn down; the next apply resumes from this phase, and destroy tears down what exists.", data.Name.ValueString(), pe.Phase, verb, pe.Err))
+			if onFailure != onFailureResume {
+				diags.AddWarning("Failure kept for resume", fmt.Sprintf("management.bootstrap.on_failure is %q, but CAPI management of cluster %s already moved to the cluster itself: the failure is recorded for the next apply to resume instead of replacing the cluster, which would provision its machines a second time.", onFailure, data.Name.ValueString()))
+			}
 			return
 		}
+		cp.LastError = err.Error()
 		diags.AddError("Cluster Creation Error", fmt.Sprintf("Failed to create cluster: %s", err))
 		return
+	}
+	if selfManaged {
+		// Finished: drop the progress. Keep the kubeconfig the move recorded
+		// only for a cluster whose providers keep no root credential, as its
+		// one way back in.
+		keep := ""
+		if len(result.ProviderSecrets) == 0 && (state == nil || state.ProviderSecrets.IsNull() || state.ProviderSecrets.IsUnknown()) {
+			keep = cp.WorkloadKubeconfig
+		}
+		*cp = capi.Checkpoint{WorkloadKubeconfig: keep}
 	}
 
 	data.Id = types.StringValue(data.Name.ValueString())
@@ -1027,7 +1129,12 @@ func (r *ClusterResource) Read(ctx context.Context, req resource.ReadRequest, re
 		return
 	}
 
-	kubeconfig, cleanup, err := r.managementKubeconfig(ctx, &data)
+	cp, d := loadCheckpoint(ctx, req.Private)
+	resp.Diagnostics.Append(d...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	kubeconfig, cleanup, err := r.managementKubeconfig(ctx, &data, cp)
 	if cleanup != nil {
 		defer cleanup()
 	}
@@ -1074,13 +1181,17 @@ func (r *ClusterResource) Delete(ctx context.Context, req resource.DeleteRequest
 		return
 	}
 
+	cp, d := loadCheckpoint(ctx, req.Private)
+	resp.Diagnostics.Append(d...)
+	dcp, d := loadDeleteCheckpoint(ctx, req.Private)
+	resp.Diagnostics.Append(d...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
 	mgmt, _ := extractManagement(ctx, &data)
 	selfManaged := mgmt != nil && mgmt.SelfManaged.ValueBool()
 	status := extractStatus(ctx, &data)
-	phase := capi.PhaseReady
-	if status != nil && !status.Phase.IsNull() && status.Phase.ValueString() != "" {
-		phase = capi.Phase(status.Phase.ValueString())
-	}
 	bootstrapName := ""
 	if status != nil && !status.BootstrapCluster.IsNull() {
 		bootstrapName = status.BootstrapCluster.ValueString()
@@ -1104,11 +1215,16 @@ func (r *ClusterResource) Delete(ctx context.Context, req resource.DeleteRequest
 	deleteOpts.Spec = *spec
 	deleteOpts.Wait = spec.Wait
 
-	// A create that never pivoted: whatever exists is on the bootstrap
-	// cluster. A kind cluster is reachable and deleted through; a Kairos
-	// node is powered off, which takes its objects with it.
-	if selfManaged && phase != capi.PhaseReady && phase != capi.PhasePivoted {
+	// A create that never moved management: whatever exists is on the
+	// bootstrap cluster. A kind cluster is reachable and deleted through
+	// (from the machine it runs on); a Kairos node is powered off, which
+	// takes its objects with it.
+	if selfManaged && !onItself(status, cp) {
 		if bootstrapName == "" {
+			return
+		}
+		if err := foreignKind(cp.Bootstrap, fmt.Sprintf("The unfinished create of cluster %s", data.Name.ValueString())); err != nil {
+			resp.Diagnostics.AddError("Bootstrap cluster on another machine", err.Error())
 			return
 		}
 		if bootstrapType(ctx, &data) == "kairos" {
@@ -1130,7 +1246,13 @@ func (r *ClusterResource) Delete(ctx context.Context, req resource.DeleteRequest
 		return
 	}
 
-	kubeconfig, cleanup, err := r.managementKubeconfig(ctx, &data)
+	if selfManaged {
+		if err := foreignKind(dcp.MovedTo, fmt.Sprintf("The interrupted deletion of cluster %s", data.Name.ValueString())); err != nil {
+			resp.Diagnostics.AddError("Bootstrap cluster on another machine", err.Error())
+			return
+		}
+	}
+	kubeconfig, cleanup, err := r.managementKubeconfig(ctx, &data, cp)
 	if cleanup != nil {
 		defer cleanup()
 	}
@@ -1140,11 +1262,12 @@ func (r *ClusterResource) Delete(ctx context.Context, req resource.DeleteRequest
 	}
 	deleteOpts.ManagementKubeconfig = kubeconfig
 	deleteOpts.SelfManaged = selfManaged
+	deleteOpts.Checkpoint = dcp
 
 	// The default manager runs kind bootstrap clusters: it deletes a plain
 	// cluster and reverse-pivots a self-managed one.
 	mgr := r.manager
-	if selfManaged && bootstrapType(ctx, &data) == "kairos" && bootstrapName != "" {
+	if selfManaged && bootstrapType(ctx, &data) == "kairos" && bootstrapName != "" && !cp.Done(capi.StepBootstrapDeleted) {
 		// A disposable node is powered off right after the pivot. When that
 		// failed, status.bootstrap_cluster is still set: power it off now
 		// through the Kairos bootstrapper, before the reverse pivot.
@@ -1159,7 +1282,13 @@ func (r *ClusterResource) Delete(ctx context.Context, req resource.DeleteRequest
 	if err := mgr.DeleteCluster(ctx, deleteOpts); err != nil {
 		// A deletion that did not finish keeps the resource: the user fixes
 		// the cause and destroys again. A plain error, not a warning, or
-		// Terraform would forget machines that are still provisioned.
+		// Terraform would forget machines that are still provisioned. Where
+		// the objects went is recorded so the next destroy finds them (the
+		// reverse pivot always runs a kind bootstrap on this machine).
+		if dcp.MovedTo != nil && dcp.MovedTo.Type == "" {
+			dcp.MovedTo.Type, dcp.MovedTo.Host = "kind", runnerHost()
+		}
+		resp.Diagnostics.Append(saveDeleteCheckpoint(ctx, resp.Private, dcp)...)
 		resp.Diagnostics.AddError("Cluster Deletion Error", fmt.Sprintf("Failed to delete cluster: %s", err))
 	}
 }
@@ -1198,7 +1327,7 @@ func (r *ClusterResource) ImportState(ctx context.Context, req resource.ImportSt
 // create is under way, or the cluster itself once it manages itself, reached
 // through a credential derived from provider_secrets. The cleanup, when set,
 // removes the derived kubeconfig file.
-func (r *ClusterResource) managementKubeconfig(ctx context.Context, data *ClusterResourceModel) (string, func(), error) {
+func (r *ClusterResource) managementKubeconfig(ctx context.Context, data *ClusterResourceModel, cp *capi.Checkpoint) (string, func(), error) {
 	mgmt, _ := extractManagement(ctx, data)
 	if mgmt == nil || !mgmt.SelfManaged.ValueBool() {
 		conn, err := r.pd.management(ctx)
@@ -1208,11 +1337,35 @@ func (r *ClusterResource) managementKubeconfig(ctx context.Context, data *Cluste
 		return conn.KubeconfigPath, nil, nil
 	}
 	status := extractStatus(ctx, data)
-	if status != nil && !status.Phase.IsNull() && status.Phase.ValueString() != string(capi.PhaseReady) && status.Phase.ValueString() != string(capi.PhasePivoted) {
+	if !onItself(status, cp) {
 		if status.BootstrapCluster.IsNull() || bootstrapType(ctx, data) == "kairos" {
 			return "", nil, fmt.Errorf("cluster %s has not pivoted yet (phase %s); its objects are on the bootstrap cluster", data.Name.ValueString(), status.Phase.ValueString())
 		}
+		if err := foreignKind(cp.Bootstrap, fmt.Sprintf("The unfinished create of cluster %s", data.Name.ValueString())); err != nil {
+			return "", nil, err
+		}
 		return kindKubeconfigPath(status.BootstrapCluster.ValueString()), nil, nil
+	}
+	return r.selfKubeconfig(ctx, data, cp)
+}
+
+// selfKubeconfig reaches a cluster that manages itself: through a kubeconfig
+// derived from provider_secrets, or else through the one the move recorded
+// in the checkpoint (until the root credential is captured, and for clusters
+// whose providers keep none).
+func (r *ClusterResource) selfKubeconfig(ctx context.Context, data *ClusterResourceModel, cp *capi.Checkpoint) (string, func(), error) {
+	secrets, d := providerSecretsFromDynamic(ctx, data.ProviderSecrets)
+	if (d.HasError() || len(secrets) == 0) && cp != nil && cp.WorkloadKubeconfig != "" {
+		dir, err := os.MkdirTemp("", "capi-tf-"+data.Name.ValueString()+"-")
+		if err != nil {
+			return "", nil, err
+		}
+		p := filepath.Join(dir, "kubeconfig")
+		if err := os.WriteFile(p, []byte(cp.WorkloadKubeconfig), 0o600); err != nil {
+			_ = os.RemoveAll(dir)
+			return "", nil, err
+		}
+		return p, func() { _ = os.RemoveAll(dir) }, nil
 	}
 	return r.derivedKubeconfig(ctx, data)
 }
@@ -1236,7 +1389,7 @@ func (r *ClusterResource) derivedKubeconfig(ctx context.Context, data *ClusterRe
 	if err != nil {
 		return "", nil, err
 	}
-	raw, err := capi.DeriveKubeconfig(root, endpoint, data.Name.ValueString(), defaultDerivedCredential, time.Now())
+	raw, err := capi.DeriveKubeconfig(root, endpoint, data.Name.ValueString(), derivedCredentialTTL(ctx, data), time.Now())
 	if err != nil {
 		return "", nil, err
 	}
