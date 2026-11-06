@@ -73,14 +73,25 @@ func TestInstaller_OrderAndInstallVsUpgrade(t *testing.T) {
 	err := inst.Install(context.Background(), testCluster, capi.AddonSet{
 		Helm: []capi.HelmRelease{
 			{Name: "cilium", Namespace: "kube-system", Chart: "oci://quay.io/cilium/charts/cilium"},
-			{Name: "metrics", Namespace: "monitoring", Chart: "metrics-server", Repository: "https://charts.example"},
+			{
+				Name:       "metrics",
+				Namespace:  "monitoring",
+				Chart:      "metrics-server",
+				Repository: "https://charts.example",
+			},
 		},
-		Manifests: []string{"apiVersion: v1\nkind: Namespace\nmetadata:\n  name: a\n", "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: b\n"},
+		Manifests: []string{
+			"apiVersion: v1\nkind: Namespace\nmetadata:\n  name: a\n",
+			"apiVersion: v1\nkind: Namespace\nmetadata:\n  name: b\n",
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.Join(helm.calls, ","); got != "upgrade:kube-system/cilium,install:monitoring/metrics" {
+	if got := strings.Join(
+		helm.calls,
+		",",
+	); got != "upgrade:kube-system/cilium,install:monitoring/metrics" {
 		t.Fatalf("helm calls = %q", got)
 	}
 	if len(applier.manifests) != 2 || !strings.Contains(applier.manifests[1], "name: b") {
@@ -91,7 +102,13 @@ func TestInstaller_OrderAndInstallVsUpgrade(t *testing.T) {
 func TestInstaller_HelmFailureWrapsErrInstall(t *testing.T) {
 	helm := &fakeHelm{existing: map[string]bool{}, failOn: "cilium"}
 	inst := New(helm, &fakeApplier{}, nil)
-	err := inst.Install(context.Background(), testCluster, capi.AddonSet{Helm: []capi.HelmRelease{{Name: "cilium", Namespace: "kube-system", Chart: "x"}}})
+	err := inst.Install(
+		context.Background(),
+		testCluster,
+		capi.AddonSet{
+			Helm: []capi.HelmRelease{{Name: "cilium", Namespace: "kube-system", Chart: "x"}},
+		},
+	)
 	if !errors.Is(err, ErrInstall) {
 		t.Fatalf("error = %v, want ErrInstall", err)
 	}
@@ -101,8 +118,16 @@ func TestInstaller_HelmFailureWrapsErrInstall(t *testing.T) {
 }
 
 func TestInstaller_ManifestFailureWrapsErrInstall(t *testing.T) {
-	inst := New(&fakeHelm{existing: map[string]bool{}}, &fakeApplier{err: errors.New("apply failed")}, nil)
-	err := inst.Install(context.Background(), testCluster, capi.AddonSet{Manifests: []string{"kind: X"}})
+	inst := New(
+		&fakeHelm{existing: map[string]bool{}},
+		&fakeApplier{err: errors.New("apply failed")},
+		nil,
+	)
+	err := inst.Install(
+		context.Background(),
+		testCluster,
+		capi.AddonSet{Manifests: []string{"kind: X"}},
+	)
 	if !errors.Is(err, ErrInstall) {
 		t.Fatalf("error = %v, want ErrInstall", err)
 	}
@@ -116,12 +141,16 @@ func TestInstaller_PreHelmManifestsAppliedBeforeHelm(t *testing.T) {
 	fetched := ""
 	inst.httpGet = func(_ context.Context, url string) ([]byte, error) {
 		fetched = url
-		return []byte("apiVersion: apiextensions.k8s.io/v1\nkind: CustomResourceDefinition\nmetadata:\n  name: gatewayclasses.gateway.networking.k8s.io\n"), nil
+		return []byte(
+			"apiVersion: apiextensions.k8s.io/v1\nkind: CustomResourceDefinition\nmetadata:\n  name: gatewayclasses.gateway.networking.k8s.io\n",
+		), nil
 	}
 
 	err := inst.Install(context.Background(), testCluster, capi.AddonSet{
 		PreHelmManifestURLs: []string{"https://example.test/standard-install.yaml"},
-		Helm:                []capi.HelmRelease{{Name: "cilium", Namespace: "kube-system", Chart: "oci://quay.io/cilium/charts/cilium"}},
+		Helm: []capi.HelmRelease{
+			{Name: "cilium", Namespace: "kube-system", Chart: "oci://quay.io/cilium/charts/cilium"},
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -142,8 +171,14 @@ func TestInstaller_PrerequisitesThenHelmThenManifests(t *testing.T) {
 
 	err := inst.Install(context.Background(), testCluster, capi.AddonSet{
 		Prerequisites: []string{"kind: CiliumLoadBalancerIPPool"},
-		Helm:          []capi.HelmRelease{{Name: "tinkerbell", Namespace: "tinkerbell", Chart: "oci://ghcr.io/tinkerbell/charts/tinkerbell"}},
-		Manifests:     []string{"kind: Namespace"},
+		Helm: []capi.HelmRelease{
+			{
+				Name:      "tinkerbell",
+				Namespace: "tinkerbell",
+				Chart:     "oci://ghcr.io/tinkerbell/charts/tinkerbell",
+			},
+		},
+		Manifests: []string{"kind: Namespace"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -157,7 +192,11 @@ func TestInstaller_PrerequisitesThenHelmThenManifests(t *testing.T) {
 func TestInstaller_PreHelmFetchErrorWrapsErrInstall(t *testing.T) {
 	inst := New(&fakeHelm{existing: map[string]bool{}}, &fakeApplier{}, nil)
 	inst.httpGet = func(_ context.Context, _ string) ([]byte, error) { return nil, errors.New("boom") }
-	err := inst.Install(context.Background(), testCluster, capi.AddonSet{PreHelmManifestURLs: []string{"https://x/y.yaml"}})
+	err := inst.Install(
+		context.Background(),
+		testCluster,
+		capi.AddonSet{PreHelmManifestURLs: []string{"https://x/y.yaml"}},
+	)
 	if !errors.Is(err, ErrInstall) {
 		t.Fatalf("error = %v, want ErrInstall", err)
 	}
@@ -168,13 +207,19 @@ func TestInstaller_UninstallReversesReleasesAndLeavesManifests(t *testing.T) {
 	applier := &fakeApplier{}
 	inst := New(helm, applier, nil)
 	err := inst.Uninstall(context.Background(), testCluster, capi.AddonSet{
-		Helm:      []capi.HelmRelease{{Name: "rufio", Namespace: "tink"}, {Name: "tinkerbell", Namespace: "tink"}},
+		Helm: []capi.HelmRelease{
+			{Name: "rufio", Namespace: "tink"},
+			{Name: "tinkerbell", Namespace: "tink"},
+		},
 		Manifests: []string{"kind: Namespace"},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.Join(helm.calls, ","); got != "uninstall:tink/tinkerbell,uninstall:tink/rufio" {
+	if got := strings.Join(
+		helm.calls,
+		",",
+	); got != "uninstall:tink/tinkerbell,uninstall:tink/rufio" {
 		t.Fatalf("helm calls = %q", got)
 	}
 	if len(applier.manifests) != 0 {
@@ -182,7 +227,11 @@ func TestInstaller_UninstallReversesReleasesAndLeavesManifests(t *testing.T) {
 	}
 
 	helm = &fakeHelm{failOn: "tinkerbell"}
-	err = New(helm, applier, nil).Uninstall(context.Background(), testCluster, capi.AddonSet{Helm: []capi.HelmRelease{{Name: "tinkerbell", Namespace: "tink"}}})
+	err = New(
+		helm,
+		applier,
+		nil,
+	).Uninstall(context.Background(), testCluster, capi.AddonSet{Helm: []capi.HelmRelease{{Name: "tinkerbell", Namespace: "tink"}}})
 	if !errors.Is(err, ErrUninstall) || !strings.Contains(err.Error(), "tinkerbell") {
 		t.Fatalf("error = %v, want ErrUninstall naming the release", err)
 	}

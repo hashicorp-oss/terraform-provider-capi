@@ -54,7 +54,11 @@ func decodeCRDs(t *testing.T, data []byte) []apiextv1.CustomResourceDefinition {
 // crdYAML builds one CRD fixture from a compact description. contract is the
 // value of the cluster.x-k8s.io/v1beta2 label ("" omits it); versions are
 // "name" or "name*" for the storage version.
-func crdYAML(t *testing.T, label, kind, contract string, versions ...string) apiextv1.CustomResourceDefinition {
+func crdYAML(
+	t *testing.T,
+	label, kind, contract string,
+	versions ...string,
+) apiextv1.CustomResourceDefinition {
 	t.Helper()
 	const group = "infrastructure.cluster.x-k8s.io"
 	labels := map[string]string{"cluster.x-k8s.io/provider": label}
@@ -64,13 +68,23 @@ func crdYAML(t *testing.T, label, kind, contract string, versions ...string) api
 	var vers []apiextv1.CustomResourceDefinitionVersion
 	for _, v := range versions {
 		storage := strings.HasSuffix(v, "*")
-		vers = append(vers, apiextv1.CustomResourceDefinitionVersion{Name: strings.TrimSuffix(v, "*"), Served: true, Storage: storage})
+		vers = append(
+			vers,
+			apiextv1.CustomResourceDefinitionVersion{
+				Name:    strings.TrimSuffix(v, "*"),
+				Served:  true,
+				Storage: storage,
+			},
+		)
 	}
 	crd := apiextv1.CustomResourceDefinition{}
 	crd.Name = strings.ToLower(kind) + "s." + group
 	crd.Labels = labels
 	crd.Spec.Group = group
-	crd.Spec.Names = apiextv1.CustomResourceDefinitionNames{Kind: kind, Plural: strings.ToLower(kind) + "s"}
+	crd.Spec.Names = apiextv1.CustomResourceDefinitionNames{
+		Kind:   kind,
+		Plural: strings.ToLower(kind) + "s",
+	}
 	crd.Spec.Versions = vers
 	// Round-trip through YAML so the fixture is built the same way the real ones are decoded.
 	b, err := yaml.Marshal(crd)
@@ -123,14 +137,46 @@ func TestKindCatalog_Resolve_ByProviderLabelAndSuffix(t *testing.T) {
 		suffix string
 		want   string // group/version, Kind
 	}{
-		{ProviderKey{ProviderTypeInfrastructure, "tinkerbell"}, "Cluster", "infrastructure.cluster.x-k8s.io/v1beta2, Kind=TinkerbellCluster"},
-		{ProviderKey{ProviderTypeInfrastructure, "tinkerbell"}, "ClusterTemplate", "infrastructure.cluster.x-k8s.io/v1beta2, Kind=TinkerbellClusterTemplate"},
-		{ProviderKey{ProviderTypeInfrastructure, "tinkerbell"}, "MachineTemplate", "infrastructure.cluster.x-k8s.io/v1beta2, Kind=TinkerbellMachineTemplate"},
-		{ProviderKey{ProviderTypeControlPlane, "talos"}, "ControlPlane", "controlplane.cluster.x-k8s.io/v1beta1, Kind=TalosControlPlane"},
-		{ProviderKey{ProviderTypeControlPlane, "talos"}, "ControlPlaneTemplate", "controlplane.cluster.x-k8s.io/v1beta1, Kind=TalosControlPlaneTemplate"},
-		{ProviderKey{ProviderTypeBootstrap, "talos"}, "ConfigTemplate", "bootstrap.cluster.x-k8s.io/v1beta1, Kind=TalosConfigTemplate"},
-		{ProviderKey{ProviderTypeCore, "cluster-api"}, "Cluster", "cluster.x-k8s.io/v1beta2, Kind=Cluster"},
-		{ProviderKey{ProviderTypeCore, "cluster-api"}, "MachineDeployment", "cluster.x-k8s.io/v1beta2, Kind=MachineDeployment"},
+		{
+			ProviderKey{ProviderTypeInfrastructure, "tinkerbell"},
+			"Cluster",
+			"infrastructure.cluster.x-k8s.io/v1beta2, Kind=TinkerbellCluster",
+		},
+		{
+			ProviderKey{ProviderTypeInfrastructure, "tinkerbell"},
+			"ClusterTemplate",
+			"infrastructure.cluster.x-k8s.io/v1beta2, Kind=TinkerbellClusterTemplate",
+		},
+		{
+			ProviderKey{ProviderTypeInfrastructure, "tinkerbell"},
+			"MachineTemplate",
+			"infrastructure.cluster.x-k8s.io/v1beta2, Kind=TinkerbellMachineTemplate",
+		},
+		{
+			ProviderKey{ProviderTypeControlPlane, "talos"},
+			"ControlPlane",
+			"controlplane.cluster.x-k8s.io/v1beta1, Kind=TalosControlPlane",
+		},
+		{
+			ProviderKey{ProviderTypeControlPlane, "talos"},
+			"ControlPlaneTemplate",
+			"controlplane.cluster.x-k8s.io/v1beta1, Kind=TalosControlPlaneTemplate",
+		},
+		{
+			ProviderKey{ProviderTypeBootstrap, "talos"},
+			"ConfigTemplate",
+			"bootstrap.cluster.x-k8s.io/v1beta1, Kind=TalosConfigTemplate",
+		},
+		{
+			ProviderKey{ProviderTypeCore, "cluster-api"},
+			"Cluster",
+			"cluster.x-k8s.io/v1beta2, Kind=Cluster",
+		},
+		{
+			ProviderKey{ProviderTypeCore, "cluster-api"},
+			"MachineDeployment",
+			"cluster.x-k8s.io/v1beta2, Kind=MachineDeployment",
+		},
 	}
 	for _, tc := range cases {
 		got, err := c.Resolve(tc.key, tc.suffix)
@@ -152,13 +198,26 @@ func TestKindCatalog_Resolve_ContractLabelWinsOverStorageVersion(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got.Version != "v1beta9" {
-		t.Errorf("version = %q, want the contract-labelled v1beta9 over storage v1alpha1", got.Version)
+		t.Errorf(
+			"version = %q, want the contract-labelled v1beta9 over storage v1alpha1",
+			got.Version,
+		)
 	}
 }
 
 func TestKindCatalog_Resolve_ContractLabelListPicksNewestServed(t *testing.T) {
-	c := NewKindCatalog(append(loadTestCRDs(t, "core.yaml"),
-		crdYAML(t, "infrastructure-foo", "FooCluster", "v1alpha1_v1beta2_v1beta1", "v1alpha1*", "v1beta1", "v1beta2")))
+	c := NewKindCatalog(append(
+		loadTestCRDs(t, "core.yaml"),
+		crdYAML(
+			t,
+			"infrastructure-foo",
+			"FooCluster",
+			"v1alpha1_v1beta2_v1beta1",
+			"v1alpha1*",
+			"v1beta1",
+			"v1beta2",
+		),
+	))
 	got, err := c.Resolve(ProviderKey{ProviderTypeInfrastructure, "foo"}, "Cluster")
 	if err != nil {
 		t.Fatal(err)
@@ -248,7 +307,9 @@ func TestKindCatalog_ControlPlaneRefShape(t *testing.T) {
 
 func TestKindCatalog_ControlPlaneRefShape_UnknownKind(t *testing.T) {
 	c := NewKindCatalog(loadTestCRDs(t, "core.yaml"))
-	_, err := c.ControlPlaneRefShape(parseGVK(t, "controlplane.cluster.x-k8s.io/v1beta1, Kind=NopeControlPlane"))
+	_, err := c.ControlPlaneRefShape(
+		parseGVK(t, "controlplane.cluster.x-k8s.io/v1beta1, Kind=NopeControlPlane"),
+	)
 	if err == nil {
 		t.Fatal("expected an error for a kind the catalog does not hold")
 	}

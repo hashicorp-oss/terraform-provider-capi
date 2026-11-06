@@ -31,14 +31,26 @@ func workflow(name, state string) *unstructured.Unstructured {
 
 func fakeDynamic(objs ...runtime.Object) dynamic.Interface {
 	scheme := runtime.NewScheme()
-	return dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme, map[schema.GroupVersionResource]string{workflowsGVR: "WorkflowList"}, objs...)
+	return dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
+		scheme,
+		map[schema.GroupVersionResource]string{workflowsGVR: "WorkflowList"},
+		objs...)
 }
 
 func TestTinkerbellQuiescer_IdleWhenNoActiveWorkflows(t *testing.T) {
 	q := &TinkerbellQuiescer{clientFor: func(string) (dynamic.Interface, error) {
-		return fakeDynamic(workflow("done", "SUCCESS"), workflow("failed", "STATE_FAILED"), workflow("new", "")), nil
+		return fakeDynamic(
+			workflow("done", "SUCCESS"),
+			workflow("failed", "STATE_FAILED"),
+			workflow("new", ""),
+		), nil
 	}}
-	err := q.WaitForQuiescence(context.Background(), &Cluster{Name: "b", KubeconfigPath: "/x"}, "tinkerbell", WaitOptions{Timeout: time.Second, PollInterval: time.Millisecond})
+	err := q.WaitForQuiescence(
+		context.Background(),
+		&Cluster{Name: "b", KubeconfigPath: "/x"},
+		"tinkerbell",
+		WaitOptions{Timeout: time.Second, PollInterval: time.Millisecond},
+	)
 	if err != nil {
 		t.Fatalf("finished workflows must count as idle: %v", err)
 	}
@@ -48,8 +60,14 @@ func TestTinkerbellQuiescer_WaitsForRunningWorkflows(t *testing.T) {
 	q := &TinkerbellQuiescer{clientFor: func(string) (dynamic.Interface, error) {
 		return fakeDynamic(workflow("imaging", "running"), workflow("queued", "STATE_PENDING")), nil
 	}}
-	err := q.WaitForQuiescence(context.Background(), &Cluster{Name: "b", KubeconfigPath: "/x"}, "tinkerbell", WaitOptions{Timeout: 20 * time.Millisecond, PollInterval: time.Millisecond})
-	if err == nil || !strings.Contains(err.Error(), "imaging") || !strings.Contains(err.Error(), "queued") {
+	err := q.WaitForQuiescence(
+		context.Background(),
+		&Cluster{Name: "b", KubeconfigPath: "/x"},
+		"tinkerbell",
+		WaitOptions{Timeout: 20 * time.Millisecond, PollInterval: time.Millisecond},
+	)
+	if err == nil || !strings.Contains(err.Error(), "imaging") ||
+		!strings.Contains(err.Error(), "queued") {
 		t.Fatalf("running workflows must block and be named, got %v", err)
 	}
 }
@@ -57,13 +75,28 @@ func TestTinkerbellQuiescer_WaitsForRunningWorkflows(t *testing.T) {
 func TestTinkerbellQuiescer_NoWorkflowCRDIsIdle(t *testing.T) {
 	q := &TinkerbellQuiescer{clientFor: func(string) (dynamic.Interface, error) {
 		// A cluster without Tinkerbell answers the list with NotFound.
-		c := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{workflowsGVR: "WorkflowList"})
-		c.PrependReactor("list", "workflows", func(k8stesting.Action) (bool, runtime.Object, error) {
-			return true, nil, apierrors.NewNotFound(schema.GroupResource{Group: "tinkerbell.org", Resource: "workflows"}, "")
-		})
+		c := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
+			runtime.NewScheme(),
+			map[schema.GroupVersionResource]string{workflowsGVR: "WorkflowList"},
+		)
+		c.PrependReactor(
+			"list",
+			"workflows",
+			func(k8stesting.Action) (bool, runtime.Object, error) {
+				return true, nil, apierrors.NewNotFound(
+					schema.GroupResource{Group: "tinkerbell.org", Resource: "workflows"},
+					"",
+				)
+			},
+		)
 		return c, nil
 	}}
-	err := q.WaitForQuiescence(context.Background(), &Cluster{Name: "b", KubeconfigPath: "/x"}, "tinkerbell", WaitOptions{Timeout: time.Second, PollInterval: time.Millisecond})
+	err := q.WaitForQuiescence(
+		context.Background(),
+		&Cluster{Name: "b", KubeconfigPath: "/x"},
+		"tinkerbell",
+		WaitOptions{Timeout: time.Second, PollInterval: time.Millisecond},
+	)
 	if err != nil {
 		t.Fatalf("a cluster without the Workflow CRD is idle: %v", err)
 	}

@@ -14,11 +14,10 @@ import (
 	"sync"
 	"time"
 
-	"k8s.io/client-go/tools/clientcmd"
-
 	"github.com/tinkerbell-community/terraform-provider-capi/internal/capi"
 	"github.com/tinkerbell-community/terraform-provider-capi/internal/capi/addons"
 	"github.com/tinkerbell-community/terraform-provider-capi/internal/capi/bmc"
+	"k8s.io/client-go/tools/clientcmd"
 )
 
 // kubeconfigCommand reads the k3s admin kubeconfig on the node. k3s writes it
@@ -53,9 +52,16 @@ type Timeouts struct {
 // DefaultTimeouts returns production timeouts for a boot timeout.
 func DefaultTimeouts(boot time.Duration) Timeouts {
 	return Timeouts{
-		Boot: boot, Kubeconfig: 10 * time.Minute, Kubernetes: 10 * time.Minute, Addons: 15 * time.Minute,
-		PowerDown: 2 * time.Minute, Poll: 5 * time.Second, Probe: 15 * time.Second,
-		BMCRetries: 3, RetryBase: 500 * time.Millisecond, RetryMax: 5 * time.Second,
+		Boot:       boot,
+		Kubeconfig: 10 * time.Minute,
+		Kubernetes: 10 * time.Minute,
+		Addons:     15 * time.Minute,
+		PowerDown:  2 * time.Minute,
+		Poll:       5 * time.Second,
+		Probe:      15 * time.Second,
+		BMCRetries: 3,
+		RetryBase:  500 * time.Millisecond,
+		RetryMax:   5 * time.Second,
 	}
 }
 
@@ -175,7 +181,10 @@ func (b *Bootstrapper) mediaBoot() *bmc.MediaBoot {
 // the k3s kubeconfig over SSH, rewrites its server to the node's address,
 // waits for the API and a Ready node, and installs the addons. The media
 // stays attached until Delete.
-func (b *Bootstrapper) Create(ctx context.Context, opts capi.BootstrapOptions) (*capi.Cluster, error) {
+func (b *Bootstrapper) Create(
+	ctx context.Context,
+	opts capi.BootstrapOptions,
+) (*capi.Cluster, error) {
 	name := opts.Name
 	if name == "" {
 		name = defaultClusterName
@@ -189,7 +198,11 @@ func (b *Bootstrapper) Create(ctx context.Context, opts capi.BootstrapOptions) (
 
 	node := b.newSSH(b.cfg.SSH, b.cfg.Machine.Address)
 	if b.answers(ctx, node) {
-		b.logger.Printf("%s: %s already answers over SSH; reusing the live node", name, b.cfg.Machine.Address)
+		b.logger.Printf(
+			"%s: %s already answers over SSH; reusing the live node",
+			name,
+			b.cfg.Machine.Address,
+		)
 	} else if err := b.boot(ctx, name, node); err != nil {
 		return fail("boot", err)
 	}
@@ -210,11 +223,20 @@ func (b *Bootstrapper) Create(ctx context.Context, opts capi.BootstrapOptions) (
 	if !b.cfg.Addons.Empty() {
 		actx, cancel := context.WithTimeout(ctx, b.timeouts.Addons)
 		defer cancel()
-		if err := b.addons.Install(actx, &capi.Cluster{Name: name, KubeconfigPath: kubeconfigPath}, b.cfg.Addons); err != nil {
+		if err := b.addons.Install(
+			actx,
+			&capi.Cluster{Name: name, KubeconfigPath: kubeconfigPath},
+			b.cfg.Addons,
+		); err != nil {
 			return fail("addons", err)
 		}
 	}
-	b.logger.Printf("%s: live node %s ready (kubeconfig: %s)", name, b.cfg.Machine.Address, kubeconfigPath)
+	b.logger.Printf(
+		"%s: live node %s ready (kubeconfig: %s)",
+		name,
+		b.cfg.Machine.Address,
+		kubeconfigPath,
+	)
 	return &capi.Cluster{Name: name, KubeconfigPath: kubeconfigPath}, nil
 }
 
@@ -231,10 +253,21 @@ func (b *Bootstrapper) answers(ctx context.Context, node SSH) bool {
 // nothing is driven: the node is waited for once, for the boot timeout.
 func (b *Bootstrapper) boot(ctx context.Context, name string, node SSH) error {
 	if b.manual() {
-		b.logger.Printf("%s: boot method is manual; waiting up to %s for %s to be booted from %s by hand", name, b.timeouts.Boot, b.cfg.Machine.Address, b.cfg.ISO)
-		err := bmc.WaitFor(ctx, b.timeouts.Boot, b.timeouts.Poll, func(ctx context.Context) (bool, error) {
-			return b.answers(ctx, node), nil
-		})
+		b.logger.Printf(
+			"%s: boot method is manual; waiting up to %s for %s to be booted from %s by hand",
+			name,
+			b.timeouts.Boot,
+			b.cfg.Machine.Address,
+			b.cfg.ISO,
+		)
+		err := bmc.WaitFor(
+			ctx,
+			b.timeouts.Boot,
+			b.timeouts.Poll,
+			func(ctx context.Context) (bool, error) {
+				return b.answers(ctx, node), nil
+			},
+		)
 		if err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
@@ -245,19 +278,35 @@ func (b *Bootstrapper) boot(ctx context.Context, name string, node SSH) error {
 	}
 	media := b.mediaBoot()
 	for attempt := 1; attempt <= b.cfg.Boot.Attempts; attempt++ {
-		b.logger.Printf("%s: booting %s from %s (attempt %d/%d)", name, b.cfg.Machine.Hostname, b.cfg.ISO, attempt, b.cfg.Boot.Attempts)
+		b.logger.Printf(
+			"%s: booting %s from %s (attempt %d/%d)",
+			name,
+			b.cfg.Machine.Hostname,
+			b.cfg.ISO,
+			attempt,
+			b.cfg.Boot.Attempts,
+		)
 		if err := media.Boot(ctx, b.cfg.ISO); err != nil {
 			return err
 		}
-		err := bmc.WaitFor(ctx, b.timeouts.Boot, b.timeouts.Poll, func(ctx context.Context) (bool, error) {
-			return b.answers(ctx, node), nil
-		})
+		err := bmc.WaitFor(
+			ctx,
+			b.timeouts.Boot,
+			b.timeouts.Poll,
+			func(ctx context.Context) (bool, error) {
+				return b.answers(ctx, node), nil
+			},
+		)
 		if err == nil {
 			// The media stays attached (a storage-redirection session
 			// included) for the life of the node: the cloud-config is read
 			// from the ISO at every stage, and without kairos.ram the ISO is
 			// the root filesystem too. Delete ejects it.
-			b.logger.Printf("%s: %s answers over SSH; the boot media stays attached until the node is deleted", name, b.cfg.Machine.Address)
+			b.logger.Printf(
+				"%s: %s answers over SSH; the boot media stays attached until the node is deleted",
+				name,
+				b.cfg.Machine.Address,
+			)
 			return nil
 		}
 		if ctx.Err() != nil {
@@ -265,7 +314,12 @@ func (b *Bootstrapper) boot(ctx context.Context, name string, node SSH) error {
 		}
 		b.logger.Printf("%s: %v", name, ErrBootTimeout)
 	}
-	return fmt.Errorf("%w after %d attempts: %w", ErrAttemptsExhausted, b.cfg.Boot.Attempts, ErrBootTimeout)
+	return fmt.Errorf(
+		"%w after %d attempts: %w",
+		ErrAttemptsExhausted,
+		b.cfg.Boot.Attempts,
+		ErrBootTimeout,
+	)
 }
 
 // fetchKubeconfig reads the k3s kubeconfig once k3s has written it and
@@ -274,22 +328,27 @@ func (b *Bootstrapper) fetchKubeconfig(ctx context.Context, node SSH) ([]byte, e
 	server := "https://" + net.JoinHostPort(b.cfg.Machine.Address, apiPort)
 	var raw []byte
 	var lastErr error
-	err := bmc.WaitFor(ctx, b.timeouts.Kubeconfig, b.timeouts.Poll, func(ctx context.Context) (bool, error) {
-		pctx, cancel := context.WithTimeout(ctx, b.timeouts.Probe)
-		defer cancel()
-		out, err := node.Run(pctx, kubeconfigCommand)
-		if err != nil {
-			lastErr = err
-			return false, nil
-		}
-		rewritten, err := rewriteServer(out, server)
-		if err != nil {
-			lastErr = err
-			return false, nil
-		}
-		raw = rewritten
-		return true, nil
-	})
+	err := bmc.WaitFor(
+		ctx,
+		b.timeouts.Kubeconfig,
+		b.timeouts.Poll,
+		func(ctx context.Context) (bool, error) {
+			pctx, cancel := context.WithTimeout(ctx, b.timeouts.Probe)
+			defer cancel()
+			out, err := node.Run(pctx, kubeconfigCommand)
+			if err != nil {
+				lastErr = err
+				return false, nil
+			}
+			rewritten, err := rewriteServer(out, server)
+			if err != nil {
+				lastErr = err
+				return false, nil
+			}
+			raw = rewritten
+			return true, nil
+		},
+	)
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
@@ -320,12 +379,17 @@ func (b *Bootstrapper) waitKubernetes(ctx context.Context, kubeconfigPath string
 	if err != nil {
 		return err
 	}
-	err = bmc.WaitFor(ctx, b.timeouts.Kubernetes, b.timeouts.Poll, func(ctx context.Context) (bool, error) {
-		if ok, err := kube.APIReachable(ctx); err != nil || !ok {
-			return false, err
-		}
-		return kube.NodeReady(ctx)
-	})
+	err = bmc.WaitFor(
+		ctx,
+		b.timeouts.Kubernetes,
+		b.timeouts.Poll,
+		func(ctx context.Context) (bool, error) {
+			if ok, err := kube.APIReachable(ctx); err != nil || !ok {
+				return false, err
+			}
+			return kube.NodeReady(ctx)
+		},
+	)
 	if err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -343,10 +407,20 @@ func (b *Bootstrapper) Delete(ctx context.Context, cluster *capi.Cluster) error 
 		name = cluster.Name
 	}
 	if b.manual() {
-		b.logger.Printf("%s: boot method is manual; power off %s by hand", name, b.cfg.Machine.Hostname)
+		b.logger.Printf(
+			"%s: boot method is manual; power off %s by hand",
+			name,
+			b.cfg.Machine.Hostname,
+		)
 	} else {
 		b.mediaBoot().Detach(ctx)
-		if err := bmc.Retry(ctx, b.timeouts.BMCRetries, b.timeouts.RetryBase, b.timeouts.RetryMax, b.client.PowerOff); err != nil {
+		if err := bmc.Retry(
+			ctx,
+			b.timeouts.BMCRetries,
+			b.timeouts.RetryBase,
+			b.timeouts.RetryMax,
+			b.client.PowerOff,
+		); err != nil {
 			return &capi.BootstrapError{ClusterName: name, Operation: "delete", Err: err}
 		}
 	}

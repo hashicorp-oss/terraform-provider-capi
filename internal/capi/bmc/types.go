@@ -84,7 +84,9 @@ type BootConfig struct {
 // Sentinel errors.
 var (
 	ErrUnsupported  = errors.New("operation not supported by this BMC")
-	ErrNoBootMethod = errors.New("no supported boot method: BMC supports neither virtual media nor UEFI HTTP boot")
+	ErrNoBootMethod = errors.New(
+		"no supported boot method: BMC supports neither virtual media nor UEFI HTTP boot",
+	)
 )
 
 // Error carries bmclib's per-provider metadata alongside the failure.

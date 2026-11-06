@@ -25,14 +25,14 @@ func TestNewDynamicWaiter(t *testing.T) {
 
 func TestHasCondition_True(t *testing.T) {
 	obj := &unstructured.Unstructured{
-		Object: map[string]interface{}{
-			"status": map[string]interface{}{
-				"conditions": []interface{}{
-					map[string]interface{}{
+		Object: map[string]any{
+			"status": map[string]any{
+				"conditions": []any{
+					map[string]any{
 						"type":   "Ready",
 						"status": "True",
 					},
-					map[string]interface{}{
+					map[string]any{
 						"type":   "Available",
 						"status": "False",
 					},
@@ -54,10 +54,10 @@ func TestHasCondition_True(t *testing.T) {
 
 func TestHasCondition_NotFound(t *testing.T) {
 	obj := &unstructured.Unstructured{
-		Object: map[string]interface{}{
-			"status": map[string]interface{}{
-				"conditions": []interface{}{
-					map[string]interface{}{
+		Object: map[string]any{
+			"status": map[string]any{
+				"conditions": []any{
+					map[string]any{
 						"type":   "Ready",
 						"status": "True",
 					},
@@ -73,7 +73,7 @@ func TestHasCondition_NotFound(t *testing.T) {
 
 func TestHasCondition_NoConditions(t *testing.T) {
 	obj := &unstructured.Unstructured{
-		Object: map[string]interface{}{},
+		Object: map[string]any{},
 	}
 	if hasCondition(obj, "Ready", "True") {
 		t.Error("expected no conditions to match on empty object")
@@ -82,8 +82,8 @@ func TestHasCondition_NoConditions(t *testing.T) {
 
 func TestHasCondition_EmptyStatus(t *testing.T) {
 	obj := &unstructured.Unstructured{
-		Object: map[string]interface{}{
-			"status": map[string]interface{}{},
+		Object: map[string]any{
+			"status": map[string]any{},
 		},
 	}
 	if hasCondition(obj, "Ready", "True") {
@@ -93,9 +93,9 @@ func TestHasCondition_EmptyStatus(t *testing.T) {
 
 func TestHasCondition_EmptyConditionsList(t *testing.T) {
 	obj := &unstructured.Unstructured{
-		Object: map[string]interface{}{
-			"status": map[string]interface{}{
-				"conditions": []interface{}{},
+		Object: map[string]any{
+			"status": map[string]any{
+				"conditions": []any{},
 			},
 		},
 	}
@@ -106,7 +106,11 @@ func TestHasCondition_EmptyConditionsList(t *testing.T) {
 
 // fakeWaiter returns a DynamicWaiter whose client serves the given objects
 // plus a core Cluster CRD whose storage version is coreVersion.
-func fakeWaiter(t *testing.T, coreVersion string, objs ...*unstructured.Unstructured) *DynamicWaiter {
+func fakeWaiter(
+	t *testing.T,
+	coreVersion string,
+	objs ...*unstructured.Unstructured,
+) *DynamicWaiter {
 	t.Helper()
 	crd := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "apiextensions.k8s.io/v1",
@@ -115,8 +119,16 @@ func fakeWaiter(t *testing.T, coreVersion string, objs ...*unstructured.Unstruct
 		"spec": map[string]any{
 			"group": "cluster.x-k8s.io",
 			"versions": []any{
-				map[string]any{"name": "v1beta1", "served": true, "storage": coreVersion == "v1beta1"},
-				map[string]any{"name": "v1beta2", "served": true, "storage": coreVersion == "v1beta2"},
+				map[string]any{
+					"name":    "v1beta1",
+					"served":  true,
+					"storage": coreVersion == "v1beta1",
+				},
+				map[string]any{
+					"name":    "v1beta2",
+					"served":  true,
+					"storage": coreVersion == "v1beta2",
+				},
 			},
 		},
 	}}
@@ -126,7 +138,10 @@ func fakeWaiter(t *testing.T, coreVersion string, objs ...*unstructured.Unstruct
 		listKinds[schema.GroupVersionResource{Group: "cluster.x-k8s.io", Version: v, Resource: "machinedeployments"}] = "MachineDeploymentList"
 		listKinds[schema.GroupVersionResource{Group: "cluster.x-k8s.io", Version: v, Resource: "clusters"}] = "ClusterList"
 	}
-	client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), listKinds, all...)
+	client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
+		runtime.NewScheme(),
+		listKinds,
+		all...)
 	return &DynamicWaiter{clientFor: func(string) (dynamic.Interface, error) { return client, nil }}
 }
 
@@ -138,7 +153,10 @@ func toRuntimeObjects(objs []*unstructured.Unstructured) []runtime.Object {
 	return out
 }
 
-func clusterObject(version, name, namespace string, conditions ...string) *unstructured.Unstructured {
+func clusterObject(
+	version, name, namespace string,
+	conditions ...string,
+) *unstructured.Unstructured {
 	var conds []any
 	for _, c := range conditions {
 		conds = append(conds, map[string]any{"type": c, "status": "True"})
@@ -151,7 +169,10 @@ func clusterObject(version, name, namespace string, conditions ...string) *unstr
 	}}
 }
 
-func machineDeploymentObject(version, name, namespace, clusterName string, replicas, ready int64) *unstructured.Unstructured {
+func machineDeploymentObject(
+	version, name, namespace, clusterName string,
+	replicas, ready int64,
+) *unstructured.Unstructured {
 	return &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "cluster.x-k8s.io/" + version,
 		"kind":       "MachineDeployment",
@@ -167,8 +188,18 @@ func machineDeploymentObject(version, name, namespace, clusterName string, repli
 var fastWait = WaitOptions{Timeout: 200 * time.Millisecond, PollInterval: 5 * time.Millisecond}
 
 func TestDynamicWaiter_WaitForControlPlane_UsesClusterInitializedCondition(t *testing.T) {
-	w := fakeWaiter(t, "v1beta2", clusterObject("v1beta2", "acc", "capi", "ControlPlaneInitialized"))
-	if err := w.WaitForControlPlane(context.Background(), &Cluster{}, "acc", "capi", fastWait); err != nil {
+	w := fakeWaiter(
+		t,
+		"v1beta2",
+		clusterObject("v1beta2", "acc", "capi", "ControlPlaneInitialized"),
+	)
+	if err := w.WaitForControlPlane(
+		context.Background(),
+		&Cluster{},
+		"acc",
+		"capi",
+		fastWait,
+	); err != nil {
 		t.Fatalf("control plane should be ready from the Cluster condition alone: %v", err)
 	}
 }
@@ -183,30 +214,75 @@ func TestDynamicWaiter_WaitForControlPlane_TimesOutWithoutCondition(t *testing.T
 
 func TestDynamicWaiter_WaitForControlPlane_UsesDiscoveredCoreVersion(t *testing.T) {
 	// The Cluster only exists at v1beta1; a hardcoded v1beta2 read would miss it.
-	w := fakeWaiter(t, "v1beta1", clusterObject("v1beta1", "old", "default", "ControlPlaneInitialized"))
-	if err := w.WaitForControlPlane(context.Background(), &Cluster{}, "old", "default", fastWait); err != nil {
+	w := fakeWaiter(
+		t,
+		"v1beta1",
+		clusterObject("v1beta1", "old", "default", "ControlPlaneInitialized"),
+	)
+	if err := w.WaitForControlPlane(
+		context.Background(),
+		&Cluster{},
+		"old",
+		"default",
+		fastWait,
+	); err != nil {
 		t.Fatalf("expected the v1beta1 cluster to be found: %v", err)
 	}
 }
 
 func TestDynamicWaiter_WaitForClusterReady_AcceptsAvailableOrReady(t *testing.T) {
 	v2 := fakeWaiter(t, "v1beta2", clusterObject("v1beta2", "acc", "capi", "Available"))
-	if err := v2.WaitForClusterReady(context.Background(), &Cluster{}, "acc", "capi", fastWait); err != nil {
+	if err := v2.WaitForClusterReady(
+		context.Background(),
+		&Cluster{},
+		"acc",
+		"capi",
+		fastWait,
+	); err != nil {
 		t.Errorf("v1beta2 Available=True should satisfy readiness: %v", err)
 	}
 	v1 := fakeWaiter(t, "v1beta1", clusterObject("v1beta1", "old", "default", "Ready"))
-	if err := v1.WaitForClusterReady(context.Background(), &Cluster{}, "old", "default", fastWait); err != nil {
+	if err := v1.WaitForClusterReady(
+		context.Background(),
+		&Cluster{},
+		"old",
+		"default",
+		fastWait,
+	); err != nil {
 		t.Errorf("v1beta1 Ready=True should satisfy readiness: %v", err)
 	}
-	notYet := fakeWaiter(t, "v1beta2", clusterObject("v1beta2", "acc", "capi", "ControlPlaneInitialized"))
-	if err := notYet.WaitForClusterReady(context.Background(), &Cluster{}, "acc", "capi", fastWait); !errors.Is(err, ErrClusterNotReady) {
+	notYet := fakeWaiter(
+		t,
+		"v1beta2",
+		clusterObject("v1beta2", "acc", "capi", "ControlPlaneInitialized"),
+	)
+	if err := notYet.WaitForClusterReady(
+		context.Background(),
+		&Cluster{},
+		"acc",
+		"capi",
+		fastWait,
+	); !errors.Is(
+		err,
+		ErrClusterNotReady,
+	) {
 		t.Errorf("an initialized but unavailable cluster must time out, got %v", err)
 	}
 }
 
 func TestDynamicWaiter_WaitForWorkers_UsesDiscoveredCoreVersion(t *testing.T) {
-	w := fakeWaiter(t, "v1beta1", machineDeploymentObject("v1beta1", "old-md-0", "default", "old", 2, 2))
-	if err := w.WaitForWorkers(context.Background(), &Cluster{}, "old", "default", fastWait); err != nil {
+	w := fakeWaiter(
+		t,
+		"v1beta1",
+		machineDeploymentObject("v1beta1", "old-md-0", "default", "old", 2, 2),
+	)
+	if err := w.WaitForWorkers(
+		context.Background(),
+		&Cluster{},
+		"old",
+		"default",
+		fastWait,
+	); err != nil {
 		t.Fatalf("expected the v1beta1 machine deployment to count as ready: %v", err)
 	}
 }

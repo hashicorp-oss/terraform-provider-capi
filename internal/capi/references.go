@@ -36,7 +36,12 @@ func (idx ReferenceIndex) Referrers(kind, name string) []string {
 // MachineSet keeps the old template during a rollout), MachinePools,
 // ClusterClasses, and the control planes of every control-plane provider
 // the catalog knows. A core kind the cluster does not serve is skipped.
-func TemplateReferences(ctx context.Context, c *ObjectClient, catalog *KindCatalog, namespace string) (ReferenceIndex, error) {
+func TemplateReferences(
+	ctx context.Context,
+	c *ObjectClient,
+	catalog *KindCatalog,
+	namespace string,
+) (ReferenceIndex, error) {
 	idx := ReferenceIndex{}
 	core := ProviderKey{Type: ProviderTypeCore, Name: "cluster-api"}
 	var kinds []schema.GroupVersionKind
@@ -145,20 +150,35 @@ func (c *KindCatalog) ByKind(kind string) (schema.GroupVersionKind, error) {
 		if err != nil {
 			return schema.GroupVersionKind{}, err
 		}
-		found = append(found, schema.GroupVersionKind{Group: crd.Spec.Group, Version: ver, Kind: kind})
+		found = append(
+			found,
+			schema.GroupVersionKind{Group: crd.Spec.Group, Version: ver, Kind: kind},
+		)
 	}
 	switch len(found) {
 	case 0:
-		return schema.GroupVersionKind{}, fmt.Errorf("%w: no provider CRD serves kind %s", ErrKindNotFound, kind)
+		return schema.GroupVersionKind{}, fmt.Errorf(
+			"%w: no provider CRD serves kind %s",
+			ErrKindNotFound,
+			kind,
+		)
 	case 1:
 		return found[0], nil
 	}
-	return schema.GroupVersionKind{}, fmt.Errorf("kind %s is served by several groups %v: set api_version", kind, found)
+	return schema.GroupVersionKind{}, fmt.Errorf(
+		"kind %s is served by several groups %v: set api_version",
+		kind,
+		found,
+	)
 }
 
 // ListTemplates returns the objects of a kind in a namespace carrying a
 // label, by name.
-func (c *ObjectClient) ListTemplates(ctx context.Context, gvk schema.GroupVersionKind, namespace, labelSelector string) (map[string]unstructured.Unstructured, error) {
+func (c *ObjectClient) ListTemplates(
+	ctx context.Context,
+	gvk schema.GroupVersionKind,
+	namespace, labelSelector string,
+) (map[string]unstructured.Unstructured, error) {
 	objs, err := c.List(ctx, gvk, namespace, labelSelector)
 	if err != nil {
 		return nil, err

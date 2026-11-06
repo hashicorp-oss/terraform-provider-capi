@@ -47,11 +47,19 @@ func TestCatalogFromObjects_KindsOf(t *testing.T) {
 		t.Errorf("TinkerbellMachineTemplate = %+v (%v)", mt, SortedKinds(kinds))
 	}
 	// The same version the suffix resolver would emit.
-	gvk, err := catalog.Resolve(ProviderKey{Type: ProviderTypeInfrastructure, Name: "tinkerbell"}, "MachineTemplate")
+	gvk, err := catalog.Resolve(
+		ProviderKey{Type: ProviderTypeInfrastructure, Name: "tinkerbell"},
+		"MachineTemplate",
+	)
 	if err != nil || gvk != mt {
 		t.Errorf("Resolve = %v, %v; KindsOf = %v", gvk, err, mt)
 	}
-	if _, err := catalog.KindsOf(ProviderKey{Type: ProviderTypeIPAM, Name: "unifi"}); !errors.Is(err, ErrKindNotFound) {
+	if _, err := catalog.KindsOf(
+		ProviderKey{Type: ProviderTypeIPAM, Name: "unifi"},
+	); !errors.Is(
+		err,
+		ErrKindNotFound,
+	) {
 		t.Errorf("unknown provider: %v", err)
 	}
 }

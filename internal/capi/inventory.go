@@ -98,7 +98,11 @@ const (
 // Secret and the rufio Machine when it has a BMC, then the Hardware. With
 // adopted set, the Hardware is marked provisioned and excluded from PXE, so
 // CAPT adopts the node it already runs rather than re-imaging it.
-func HardwareObjects(namespace, clusterName string, m InventoryMachine, adopted bool) ([]unstructured.Unstructured, error) {
+func HardwareObjects(
+	namespace, clusterName string,
+	m InventoryMachine,
+	adopted bool,
+) ([]unstructured.Unstructured, error) {
 	if m.Hostname == "" {
 		return nil, fmt.Errorf("hardware without a hostname")
 	}
@@ -155,7 +159,10 @@ func InventoryManifests(opts InventoryOptions) ([]byte, error) {
 func bmcSecretName(hostname string) string { return hostname + "-bmc-auth" }
 
 // bmcObjects renders the credentials Secret and the rufio Machine.
-func bmcObjects(opts InventoryOptions, m InventoryMachine) (unstructured.Unstructured, unstructured.Unstructured, error) {
+func bmcObjects(
+	opts InventoryOptions,
+	m InventoryMachine,
+) (unstructured.Unstructured, unstructured.Unstructured, error) {
 	host, port, scheme, err := parseBMCAddress(m.BMC.Address)
 	if err != nil {
 		return unstructured.Unstructured{}, unstructured.Unstructured{}, err
@@ -261,14 +268,21 @@ func hardwareObject(opts InventoryOptions, m InventoryMachine) unstructured.Unst
 		spec["disks"] = []any{map[string]any{"device": m.Disk}}
 	}
 	if m.BMC != nil {
-		spec["bmcRef"] = map[string]any{"apiGroup": rufioAPIGroup, "kind": rufioMachineKind, "name": m.Hostname}
+		spec["bmcRef"] = map[string]any{
+			"apiGroup": rufioAPIGroup,
+			"kind":     rufioMachineKind,
+			"name":     m.Hostname,
+		}
 	}
 	hw.Object["spec"] = spec
 	return hw
 }
 
 // inventoryObject returns a namespaced object carrying the cluster-name label.
-func inventoryObject(opts InventoryOptions, apiVersion, kind, name string) unstructured.Unstructured {
+func inventoryObject(
+	opts InventoryOptions,
+	apiVersion, kind, name string,
+) unstructured.Unstructured {
 	obj := unstructured.Unstructured{Object: map[string]any{}}
 	obj.SetAPIVersion(apiVersion)
 	obj.SetKind(kind)

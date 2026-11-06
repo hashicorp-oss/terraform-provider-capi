@@ -15,10 +15,27 @@ func TestProviderConfigClient_FillsEveryTypeAndRegistersOverrides(t *testing.T) 
 
 	providers := ProviderSet{}
 	providers.Add(ProviderConfig{Type: ProviderTypeCore, Name: "cluster-api"})
-	providers.Add(ProviderConfig{Type: ProviderTypeInfrastructure, Name: "tinkerbell", Version: "v0.7.9", FetchConfig: &FetchConfig{Owner: "tinkerbell-community"}})
+	providers.Add(
+		ProviderConfig{
+			Type:        ProviderTypeInfrastructure,
+			Name:        "tinkerbell",
+			Version:     "v0.7.9",
+			FetchConfig: &FetchConfig{Owner: "tinkerbell-community"},
+		},
+	)
 	providers.Add(ProviderConfig{Type: ProviderTypeBootstrap, Name: "talos", Version: "v0.8.2"})
 	providers.Add(ProviderConfig{Type: ProviderTypeControlPlane, Name: "talos", Version: "v0.7.1"})
-	providers.Add(ProviderConfig{Type: ProviderTypeIPAM, Name: "unifi", Version: "v0.4.1", FetchConfig: &FetchConfig{Owner: "ubiquiti-community", Repository: "cluster-api-ipam-provider-unifi"}})
+	providers.Add(
+		ProviderConfig{
+			Type:    ProviderTypeIPAM,
+			Name:    "unifi",
+			Version: "v0.4.1",
+			FetchConfig: &FetchConfig{
+				Owner:      "ubiquiti-community",
+				Repository: "cluster-api-ipam-provider-unifi",
+			},
+		},
+	)
 	providers.Add(ProviderConfig{Type: ProviderTypeAddon, Name: "helm"})
 
 	_, reader, err := newProviderConfigClient(context.Background(), "", providers)
@@ -29,13 +46,15 @@ func TestProviderConfigClient_FillsEveryTypeAndRegistersOverrides(t *testing.T) 
 	if initOpts.CoreProvider != "cluster-api" {
 		t.Errorf("core = %q", initOpts.CoreProvider)
 	}
-	if len(initOpts.InfrastructureProviders) != 1 || initOpts.InfrastructureProviders[0] != "tinkerbell:v0.7.9" {
+	if len(initOpts.InfrastructureProviders) != 1 ||
+		initOpts.InfrastructureProviders[0] != "tinkerbell:v0.7.9" {
 		t.Errorf("infra = %v", initOpts.InfrastructureProviders)
 	}
 	if len(initOpts.BootstrapProviders) != 1 || initOpts.BootstrapProviders[0] != "talos:v0.8.2" {
 		t.Errorf("bootstrap = %v", initOpts.BootstrapProviders)
 	}
-	if len(initOpts.ControlPlaneProviders) != 1 || initOpts.ControlPlaneProviders[0] != "talos:v0.7.1" {
+	if len(initOpts.ControlPlaneProviders) != 1 ||
+		initOpts.ControlPlaneProviders[0] != "talos:v0.7.1" {
 		t.Errorf("control plane = %v", initOpts.ControlPlaneProviders)
 	}
 	if len(initOpts.IPAMProviders) != 1 || initOpts.IPAMProviders[0] != "unifi:v0.4.1" {
@@ -83,9 +102,13 @@ func TestProviderConfigClient_AliasedBareProviderGetsDefaultURL(t *testing.T) {
 	initOpts := buildInitOptions(providers)
 	if len(reader.overrides) != 1 || reader.overrides[0].Name != "tinkerbell" ||
 		reader.overrides[0].URL != "https://github.com/tinkerbell/cluster-api-provider-tinkerbell/releases/latest/infrastructure-components.yaml" {
-		t.Errorf("tinkerbell (known to clusterctl as tinkerbell-tinkerbell) must be registered under its plain name; docker must not: %+v", reader.overrides)
+		t.Errorf(
+			"tinkerbell (known to clusterctl as tinkerbell-tinkerbell) must be registered under its plain name; docker must not: %+v",
+			reader.overrides,
+		)
 	}
-	if len(initOpts.InfrastructureProviders) != 2 || initOpts.InfrastructureProviders[0] != "tinkerbell" {
+	if len(initOpts.InfrastructureProviders) != 2 ||
+		initOpts.InfrastructureProviders[0] != "tinkerbell" {
 		t.Errorf("infra = %v", initOpts.InfrastructureProviders)
 	}
 }
@@ -108,8 +131,20 @@ func TestNewClusterctlClient_ResolvesTemplateProvider(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("HOME", t.TempDir())
 	providers := ProviderSet{}
-	providers.Add(ProviderConfig{Type: ProviderTypeInfrastructure, Name: "tinkerbell", Version: "v0.7.9", FetchConfig: &FetchConfig{Owner: "tinkerbell-community"}})
-	client, _, err := newClusterctlClient(context.Background(), "", providers, map[string]string{"CONTROL_PLANE_VIP": "10.0.0.160"})
+	providers.Add(
+		ProviderConfig{
+			Type:        ProviderTypeInfrastructure,
+			Name:        "tinkerbell",
+			Version:     "v0.7.9",
+			FetchConfig: &FetchConfig{Owner: "tinkerbell-community"},
+		},
+	)
+	client, _, err := newClusterctlClient(
+		context.Background(),
+		"",
+		providers,
+		map[string]string{"CONTROL_PLANE_VIP": "10.0.0.160"},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}

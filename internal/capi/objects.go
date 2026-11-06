@@ -64,11 +64,23 @@ func NewObjectClient(cluster *Cluster, fieldManager string) (*ObjectClient, erro
 // NewObjectClientFor builds an ObjectClient on an existing dynamic client and
 // REST mapper; reset, when set, invalidates the mapper's discovery cache so a
 // CRD installed since the last call is found.
-func NewObjectClientFor(cluster *Cluster, dyn dynamic.Interface, mapper meta.RESTMapper, reset func(), fieldManager string) *ObjectClient {
+func NewObjectClientFor(
+	cluster *Cluster,
+	dyn dynamic.Interface,
+	mapper meta.RESTMapper,
+	reset func(),
+	fieldManager string,
+) *ObjectClient {
 	if fieldManager == "" {
 		fieldManager = DefaultFieldManager
 	}
-	return &ObjectClient{cluster: cluster, dyn: dyn, mapper: mapper, resetMapper: reset, fieldManager: fieldManager}
+	return &ObjectClient{
+		cluster:      cluster,
+		dyn:          dyn,
+		mapper:       mapper,
+		resetMapper:  reset,
+		fieldManager: fieldManager,
+	}
 }
 
 // WithFieldManager returns a client sharing this one's connection that
@@ -92,7 +104,10 @@ func (c *ObjectClient) FieldManager() string { return c.fieldManager }
 // resource resolves a kind to its REST resource, namespaced when the kind
 // is. A kind the mapper does not know is retried once after a discovery
 // reset, then reported as ErrObjectNotFound: no CRD, no objects.
-func (c *ObjectClient) resource(gvk schema.GroupVersionKind, namespace string) (dynamic.ResourceInterface, error) {
+func (c *ObjectClient) resource(
+	gvk schema.GroupVersionKind,
+	namespace string,
+) (dynamic.ResourceInterface, error) {
 	mapping, err := c.mapper.RESTMapping(gvk.GroupKind(), gvk.Version)
 	if err != nil && c.resetMapper != nil {
 		c.resetMapper()
@@ -100,7 +115,12 @@ func (c *ObjectClient) resource(gvk schema.GroupVersionKind, namespace string) (
 	}
 	if err != nil {
 		if meta.IsNoMatchError(err) {
-			return nil, fmt.Errorf("%w: no resource serves %s on %s", ErrObjectNotFound, gvk, c.cluster.Name)
+			return nil, fmt.Errorf(
+				"%w: no resource serves %s on %s",
+				ErrObjectNotFound,
+				gvk,
+				c.cluster.Name,
+			)
 		}
 		return nil, fmt.Errorf("resolving %s on %s: %w", gvk, c.cluster.Name, err)
 	}
@@ -116,7 +136,11 @@ func (c *ObjectClient) resource(gvk schema.GroupVersionKind, namespace string) (
 // Apply server-side-applies obj under the client's field manager and
 // returns the live object. force takes ownership of fields another manager
 // holds; without it a conflict is an error naming that manager.
-func (c *ObjectClient) Apply(ctx context.Context, obj *unstructured.Unstructured, force bool) (*unstructured.Unstructured, error) {
+func (c *ObjectClient) Apply(
+	ctx context.Context,
+	obj *unstructured.Unstructured,
+	force bool,
+) (*unstructured.Unstructured, error) {
 	gvk := obj.GroupVersionKind()
 	res, err := c.resource(gvk, obj.GetNamespace())
 	if err != nil {
@@ -129,18 +153,40 @@ func (c *ObjectClient) Apply(ctx context.Context, obj *unstructured.Unstructured
 	if err != nil {
 		return nil, fmt.Errorf("encoding %s %s: %w", gvk.Kind, obj.GetName(), err)
 	}
-	live, err := res.Patch(ctx, obj.GetName(), k8stypes.ApplyPatchType, data, meta_v1.PatchOptions{FieldManager: c.fieldManager, Force: &force})
+	live, err := res.Patch(
+		ctx,
+		obj.GetName(),
+		k8stypes.ApplyPatchType,
+		data,
+		meta_v1.PatchOptions{FieldManager: c.fieldManager, Force: &force},
+	)
 	if err != nil {
 		if apierrors.IsConflict(err) {
-			return nil, fmt.Errorf("applying %s %s/%s: another field manager owns fields this configuration sets; set force_conflicts to take them over: %w", gvk.Kind, obj.GetNamespace(), obj.GetName(), err)
+			return nil, fmt.Errorf(
+				"applying %s %s/%s: another field manager owns fields this configuration sets; set force_conflicts to take them over: %w",
+				gvk.Kind,
+				obj.GetNamespace(),
+				obj.GetName(),
+				err,
+			)
 		}
-		return nil, fmt.Errorf("applying %s %s/%s: %w", gvk.Kind, obj.GetNamespace(), obj.GetName(), err)
+		return nil, fmt.Errorf(
+			"applying %s %s/%s: %w",
+			gvk.Kind,
+			obj.GetNamespace(),
+			obj.GetName(),
+			err,
+		)
 	}
 	return live, nil
 }
 
 // Get reads one object. A missing object or kind returns ErrObjectNotFound.
-func (c *ObjectClient) Get(ctx context.Context, gvk schema.GroupVersionKind, namespace, name string) (*unstructured.Unstructured, error) {
+func (c *ObjectClient) Get(
+	ctx context.Context,
+	gvk schema.GroupVersionKind,
+	namespace, name string,
+) (*unstructured.Unstructured, error) {
 	res, err := c.resource(gvk, namespace)
 	if err != nil {
 		return nil, err
@@ -158,7 +204,11 @@ func (c *ObjectClient) Get(ctx context.Context, gvk schema.GroupVersionKind, nam
 // List lists objects of a kind in a namespace (every namespace when empty
 // for namespaced kinds is not supported; pass the namespace). A missing
 // kind lists nothing.
-func (c *ObjectClient) List(ctx context.Context, gvk schema.GroupVersionKind, namespace, labelSelector string) ([]unstructured.Unstructured, error) {
+func (c *ObjectClient) List(
+	ctx context.Context,
+	gvk schema.GroupVersionKind,
+	namespace, labelSelector string,
+) ([]unstructured.Unstructured, error) {
 	res, err := c.resource(gvk, namespace)
 	if errors.Is(err, ErrObjectNotFound) {
 		return nil, nil
@@ -178,7 +228,11 @@ func (c *ObjectClient) List(ctx context.Context, gvk schema.GroupVersionKind, na
 
 // Delete deletes one object with foreground propagation. A missing object
 // or kind is not an error.
-func (c *ObjectClient) Delete(ctx context.Context, gvk schema.GroupVersionKind, namespace, name string) error {
+func (c *ObjectClient) Delete(
+	ctx context.Context,
+	gvk schema.GroupVersionKind,
+	namespace, name string,
+) error {
 	res, err := c.resource(gvk, namespace)
 	if errors.Is(err, ErrObjectNotFound) {
 		return nil
@@ -195,7 +249,13 @@ func (c *ObjectClient) Delete(ctx context.Context, gvk schema.GroupVersionKind, 
 }
 
 // Patch applies a patch of the given type.
-func (c *ObjectClient) Patch(ctx context.Context, gvk schema.GroupVersionKind, namespace, name string, pt k8stypes.PatchType, data []byte) (*unstructured.Unstructured, error) {
+func (c *ObjectClient) Patch(
+	ctx context.Context,
+	gvk schema.GroupVersionKind,
+	namespace, name string,
+	pt k8stypes.PatchType,
+	data []byte,
+) (*unstructured.Unstructured, error) {
 	res, err := c.resource(gvk, namespace)
 	if err != nil {
 		return nil, err
@@ -213,7 +273,13 @@ func (c *ObjectClient) Patch(ctx context.Context, gvk schema.GroupVersionKind, n
 // WaitForConditions polls until every named condition is True. A timeout
 // reports each condition's current state and message, which is where a
 // controller explains itself.
-func (c *ObjectClient) WaitForConditions(ctx context.Context, gvk schema.GroupVersionKind, namespace, name string, conditions []string, opts WaitOptions) error {
+func (c *ObjectClient) WaitForConditions(
+	ctx context.Context,
+	gvk schema.GroupVersionKind,
+	namespace, name string,
+	conditions []string,
+	opts WaitOptions,
+) error {
 	if len(conditions) == 0 {
 		return nil
 	}
@@ -232,7 +298,16 @@ func (c *ObjectClient) WaitForConditions(ctx context.Context, gvk schema.GroupVe
 			}
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("%w: %s %s/%s did not reach %v within %v: %s", ErrClusterNotReady, gvk.Kind, namespace, name, conditions, timeout, ConditionSummary(last, conditions))
+			return fmt.Errorf(
+				"%w: %s %s/%s did not reach %v within %v: %s",
+				ErrClusterNotReady,
+				gvk.Kind,
+				namespace,
+				name,
+				conditions,
+				timeout,
+				ConditionSummary(last, conditions),
+			)
 		}
 		select {
 		case <-ctx.Done():
@@ -243,7 +318,12 @@ func (c *ObjectClient) WaitForConditions(ctx context.Context, gvk schema.GroupVe
 }
 
 // WaitForDeletion polls until the object is gone.
-func (c *ObjectClient) WaitForDeletion(ctx context.Context, gvk schema.GroupVersionKind, namespace, name string, opts WaitOptions) error {
+func (c *ObjectClient) WaitForDeletion(
+	ctx context.Context,
+	gvk schema.GroupVersionKind,
+	namespace, name string,
+	opts WaitOptions,
+) error {
 	_, timeout, poll := waitDefaults(namespace, opts)
 	deadline := time.Now().Add(timeout)
 	for {
@@ -255,7 +335,15 @@ func (c *ObjectClient) WaitForDeletion(ctx context.Context, gvk schema.GroupVers
 			return err
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("%w: %s %s/%s still exists after %v (finalizers: %v)", ErrClusterNotDeleted, gvk.Kind, namespace, name, timeout, obj.GetFinalizers())
+			return fmt.Errorf(
+				"%w: %s %s/%s still exists after %v (finalizers: %v)",
+				ErrClusterNotDeleted,
+				gvk.Kind,
+				namespace,
+				name,
+				timeout,
+				obj.GetFinalizers(),
+			)
 		}
 		select {
 		case <-ctx.Done():

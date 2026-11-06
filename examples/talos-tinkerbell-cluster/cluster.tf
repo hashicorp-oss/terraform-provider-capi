@@ -15,7 +15,8 @@ resource "capi_cluster" "this" {
   control_plane = { replicas = length(var.control_plane_nodes) }
 
   # Bare-metal provisioning: imaging and the first boot take a while.
-  wait = { conditions = ["Available"], timeout = "90m" }
+  wait     = { conditions = ["Available"] }
+  timeouts = { create = "90m", update = "90m" }
 
   # Machines need Hardware to claim. On destroy the cluster goes first, so
   # CAPT releases every Hardware before capi_hardware deletes it.
@@ -40,5 +41,5 @@ resource "capi_machine_deployment" "worker" {
   # One machine at a time: no spare boards to surge onto.
   rollout = { strategy = "RollingUpdate", max_surge = 0, max_unavailable = 1 }
 
-  wait = { timeout = "60m" }
+  timeouts = { create = "60m", update = "60m", delete = "60m" }
 }

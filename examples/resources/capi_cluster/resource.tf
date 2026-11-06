@@ -19,7 +19,7 @@ resource "capi_cluster" "example" {
     infrastructure = capi_machine_template.cp.ref
   }
 
-  wait = { timeout = "30m" }
+  timeouts = { create = "30m" }
 }
 
 resource "capi_machine_template" "worker" {

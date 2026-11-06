@@ -15,22 +15,40 @@ func TestDefaultCreateOptions(t *testing.T) {
 	if opts.Name != "my-cluster" {
 		t.Errorf("expected name 'my-cluster', got %q", opts.Name)
 	}
-	if infra, ok := opts.Providers.Infrastructure(); !ok || infra.Name != InfrastructureProviderName {
+	if infra, ok := opts.Providers.Infrastructure(); !ok ||
+		infra.Name != InfrastructureProviderName {
 		t.Errorf("expected provider %q, got %+v", InfrastructureProviderName, infra)
 	}
-	if got := opts.Providers.InitStrings(capi.ProviderTypeBootstrap); len(got) != 1 || got[0] != BootstrapProviderName {
+	if got := opts.Providers.InitStrings(
+		capi.ProviderTypeBootstrap,
+	); len(got) != 1 ||
+		got[0] != BootstrapProviderName {
 		t.Errorf("expected bootstrap %q, got %v", BootstrapProviderName, got)
 	}
-	if got := opts.Providers.InitStrings(capi.ProviderTypeControlPlane); len(got) != 1 || got[0] != ControlPlaneProviderName {
+	if got := opts.Providers.InitStrings(
+		capi.ProviderTypeControlPlane,
+	); len(got) != 1 ||
+		got[0] != ControlPlaneProviderName {
 		t.Errorf("expected control plane %q, got %v", ControlPlaneProviderName, got)
 	}
 	if opts.KubernetesVersion != DefaultKubernetesVersion {
-		t.Errorf("expected k8s version %q, got %q", DefaultKubernetesVersion, opts.KubernetesVersion)
+		t.Errorf(
+			"expected k8s version %q, got %q",
+			DefaultKubernetesVersion,
+			opts.KubernetesVersion,
+		)
 	}
 	if *opts.ControlPlane.Replicas != DefaultControlPlaneCount {
-		t.Errorf("expected cp count %d, got %d", DefaultControlPlaneCount, *opts.ControlPlane.Replicas)
+		t.Errorf(
+			"expected cp count %d, got %d",
+			DefaultControlPlaneCount,
+			*opts.ControlPlane.Replicas,
+		)
 	}
-	if opts.Infrastructure.Provider != InfrastructureProviderName || opts.ControlPlane.Provider != ControlPlaneProviderName || opts.ControlPlane.Template == nil || opts.ControlPlane.Template.Name != "my-cluster-control-plane" {
+	if opts.Infrastructure.Provider != InfrastructureProviderName ||
+		opts.ControlPlane.Provider != ControlPlaneProviderName ||
+		opts.ControlPlane.Template == nil ||
+		opts.ControlPlane.Template.Name != "my-cluster-control-plane" {
 		t.Errorf("cluster objects = %+v %+v", opts.Infrastructure, opts.ControlPlane)
 	}
 	if opts.Namespace != "default" {

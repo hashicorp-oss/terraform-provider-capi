@@ -17,7 +17,11 @@ import (
 )
 
 // workflowsGVR is the Tinkerbell Workflow resource tink-server executes.
-var workflowsGVR = schema.GroupVersionResource{Group: "tinkerbell.org", Version: "v1alpha1", Resource: "workflows"}
+var workflowsGVR = schema.GroupVersionResource{
+	Group:    "tinkerbell.org",
+	Version:  "v1alpha1",
+	Resource: "workflows",
+}
 
 // activeWorkflowStates are the Workflow states in which an agent is still
 // talking to the tink-server that booted it (upstream and legacy spellings).
@@ -39,7 +43,12 @@ func NewTinkerbellQuiescer() *TinkerbellQuiescer {
 }
 
 // WaitForQuiescence implements Quiescer.
-func (q *TinkerbellQuiescer) WaitForQuiescence(ctx context.Context, mgmtCluster *Cluster, namespace string, opts WaitOptions) error {
+func (q *TinkerbellQuiescer) WaitForQuiescence(
+	ctx context.Context,
+	mgmtCluster *Cluster,
+	namespace string,
+	opts WaitOptions,
+) error {
 	dynClient, err := q.clientFor(mgmtCluster.KubeconfigPath)
 	if err != nil {
 		return fmt.Errorf("connecting to %s: %w", mgmtCluster.Name, err)
@@ -55,7 +64,11 @@ func (q *TinkerbellQuiescer) WaitForQuiescence(ctx context.Context, mgmtCluster 
 			return nil
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("timed out waiting for Tinkerbell workflows to finish in %s: %s", namespace, strings.Join(active, ", "))
+			return fmt.Errorf(
+				"timed out waiting for Tinkerbell workflows to finish in %s: %s",
+				namespace,
+				strings.Join(active, ", "),
+			)
 		}
 		select {
 		case <-ctx.Done():
@@ -67,8 +80,14 @@ func (q *TinkerbellQuiescer) WaitForQuiescence(ctx context.Context, mgmtCluster 
 
 // activeWorkflows lists the names of Workflows still running. A missing
 // Workflow CRD means there is no Tinkerbell here and nothing can be running.
-func activeWorkflows(ctx context.Context, dynClient dynamic.Interface, namespace string) ([]string, error) {
-	list, err := dynClient.Resource(workflowsGVR).Namespace(namespace).List(ctx, meta_v1.ListOptions{})
+func activeWorkflows(
+	ctx context.Context,
+	dynClient dynamic.Interface,
+	namespace string,
+) ([]string, error) {
+	list, err := dynClient.Resource(workflowsGVR).
+		Namespace(namespace).
+		List(ctx, meta_v1.ListOptions{})
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil, nil

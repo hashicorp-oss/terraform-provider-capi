@@ -78,7 +78,10 @@ func BuildComponentsAlterFn(p ProviderConfig) repository.ComponentsAlterFn {
 
 // customizeDeployment finds the controller-manager Deployment and applies
 // DeploymentConfig overrides. Mirrors capi-operator's customizeObjectsFn.
-func customizeDeployment(objs []unstructured.Unstructured, cfg *DeploymentConfig) ([]unstructured.Unstructured, error) {
+func customizeDeployment(
+	objs []unstructured.Unstructured,
+	cfg *DeploymentConfig,
+) ([]unstructured.Unstructured, error) {
 	for i := range objs {
 		if objs[i].GetKind() != "Deployment" {
 			continue
@@ -88,23 +91,42 @@ func customizeDeployment(objs []unstructured.Unstructured, cfg *DeploymentConfig
 		}
 
 		if cfg.Replicas != nil {
-			if err := unstructured.SetNestedField(objs[i].Object, *cfg.Replicas, "spec", "replicas"); err != nil {
+			if err := unstructured.SetNestedField(
+				objs[i].Object,
+				*cfg.Replicas,
+				"spec",
+				"replicas",
+			); err != nil {
 				return nil, fmt.Errorf("setting replicas: %w", err)
 			}
 		}
 
 		if len(cfg.NodeSelector) > 0 {
-			ns := make(map[string]interface{}, len(cfg.NodeSelector))
+			ns := make(map[string]any, len(cfg.NodeSelector))
 			for k, v := range cfg.NodeSelector {
 				ns[k] = v
 			}
-			if err := unstructured.SetNestedField(objs[i].Object, ns, "spec", "template", "spec", "nodeSelector"); err != nil {
+			if err := unstructured.SetNestedField(
+				objs[i].Object,
+				ns,
+				"spec",
+				"template",
+				"spec",
+				"nodeSelector",
+			); err != nil {
 				return nil, fmt.Errorf("setting nodeSelector: %w", err)
 			}
 		}
 
 		if cfg.ServiceAccountName != "" {
-			if err := unstructured.SetNestedField(objs[i].Object, cfg.ServiceAccountName, "spec", "template", "spec", "serviceAccountName"); err != nil {
+			if err := unstructured.SetNestedField(
+				objs[i].Object,
+				cfg.ServiceAccountName,
+				"spec",
+				"template",
+				"spec",
+				"serviceAccountName",
+			); err != nil {
 				return nil, fmt.Errorf("setting serviceAccountName: %w", err)
 			}
 		}
@@ -120,14 +142,20 @@ func customizeDeployment(objs []unstructured.Unstructured, cfg *DeploymentConfig
 
 // customizeContainers applies container overrides to a Deployment's pod spec.
 func customizeContainers(obj *unstructured.Unstructured, overrides []ContainerConfig) error {
-	containers, found, err := unstructured.NestedSlice(obj.Object, "spec", "template", "spec", "containers")
+	containers, found, err := unstructured.NestedSlice(
+		obj.Object,
+		"spec",
+		"template",
+		"spec",
+		"containers",
+	)
 	if err != nil || !found {
 		return nil
 	}
 
 	for _, override := range overrides {
 		for ci, c := range containers {
-			cMap, ok := c.(map[string]interface{})
+			cMap, ok := c.(map[string]any)
 			if !ok {
 				continue
 			}
@@ -140,7 +168,7 @@ func customizeContainers(obj *unstructured.Unstructured, overrides []ContainerCo
 				cMap["image"] = override.ImageURL
 			}
 			if len(override.Command) > 0 {
-				cmd := make([]interface{}, len(override.Command))
+				cmd := make([]any, len(override.Command))
 				for i, v := range override.Command {
 					cmd[i] = v
 				}
@@ -157,25 +185,42 @@ func customizeContainers(obj *unstructured.Unstructured, overrides []ContainerCo
 		}
 	}
 
-	return unstructured.SetNestedSlice(obj.Object, containers, "spec", "template", "spec", "containers")
+	return unstructured.SetNestedSlice(
+		obj.Object,
+		containers,
+		"spec",
+		"template",
+		"spec",
+		"containers",
+	)
 }
 
 // customizeManager finds the manager container in the controller-manager
 // Deployment and injects manager configuration as container args.
 // Mirrors capi-operator's customizeManagerContainer.
-func customizeManager(objs []unstructured.Unstructured, cfg *ManagerConfig) ([]unstructured.Unstructured, error) {
+func customizeManager(
+	objs []unstructured.Unstructured,
+	cfg *ManagerConfig,
+) ([]unstructured.Unstructured, error) {
 	for i := range objs {
-		if objs[i].GetKind() != "Deployment" || !strings.Contains(objs[i].GetName(), "controller-manager") {
+		if objs[i].GetKind() != "Deployment" ||
+			!strings.Contains(objs[i].GetName(), "controller-manager") {
 			continue
 		}
 
-		containers, found, err := unstructured.NestedSlice(objs[i].Object, "spec", "template", "spec", "containers")
+		containers, found, err := unstructured.NestedSlice(
+			objs[i].Object,
+			"spec",
+			"template",
+			"spec",
+			"containers",
+		)
 		if err != nil || !found {
 			continue
 		}
 
 		for ci, c := range containers {
-			cMap, ok := c.(map[string]interface{})
+			cMap, ok := c.(map[string]any)
 			if !ok {
 				continue
 			}
@@ -190,7 +235,11 @@ func customizeManager(objs []unstructured.Unstructured, cfg *ManagerConfig) ([]u
 				args = setArg(args, "--profiler-address", cfg.ProfilerAddress)
 			}
 			if cfg.MaxConcurrentReconciles != nil {
-				args = setArg(args, "--max-concurrent-reconciles", fmt.Sprintf("%d", *cfg.MaxConcurrentReconciles))
+				args = setArg(
+					args,
+					"--max-concurrent-reconciles",
+					fmt.Sprintf("%d", *cfg.MaxConcurrentReconciles),
+				)
 			}
 			if cfg.Verbosity != nil {
 				args = setArg(args, "--v", fmt.Sprintf("%d", *cfg.Verbosity))
@@ -210,7 +259,14 @@ func customizeManager(objs []unstructured.Unstructured, cfg *ManagerConfig) ([]u
 			containers[ci] = cMap
 		}
 
-		if err := unstructured.SetNestedSlice(objs[i].Object, containers, "spec", "template", "spec", "containers"); err != nil {
+		if err := unstructured.SetNestedSlice(
+			objs[i].Object,
+			containers,
+			"spec",
+			"template",
+			"spec",
+			"containers",
+		); err != nil {
 			return nil, err
 		}
 	}
@@ -220,11 +276,19 @@ func customizeManager(objs []unstructured.Unstructured, cfg *ManagerConfig) ([]u
 // applyManifestPatches applies RFC 7396 JSON merge patches to all objects.
 // Each patch string is parsed as JSON/YAML and merged into every object.
 // Mirrors capi-operator's manifestPatches behavior.
-func applyManifestPatches(objs []unstructured.Unstructured, patches []string) ([]unstructured.Unstructured, error) {
+func applyManifestPatches(
+	objs []unstructured.Unstructured,
+	patches []string,
+) ([]unstructured.Unstructured, error) {
 	for i := range objs {
 		objJSON, err := json.Marshal(objs[i].Object)
 		if err != nil {
-			return nil, fmt.Errorf("marshaling object %s/%s: %w", objs[i].GetKind(), objs[i].GetName(), err)
+			return nil, fmt.Errorf(
+				"marshaling object %s/%s: %w",
+				objs[i].GetKind(),
+				objs[i].GetName(),
+				err,
+			)
 		}
 
 		for _, patchStr := range patches {
@@ -234,11 +298,16 @@ func applyManifestPatches(objs []unstructured.Unstructured, patches []string) ([
 			}
 			objJSON, err = jsonpatch.MergePatch(objJSON, patchJSON)
 			if err != nil {
-				return nil, fmt.Errorf("applying merge patch to %s/%s: %w", objs[i].GetKind(), objs[i].GetName(), err)
+				return nil, fmt.Errorf(
+					"applying merge patch to %s/%s: %w",
+					objs[i].GetKind(),
+					objs[i].GetName(),
+					err,
+				)
 			}
 		}
 
-		var patched map[string]interface{}
+		var patched map[string]any
 		if err := json.Unmarshal(objJSON, &patched); err != nil {
 			return nil, fmt.Errorf("unmarshaling patched object: %w", err)
 		}
@@ -251,7 +320,10 @@ func applyManifestPatches(objs []unstructured.Unstructured, patches []string) ([
 // Each patch is applied only to objects matching its target selector.
 // Supports RFC 7396 merge patches (default) and RFC 6902 JSON patches
 // (detected by array syntax). Mirrors capi-operator's targeted patch behavior.
-func applyTargetedPatches(objs []unstructured.Unstructured, patches []PatchConfig) ([]unstructured.Unstructured, error) {
+func applyTargetedPatches(
+	objs []unstructured.Unstructured,
+	patches []PatchConfig,
+) ([]unstructured.Unstructured, error) {
 	for _, pc := range patches {
 		if pc.Patch == "" {
 			continue
@@ -281,16 +353,26 @@ func applyTargetedPatches(objs []unstructured.Unstructured, patches []PatchConfi
 				}
 				patched, err = p.Apply(objJSON)
 				if err != nil {
-					return nil, fmt.Errorf("applying RFC6902 patch to %s/%s: %w", objs[i].GetKind(), objs[i].GetName(), err)
+					return nil, fmt.Errorf(
+						"applying RFC6902 patch to %s/%s: %w",
+						objs[i].GetKind(),
+						objs[i].GetName(),
+						err,
+					)
 				}
 			} else {
 				patched, err = jsonpatch.MergePatch(objJSON, patchJSON)
 				if err != nil {
-					return nil, fmt.Errorf("applying merge patch to %s/%s: %w", objs[i].GetKind(), objs[i].GetName(), err)
+					return nil, fmt.Errorf(
+						"applying merge patch to %s/%s: %w",
+						objs[i].GetKind(),
+						objs[i].GetName(),
+						err,
+					)
 				}
 			}
 
-			var patchedObj map[string]interface{}
+			var patchedObj map[string]any
 			if err := json.Unmarshal(patched, &patchedObj); err != nil {
 				return nil, fmt.Errorf("unmarshaling patched object: %w", err)
 			}
@@ -354,12 +436,12 @@ func parseMultiDocYAML(data []byte) ([]unstructured.Unstructured, error) {
 }
 
 // containerArgs extracts the args slice from a container map as []interface{}.
-func containerArgs(cMap map[string]interface{}) []interface{} {
+func containerArgs(cMap map[string]any) []any {
 	raw, ok := cMap["args"]
 	if !ok {
 		return nil
 	}
-	args, ok := raw.([]interface{})
+	args, ok := raw.([]any)
 	if !ok {
 		return nil
 	}
@@ -367,7 +449,7 @@ func containerArgs(cMap map[string]interface{}) []interface{} {
 }
 
 // setArg sets or replaces a --key=value argument in an args list.
-func setArg(args []interface{}, key, value string) []interface{} {
+func setArg(args []any, key, value string) []any {
 	prefix := key + "="
 	if !strings.HasPrefix(key, "-") {
 		prefix = "--" + key + "="
@@ -425,7 +507,10 @@ func (p *customProcessor) GetVariableMap(raw []byte) (map[string]*string, error)
 	return p.base.GetVariableMap(raw)
 }
 
-func (p *customProcessor) Process(raw []byte, resolver func(string) (string, error)) ([]byte, error) {
+func (p *customProcessor) Process(
+	raw []byte,
+	resolver func(string) (string, error),
+) ([]byte, error) {
 	wrappedResolver := func(key string) (string, error) {
 		if v, ok := p.vars[key]; ok {
 			return v, nil
@@ -460,7 +545,10 @@ type customizingComponentsClient struct {
 	alterFn repository.ComponentsAlterFn
 }
 
-func (c *customizingComponentsClient) Get(ctx context.Context, options repository.ComponentsOptions) (repository.Components, error) {
+func (c *customizingComponentsClient) Get(
+	ctx context.Context,
+	options repository.ComponentsOptions,
+) (repository.Components, error) {
 	comps, err := c.ComponentsClient.Get(ctx, options)
 	if err != nil {
 		return nil, err
@@ -479,7 +567,10 @@ func (c *customizingComponentsClient) Get(ctx context.Context, options repositor
 //  2. Wraps the ComponentsClient to apply deployment/manager/patch customizations
 //
 // Other providers pass through to the default factory unchanged.
-func NewCustomizingRepoFactory(configClient config.Client, customizations map[ProviderKey]ProviderConfig) clusterctlclient.RepositoryClientFactory {
+func NewCustomizingRepoFactory(
+	configClient config.Client,
+	customizations map[ProviderKey]ProviderConfig,
+) clusterctlclient.RepositoryClientFactory {
 	return func(ctx context.Context, input clusterctlclient.RepositoryClientFactoryInput) (repository.Client, error) {
 		var (
 			p   ProviderConfig
@@ -506,7 +597,11 @@ func NewCustomizingRepoFactory(configClient config.Client, customizations map[Pr
 		needsAlter := ok && (p.Deployment != nil || p.Manager != nil ||
 			len(p.ManifestPatches) > 0 || len(p.Patches) > 0 || p.AdditionalManifests != "")
 		if needsAlter {
-			return &customizingRepoClient{Client: repoClient, alterFn: BuildComponentsAlterFn(p), key: key}, nil
+			return &customizingRepoClient{
+				Client:  repoClient,
+				alterFn: BuildComponentsAlterFn(p),
+				key:     key,
+			}, nil
 		}
 		return repoClient, nil
 	}

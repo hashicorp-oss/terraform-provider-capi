@@ -146,7 +146,11 @@ func New(creds Credentials, logger *log.Logger) *Lib {
 	}
 	opts := []bmclib.Option{bmclib.WithPerProviderTimeout(perProviderTimeout)}
 	if port > 0 {
-		opts = append(opts, bmclib.WithIntelAMTPort(uint32(port)), bmclib.WithRedfishPort(strconv.Itoa(port)))
+		opts = append(
+			opts,
+			bmclib.WithIntelAMTPort(uint32(port)),
+			bmclib.WithRedfishPort(strconv.Itoa(port)),
+		)
 	}
 	if scheme != "" {
 		opts = append(opts, bmclib.WithIntelAMTHostScheme(scheme))
@@ -205,7 +209,11 @@ func preferProvider(conns []string) string {
 
 // withSession opens a session, runs fn, and closes the session. Errors are
 // annotated with bmclib's provider metadata.
-func (b *Lib) withSession(ctx context.Context, op string, fn func(context.Context, *openSession) error) error {
+func (b *Lib) withSession(
+	ctx context.Context,
+	op string,
+	fn func(context.Context, *openSession) error,
+) error {
 	s := b.newSession()
 	ctx, cancel := context.WithTimeout(ctx, b.timeout)
 	defer cancel()
@@ -237,7 +245,12 @@ func wrapError(op string, err error, md bmc.Metadata) error {
 		strings.Contains(err.Error(), "implementations found") {
 		return fmt.Errorf("bmc %s: %w", op, ErrUnsupported)
 	}
-	return &Error{Op: op, Err: err, Attempted: md.ProvidersAttempted, Failed: md.FailedProviderDetail}
+	return &Error{
+		Op:        op,
+		Err:       err,
+		Attempted: md.ProvidersAttempted,
+		Failed:    md.FailedProviderDetail,
+	}
 }
 
 // PowerState reads the BMC-reported power state, normalized to on/off/unknown.
@@ -458,6 +471,11 @@ func (b *Lib) RedirectISO(ctx context.Context, isoRef string) (RedirectHandle, e
 		_ = cli.Close(ctx)
 		return nil, fmt.Errorf("storage redirection: %w", err)
 	}
-	b.logger.Printf("bmc %s: storage redirection serving %s (%d bytes)", b.creds.Address, isoRef, st.Size())
+	b.logger.Printf(
+		"bmc %s: storage redirection serving %s (%d bytes)",
+		b.creds.Address,
+		isoRef,
+		st.Size(),
+	)
 	return &redirectHandle{sess: sess, cli: cli, file: f}, nil
 }

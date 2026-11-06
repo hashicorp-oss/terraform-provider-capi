@@ -12,10 +12,9 @@ import (
 	"errors"
 	"fmt"
 
-	"golang.org/x/crypto/ssh"
-
 	"github.com/tinkerbell-community/terraform-provider-capi/internal/capi"
 	"github.com/tinkerbell-community/terraform-provider-capi/internal/capi/bmc"
+	"golang.org/x/crypto/ssh"
 )
 
 // Defaults applied by Config.withDefaults.
@@ -124,7 +123,12 @@ func (c Config) Validate() error {
 	switch c.Boot.Method {
 	case bmc.BootMethodAuto, bmc.BootMethodVirtualMedia, bmc.BootMethodManual:
 	case bmc.BootMethodHTTP:
-		errs = append(errs, errors.New(`boot method "http" boots a UKI over UEFI HTTP boot, not a live ISO; use "virtual_media"`))
+		errs = append(
+			errs,
+			errors.New(
+				`boot method "http" boots a UKI over UEFI HTTP boot, not a live ISO; use "virtual_media"`,
+			),
+		)
 	default:
 		errs = append(errs, fmt.Errorf("unknown boot method %q", c.Boot.Method))
 	}

@@ -1,1 +1,1 @@
-.claude/DESIGN.md
+../../.claude/DESIGN.md

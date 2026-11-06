@@ -137,7 +137,7 @@ func (b *KindBootstrapper) clusterFromName(name string) (*Cluster, error) {
 		}
 	}
 
-	if err := os.WriteFile(kubeconfigPath, []byte(kubeconfig), 0600); err != nil {
+	if err := os.WriteFile(kubeconfigPath, []byte(kubeconfig), 0o600); err != nil {
 		return nil, &BootstrapError{
 			ClusterName: name,
 			Operation:   "write-kubeconfig",

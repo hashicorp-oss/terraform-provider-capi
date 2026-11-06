@@ -35,14 +35,23 @@ type AddonInstaller interface {
 type SecretReader interface {
 	// ReadSecret returns the decoded data of the named Secret, or an error
 	// wrapping ErrClusterNotFound when it does not exist.
-	ReadSecret(ctx context.Context, cluster *Cluster, namespace, name string) (map[string]string, error)
+	ReadSecret(
+		ctx context.Context,
+		cluster *Cluster,
+		namespace, name string,
+	) (map[string]string, error)
 }
 
 // Quiescer waits until the management cluster's provisioning engine is idle,
 // so a clusterctl move does not strand work that cannot be handed over (a
 // Tinkerbell Workflow mid-flight reports to the tink-server that booted it).
 type Quiescer interface {
-	WaitForQuiescence(ctx context.Context, mgmtCluster *Cluster, namespace string, opts WaitOptions) error
+	WaitForQuiescence(
+		ctx context.Context,
+		mgmtCluster *Cluster,
+		namespace string,
+		opts WaitOptions,
+	) error
 }
 
 // Installer installs and manages CAPI components on a cluster: the
@@ -86,7 +95,11 @@ type Applier interface {
 
 	// Get reads the core Cluster object by name and namespace. A cluster
 	// that does not exist returns an error wrapping ErrClusterNotFound.
-	Get(ctx context.Context, cluster *Cluster, clusterName, namespace string) (*unstructured.Unstructured, error)
+	Get(
+		ctx context.Context,
+		cluster *Cluster,
+		clusterName, namespace string,
+	) (*unstructured.Unstructured, error)
 
 	// Pause sets spec.paused on the Cluster, so its controllers create no
 	// further Machines or infrastructure. clusterctl move resumes the
@@ -105,32 +118,65 @@ type Mover interface {
 // Modeled after EKS Anywhere's wait patterns in ClusterManager.
 type Waiter interface {
 	// WaitForControlPlane waits for the cluster control plane to become ready.
-	WaitForControlPlane(ctx context.Context, mgmtCluster *Cluster, clusterName, namespace string, opts WaitOptions) error
+	WaitForControlPlane(
+		ctx context.Context,
+		mgmtCluster *Cluster,
+		clusterName, namespace string,
+		opts WaitOptions,
+	) error
 
 	// WaitForWorkers waits for worker nodes to become ready.
-	WaitForWorkers(ctx context.Context, mgmtCluster *Cluster, clusterName, namespace string, opts WaitOptions) error
+	WaitForWorkers(
+		ctx context.Context,
+		mgmtCluster *Cluster,
+		clusterName, namespace string,
+		opts WaitOptions,
+	) error
 
 	// WaitForClusterReady waits for the full cluster to be ready (control plane + workers).
-	WaitForClusterReady(ctx context.Context, mgmtCluster *Cluster, clusterName, namespace string, opts WaitOptions) error
+	WaitForClusterReady(
+		ctx context.Context,
+		mgmtCluster *Cluster,
+		clusterName, namespace string,
+		opts WaitOptions,
+	) error
 
 	// WaitForClusterDeleted waits for a deleted Cluster object to disappear,
 	// which is when every owned object (machines, infrastructure) is gone.
-	WaitForClusterDeleted(ctx context.Context, mgmtCluster *Cluster, clusterName, namespace string, opts WaitOptions) error
+	WaitForClusterDeleted(
+		ctx context.Context,
+		mgmtCluster *Cluster,
+		clusterName, namespace string,
+		opts WaitOptions,
+	) error
 
 	// WaitForAddons waits until every CAAPH HelmChartProxy on the management
 	// cluster that matches the cluster has a Ready HelmReleaseProxy for it.
 	// A management cluster without CAAPH has nothing to wait for.
-	WaitForAddons(ctx context.Context, mgmtCluster *Cluster, clusterName, namespace string, opts WaitOptions) error
+	WaitForAddons(
+		ctx context.Context,
+		mgmtCluster *Cluster,
+		clusterName, namespace string,
+		opts WaitOptions,
+	) error
 }
 
 // KubeconfigRetriever retrieves kubeconfigs for workload clusters.
 type KubeconfigRetriever interface {
 	// GetKubeconfig retrieves the kubeconfig for a workload cluster.
-	GetKubeconfig(ctx context.Context, mgmtCluster *Cluster, clusterName, namespace string) (string, error)
+	GetKubeconfig(
+		ctx context.Context,
+		mgmtCluster *Cluster,
+		clusterName, namespace string,
+	) (string, error)
 }
 
 // ClusterDescriber describes the status of a CAPI cluster.
 type ClusterDescriber interface {
 	// Describe returns a human-readable description of the cluster's status.
-	Describe(ctx context.Context, mgmtCluster *Cluster, clusterName, namespace string) (string, error)
+	Describe(
+		ctx context.Context,
+		mgmtCluster *Cluster,
+		clusterName, namespace string,
+	) (string, error)
 }

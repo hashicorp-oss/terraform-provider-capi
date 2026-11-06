@@ -12,13 +12,19 @@ import (
 
 func TestRetry_SucceedsAfterFailures(t *testing.T) {
 	calls := 0
-	err := Retry(context.Background(), 3, time.Millisecond, 2*time.Millisecond, func(context.Context) error {
-		calls++
-		if calls < 3 {
-			return errors.New("transient")
-		}
-		return nil
-	})
+	err := Retry(
+		context.Background(),
+		3,
+		time.Millisecond,
+		2*time.Millisecond,
+		func(context.Context) error {
+			calls++
+			if calls < 3 {
+				return errors.New("transient")
+			}
+			return nil
+		},
+	)
 	if err != nil {
 		t.Fatalf("Retry() error = %v", err)
 	}
@@ -30,10 +36,16 @@ func TestRetry_SucceedsAfterFailures(t *testing.T) {
 func TestRetry_ReturnsLastErrorAfterAttempts(t *testing.T) {
 	calls := 0
 	want := errors.New("still broken")
-	err := Retry(context.Background(), 2, time.Millisecond, time.Millisecond, func(context.Context) error {
-		calls++
-		return want
-	})
+	err := Retry(
+		context.Background(),
+		2,
+		time.Millisecond,
+		time.Millisecond,
+		func(context.Context) error {
+			calls++
+			return want
+		},
+	)
 	if !errors.Is(err, want) {
 		t.Fatalf("Retry() error = %v, want %v", err, want)
 	}
@@ -44,10 +56,16 @@ func TestRetry_ReturnsLastErrorAfterAttempts(t *testing.T) {
 
 func TestRetry_DoesNotRetryUnsupported(t *testing.T) {
 	calls := 0
-	err := Retry(context.Background(), 3, time.Millisecond, time.Millisecond, func(context.Context) error {
-		calls++
-		return ErrUnsupported
-	})
+	err := Retry(
+		context.Background(),
+		3,
+		time.Millisecond,
+		time.Millisecond,
+		func(context.Context) error {
+			calls++
+			return ErrUnsupported
+		},
+	)
 	if !errors.Is(err, ErrUnsupported) {
 		t.Fatalf("Retry() error = %v, want ErrUnsupported", err)
 	}
@@ -74,19 +92,29 @@ func TestRetry_StopsOnContextCancel(t *testing.T) {
 
 func TestWaitFor_ConditionBecomesTrue(t *testing.T) {
 	n := 0
-	err := WaitFor(context.Background(), time.Second, time.Millisecond, func(context.Context) (bool, error) {
-		n++
-		return n >= 3, nil
-	})
+	err := WaitFor(
+		context.Background(),
+		time.Second,
+		time.Millisecond,
+		func(context.Context) (bool, error) {
+			n++
+			return n >= 3, nil
+		},
+	)
 	if err != nil {
 		t.Fatalf("WaitFor() error = %v", err)
 	}
 }
 
 func TestWaitFor_Timeout(t *testing.T) {
-	err := WaitFor(context.Background(), 20*time.Millisecond, time.Millisecond, func(context.Context) (bool, error) {
-		return false, nil
-	})
+	err := WaitFor(
+		context.Background(),
+		20*time.Millisecond,
+		time.Millisecond,
+		func(context.Context) (bool, error) {
+			return false, nil
+		},
+	)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("WaitFor() error = %v, want DeadlineExceeded", err)
 	}
@@ -94,9 +122,14 @@ func TestWaitFor_Timeout(t *testing.T) {
 
 func TestWaitFor_ConditionError(t *testing.T) {
 	want := errors.New("boom")
-	err := WaitFor(context.Background(), time.Second, time.Millisecond, func(context.Context) (bool, error) {
-		return false, want
-	})
+	err := WaitFor(
+		context.Background(),
+		time.Second,
+		time.Millisecond,
+		func(context.Context) (bool, error) {
+			return false, want
+		},
+	)
 	if !errors.Is(err, want) {
 		t.Fatalf("WaitFor() error = %v, want %v", err, want)
 	}

@@ -16,9 +16,12 @@ import (
 func TestClusterKubeconfig(t *testing.T) {
 	ctx := context.Background()
 	secret := &unstructured.Unstructured{Object: map[string]any{
-		"apiVersion": "v1", "kind": "Secret",
-		"metadata": map[string]any{"name": "prod-kubeconfig", "namespace": "capi"},
-		"data":     map[string]any{"value": base64.StdEncoding.EncodeToString([]byte("apiVersion: v1\nkind: Config\n"))},
+		"apiVersion": "v1",
+		"kind":       "Secret",
+		"metadata":   map[string]any{"name": "prod-kubeconfig", "namespace": "capi"},
+		"data": map[string]any{
+			"value": base64.StdEncoding.EncodeToString([]byte("apiVersion: v1\nkind: Config\n")),
+		},
 	}}
 	empty := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "v1", "kind": "Secret",
@@ -29,7 +32,14 @@ func TestClusterKubeconfig(t *testing.T) {
 	if err != nil || !strings.HasPrefix(string(raw), "apiVersion: v1") {
 		t.Fatalf("kubeconfig = %q, %v", raw, err)
 	}
-	if _, err := client.ClusterKubeconfig(ctx, "capi", "missing"); !errors.Is(err, ErrNoKubeconfig) {
+	if _, err := client.ClusterKubeconfig(
+		ctx,
+		"capi",
+		"missing",
+	); !errors.Is(
+		err,
+		ErrNoKubeconfig,
+	) {
 		t.Errorf("missing Secret: %v", err)
 	}
 	if _, err := client.ClusterKubeconfig(ctx, "capi", "bare"); !errors.Is(err, ErrNoKubeconfig) {
@@ -38,15 +48,25 @@ func TestClusterKubeconfig(t *testing.T) {
 }
 
 func TestDecodeDocuments(t *testing.T) {
-	docs, err := DecodeDocuments([]byte("apiVersion: v1\nkind: Namespace\nmetadata:\n  name: a\n---\n---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: b\n  namespace: a\n"))
-	if err != nil || len(docs) != 2 || docs[0].GetKind() != "Namespace" || docs[1].GetNamespace() != "a" {
+	docs, err := DecodeDocuments(
+		[]byte(
+			"apiVersion: v1\nkind: Namespace\nmetadata:\n  name: a\n---\n---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: b\n  namespace: a\n",
+		),
+	)
+	if err != nil || len(docs) != 2 || docs[0].GetKind() != "Namespace" ||
+		docs[1].GetNamespace() != "a" {
 		t.Fatalf("docs = %v, %v", docs, err)
 	}
-	docs, err = DecodeDocuments([]byte(`{"apiVersion":"v1","kind":"Secret","metadata":{"name":"s"}}`))
+	docs, err = DecodeDocuments(
+		[]byte(`{"apiVersion":"v1","kind":"Secret","metadata":{"name":"s"}}`),
+	)
 	if err != nil || len(docs) != 1 || docs[0].GetName() != "s" {
 		t.Errorf("json = %v, %v", docs, err)
 	}
-	if _, err := DecodeDocuments([]byte("apiVersion: v1\nkind: ConfigMap\n")); err == nil || !strings.Contains(err.Error(), "metadata.name") {
+	if _, err := DecodeDocuments(
+		[]byte("apiVersion: v1\nkind: ConfigMap\n"),
+	); err == nil ||
+		!strings.Contains(err.Error(), "metadata.name") {
 		t.Errorf("nameless: %v", err)
 	}
 	if _, err := DecodeDocuments([]byte("foo: [")); err == nil {

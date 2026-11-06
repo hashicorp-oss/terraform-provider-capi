@@ -34,16 +34,26 @@ func DefaultCreateOptions(name string) capi.CreateClusterOptions {
 		Name:      name,
 		Namespace: "default",
 		Providers: capi.ProviderSet{
-			capi.ProviderTypeInfrastructure: {{Type: capi.ProviderTypeInfrastructure, Name: InfrastructureProviderName}},
-			capi.ProviderTypeBootstrap:      {{Type: capi.ProviderTypeBootstrap, Name: BootstrapProviderName}},
-			capi.ProviderTypeControlPlane:   {{Type: capi.ProviderTypeControlPlane, Name: ControlPlaneProviderName}},
+			capi.ProviderTypeInfrastructure: {
+				{Type: capi.ProviderTypeInfrastructure, Name: InfrastructureProviderName},
+			},
+			capi.ProviderTypeBootstrap: {
+				{Type: capi.ProviderTypeBootstrap, Name: BootstrapProviderName},
+			},
+			capi.ProviderTypeControlPlane: {
+				{Type: capi.ProviderTypeControlPlane, Name: ControlPlaneProviderName},
+			},
 		},
 		KubernetesVersion: DefaultKubernetesVersion,
 		Infrastructure:    capi.InfrastructureSpec{Provider: InfrastructureProviderName},
 		ControlPlane: capi.ControlPlaneSpec{
 			Provider: ControlPlaneProviderName,
 			Replicas: &cpCount,
-			Template: &capi.TemplateRef{APIVersion: "infrastructure.cluster.x-k8s.io/v1beta1", Kind: "DockerMachineTemplate", Name: name + "-control-plane"},
+			Template: &capi.TemplateRef{
+				APIVersion: "infrastructure.cluster.x-k8s.io/v1beta1",
+				Kind:       "DockerMachineTemplate",
+				Name:       name + "-control-plane",
+			},
 		},
 		WaitForReady: true,
 		SelfManaged:  false,

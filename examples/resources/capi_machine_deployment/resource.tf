@@ -33,9 +33,9 @@ resource "capi_machine_deployment" "workers" {
 
   labels  = { tier = "worker" }
   rollout = { strategy = "RollingUpdate", max_surge = 1, max_unavailable = 0 }
-  timeouts = {
-    node_drain    = "10m"
-    node_deletion = "2m"
+  deletion = {
+    node_drain_timeout    = "10m"
+    node_deletion_timeout = "2m"
   }
 }
 

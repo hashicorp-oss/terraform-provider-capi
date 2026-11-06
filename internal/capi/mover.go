@@ -55,7 +55,13 @@ func (m *ClusterctlMover) Move(ctx context.Context, from, to *Cluster, opts Move
 		return &CAPIError{
 			Operation: "move",
 			Cluster:   from.Name,
-			Err:       fmt.Errorf("%w: moving CAPI management from %q to %q: %v", ErrCAPIMove, from.Name, to.Name, err),
+			Err: fmt.Errorf(
+				"%w: moving CAPI management from %q to %q: %v",
+				ErrCAPIMove,
+				from.Name,
+				to.Name,
+				err,
+			),
 		}
 	}
 

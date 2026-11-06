@@ -51,7 +51,11 @@ func (f *fakeSession) Close(context.Context) error { f.closed = true; return nil
 
 // op replaces the metadata the way bmclib does after each call.
 func (f *fakeSession) op() (bool, error) {
-	f.metadata = bmc.Metadata{SuccessfulProvider: f.name(), ProvidersAttempted: []string{f.name()}, FailedProviderDetail: f.failed}
+	f.metadata = bmc.Metadata{
+		SuccessfulProvider:   f.name(),
+		ProvidersAttempted:   []string{f.name()},
+		FailedProviderDetail: f.failed,
+	}
 	return f.setErr == nil, f.setErr
 }
 
@@ -59,22 +63,31 @@ func (f *fakeSession) GetPowerState(context.Context) (string, error) {
 	_, _ = f.op()
 	return f.power, f.powerErr
 }
+
 func (f *fakeSession) SetPowerState(_ context.Context, state string) (bool, error) {
 	f.setPowerCalls = append(f.setPowerCalls, state)
 	return f.op()
 }
-func (f *fakeSession) SetBootDevice(_ context.Context, dev string, persistent, efi bool) (bool, error) {
+
+func (f *fakeSession) SetBootDevice(
+	_ context.Context,
+	dev string,
+	persistent, efi bool,
+) (bool, error) {
 	f.bootCalls = append(f.bootCalls, dev)
 	return f.op()
 }
+
 func (f *fakeSession) SetVirtualMedia(_ context.Context, kind, url string) (bool, error) {
 	f.mediaCalls = append(f.mediaCalls, kind+":"+url)
 	return f.op()
 }
+
 func (f *fakeSession) SetHTTPBootURI(_ context.Context, uri string) (bool, error) {
 	f.httpCalls = append(f.httpCalls, uri)
 	return f.op()
 }
+
 func (f *fakeSession) PostCode(context.Context) (string, int, error) {
 	_, _ = f.op()
 	return "ok", 0, nil
@@ -110,7 +123,17 @@ func TestParseAddress(t *testing.T) {
 			continue
 		}
 		if err != nil || host != tc.host || port != tc.port || scheme != tc.scheme {
-			t.Errorf("parseAddress(%q) = %q,%d,%q,%v; want %q,%d,%q", tc.in, host, port, scheme, err, tc.host, tc.port, tc.scheme)
+			t.Errorf(
+				"parseAddress(%q) = %q,%d,%q,%v; want %q,%d,%q",
+				tc.in,
+				host,
+				port,
+				scheme,
+				err,
+				tc.host,
+				tc.port,
+				tc.scheme,
+			)
 		}
 	}
 }
@@ -129,7 +152,11 @@ func TestBMCLib_PowerStateNormalizesCase(t *testing.T) {
 			t.Fatalf("PowerState(%q) = %q, want %q", tc.raw, got, tc.want)
 		}
 		if !s.opened || !s.closed {
-			t.Fatalf("session should be opened and closed, got opened=%v closed=%v", s.opened, s.closed)
+			t.Fatalf(
+				"session should be opened and closed, got opened=%v closed=%v",
+				s.opened,
+				s.closed,
+			)
 		}
 	}
 }
@@ -189,12 +216,22 @@ func TestBMCLib_AMTArmsBootAndClearsViaEject(t *testing.T) {
 	b := newTestBMC(s)
 	ctx := context.Background()
 	// AMT has no CD emulation: an ISO is unsupported so auto mode moves on to the UKI.
-	if _, err := b.InsertMedia(ctx, "https://example.com/talos.iso"); !errors.Is(err, ErrUnsupported) {
+	if _, err := b.InsertMedia(
+		ctx,
+		"https://example.com/talos.iso",
+	); !errors.Is(
+		err,
+		ErrUnsupported,
+	) {
 		t.Fatalf("InsertMedia() error = %v, want ErrUnsupported on AMT", err)
 	}
 	armed, err := b.SetHTTPBootURI(ctx, "https://example.com/uki.efi")
 	if err != nil || !armed {
-		t.Fatalf("SetHTTPBootURI() = armed %v, err %v; want armed (metadata after the call no longer lists open conns)", armed, err)
+		t.Fatalf(
+			"SetHTTPBootURI() = armed %v, err %v; want armed (metadata after the call no longer lists open conns)",
+			armed,
+			err,
+		)
 	}
 	if _, err := b.SetHTTPBootURI(ctx, ""); err != nil {
 		t.Fatal(err)
@@ -212,7 +249,9 @@ func TestBMCLib_AMTArmsBootAndClearsViaEject(t *testing.T) {
 }
 
 func TestBMCLib_UnsupportedMapsToErrUnsupported(t *testing.T) {
-	s := &fakeSession{setErr: errors.New("1 error occurred: no VirtualMediaSetter implementations found")}
+	s := &fakeSession{
+		setErr: errors.New("1 error occurred: no VirtualMediaSetter implementations found"),
+	}
 	_, err := newTestBMC(s).InsertMedia(context.Background(), "https://example.com/talos.iso")
 	if !errors.Is(err, ErrUnsupported) {
 		t.Fatalf("InsertMedia() error = %v, want ErrUnsupported", err)

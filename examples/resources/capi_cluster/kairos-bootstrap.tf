@@ -354,7 +354,13 @@ resource "capi_cluster" "kairos" {
 
   wait = {
     conditions = ["Available"]
-    timeout    = "90m"
+  }
+
+  # The whole pivot: bootstrap node, providers, first control plane,
+  # handover, move and readiness.
+  timeouts = {
+    create = "3h"
+    delete = "2h"
   }
 }
 
@@ -366,6 +372,7 @@ resource "capi_machine_template" "worker" {
   namespace      = local.namespace
   infrastructure = "tinkerbell"
   api_version    = "infrastructure.cluster.x-k8s.io/v1beta1"
+  kind           = "TinkerbellMachineTemplate"
   spec           = { hardwareAffinity = { required = [{ labelSelector = { matchLabels = { type = "worker" } } }] } }
   depends_on     = [capi_cluster.kairos]
 }
@@ -375,6 +382,7 @@ resource "capi_bootstrap_template" "worker" {
   namespace   = local.namespace
   bootstrap   = "talos"
   api_version = "bootstrap.cluster.x-k8s.io/v1alpha3"
+  kind        = "TalosConfigTemplate"
   spec = {
     generateType     = "worker"
     talosVersion     = local.talos_version

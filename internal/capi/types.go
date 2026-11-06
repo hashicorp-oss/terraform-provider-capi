@@ -302,7 +302,8 @@ type AddonSet struct {
 
 // Empty reports whether nothing is configured.
 func (a AddonSet) Empty() bool {
-	return len(a.PreHelmManifestURLs) == 0 && len(a.Prerequisites) == 0 && len(a.Helm) == 0 && len(a.Manifests) == 0
+	return len(a.PreHelmManifestURLs) == 0 && len(a.Prerequisites) == 0 && len(a.Helm) == 0 &&
+		len(a.Manifests) == 0
 }
 
 // APIEndpoint is Cluster.spec.controlPlaneEndpoint.

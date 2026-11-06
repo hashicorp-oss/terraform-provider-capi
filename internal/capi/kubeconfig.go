@@ -62,7 +62,10 @@ func ParseRootSecrets(name string, secrets map[string]string) (*RootCredential, 
 			return nil, fmt.Errorf("decoding the Talos bundle's Kubernetes CA key: %w", err)
 		}
 		if len(crt) == 0 || len(key) == 0 {
-			return nil, fmt.Errorf("%w: the Talos bundle has no certs.k8s pair", ErrNoRootCredential)
+			return nil, fmt.Errorf(
+				"%w: the Talos bundle has no certs.k8s pair",
+				ErrNoRootCredential,
+			)
 		}
 		return &RootCredential{CertPEM: crt, KeyPEM: key}, nil
 	}
@@ -77,7 +80,12 @@ func ParseRootSecrets(name string, secrets map[string]string) (*RootCredential, 
 // valid for ttl from now, signed by the cluster CA, and returns a kubeconfig
 // for server. It is what a self-managed cluster uses to reach itself, since
 // no other authority holds a credential for it.
-func DeriveKubeconfig(root *RootCredential, server, clusterName string, ttl time.Duration, now time.Time) ([]byte, error) {
+func DeriveKubeconfig(
+	root *RootCredential,
+	server, clusterName string,
+	ttl time.Duration,
+	now time.Time,
+) ([]byte, error) {
 	if root == nil {
 		return nil, ErrNoRootCredential
 	}
@@ -110,11 +118,14 @@ func DeriveKubeconfig(root *RootCredential, server, clusterName string, ttl time
 	}
 	tmpl := &x509.Certificate{
 		SerialNumber: serial,
-		Subject:      pkix.Name{CommonName: "terraform-provider-capi", Organization: []string{"system:masters"}},
-		NotBefore:    now.Add(-5 * time.Minute),
-		NotAfter:     now.Add(ttl),
-		KeyUsage:     x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+		Subject: pkix.Name{
+			CommonName:   "terraform-provider-capi",
+			Organization: []string{"system:masters"},
+		},
+		NotBefore:   now.Add(-5 * time.Minute),
+		NotAfter:    now.Add(ttl),
+		KeyUsage:    x509.KeyUsageDigitalSignature,
+		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, caCert, &clientKey.PublicKey, caKey)
 	if err != nil {
@@ -132,8 +143,14 @@ func DeriveKubeconfig(root *RootCredential, server, clusterName string, ttl time
 	}
 	user := "terraform-provider-capi"
 	cfg := clientcmdapi.NewConfig()
-	cfg.Clusters[clusterName] = &clientcmdapi.Cluster{Server: server, CertificateAuthorityData: root.CertPEM}
-	cfg.AuthInfos[user] = &clientcmdapi.AuthInfo{ClientCertificateData: certPEM, ClientKeyData: keyPEM}
+	cfg.Clusters[clusterName] = &clientcmdapi.Cluster{
+		Server:                   server,
+		CertificateAuthorityData: root.CertPEM,
+	}
+	cfg.AuthInfos[user] = &clientcmdapi.AuthInfo{
+		ClientCertificateData: certPEM,
+		ClientKeyData:         keyPEM,
+	}
 	cfg.Contexts[clusterName] = &clientcmdapi.Context{Cluster: clusterName, AuthInfo: user}
 	cfg.CurrentContext = clusterName
 	return clientcmd.Write(*cfg)
@@ -188,7 +205,10 @@ func ParseKubeconfig(raw []byte) (*KubeconfigConnection, error) {
 	if !ok {
 		return nil, fmt.Errorf("parsing kubeconfig: context %q names no cluster", name)
 	}
-	out := &KubeconfigConnection{Server: cluster.Server, CertificateAuthorityData: cluster.CertificateAuthorityData}
+	out := &KubeconfigConnection{
+		Server:                   cluster.Server,
+		CertificateAuthorityData: cluster.CertificateAuthorityData,
+	}
 	if user, ok := cfg.AuthInfos[ctx.AuthInfo]; ok {
 		out.ClientCertificateData = user.ClientCertificateData
 		out.ClientKeyData = user.ClientKeyData

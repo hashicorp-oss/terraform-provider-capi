@@ -42,7 +42,13 @@ func RenderObjectTree(t *tree.ObjectTree, now time.Time) string {
 
 // addTreeRows writes the row for obj and, recursively, its children in
 // clusterctl's order: higher z-order first, then by name.
-func addTreeRows(w io.Writer, t *tree.ObjectTree, obj ctrlclient.Object, prefix string, now time.Time) {
+func addTreeRows(
+	w io.Writer,
+	t *tree.ObjectTree,
+	obj ctrlclient.Object,
+	prefix string,
+	now time.Time,
+) {
 	status, reason, since, message := treeRowCondition(obj, now)
 	if tree.IsGroupObject(obj) {
 		items := strings.Split(tree.GetGroupItems(obj), tree.GroupItemsSeparator)
@@ -53,8 +59,21 @@ func addTreeRows(w io.Writer, t *tree.ObjectTree, obj ctrlclient.Object, prefix 
 		}
 	}
 	lines := strings.Split(message, "\n")
-	fmt.Fprintf(w, "%s%s\t%s\t%s\t%s\t%s\n", prefix, treeRowName(obj), status, reason, since, lines[0])
-	continuation := strings.ReplaceAll(strings.ReplaceAll(prefix, treeFirstElem, treePipe), treeLastElem, "  ")
+	fmt.Fprintf(
+		w,
+		"%s%s\t%s\t%s\t%s\t%s\n",
+		prefix,
+		treeRowName(obj),
+		status,
+		reason,
+		since,
+		lines[0],
+	)
+	continuation := strings.ReplaceAll(
+		strings.ReplaceAll(prefix, treeFirstElem, treePipe),
+		treeLastElem,
+		"  ",
+	)
 	for _, extra := range lines[1:] {
 		fmt.Fprintf(w, "%s\t\t\t\t%s\n", continuation, extra)
 	}
@@ -111,7 +130,10 @@ func treeRowName(obj ctrlclient.Object) string {
 
 // treeRowCondition picks the condition that summarizes an object: Available
 // where it exists (Cluster, MachineDeployment, control planes), else Ready.
-func treeRowCondition(obj ctrlclient.Object, now time.Time) (status, reason, since, message string) {
+func treeRowCondition(
+	obj ctrlclient.Object,
+	now time.Time,
+) (status, reason, since, message string) {
 	var c *metav1.Condition
 	if available := tree.GetAvailableCondition(obj); available != nil {
 		c = available

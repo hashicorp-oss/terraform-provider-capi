@@ -13,8 +13,22 @@ import (
 )
 
 func TestClientGoKube_NodeReady(t *testing.T) {
-	notReady := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "a"}, Status: corev1.NodeStatus{Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionFalse}}}}
-	ready := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "b"}, Status: corev1.NodeStatus{Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}}}}
+	notReady := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "a"},
+		Status: corev1.NodeStatus{
+			Conditions: []corev1.NodeCondition{
+				{Type: corev1.NodeReady, Status: corev1.ConditionFalse},
+			},
+		},
+	}
+	ready := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "b"},
+		Status: corev1.NodeStatus{
+			Conditions: []corev1.NodeCondition{
+				{Type: corev1.NodeReady, Status: corev1.ConditionTrue},
+			},
+		},
+	}
 
 	k := &ClientGoKube{cs: fake.NewClientset(notReady)}
 	got, err := k.NodeReady(context.Background())

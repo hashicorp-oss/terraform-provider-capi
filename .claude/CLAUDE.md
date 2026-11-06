@@ -58,9 +58,9 @@ contract label for the core contract in use; `ByKind` for a kind name;
 Shared machinery: `internal/capi/objects.go` (`ObjectClient`: server-side
 apply with a field manager, get, list, delete, patch, condition and deletion
 waits, `WithFieldManager`, `WorkloadClient` through a cluster's kubeconfig
-Secret), `internal/provider/object_engine.go` (render, apply-and-wait, subset
+Secret), `capi/object_engine.go` (render, apply-and-wait, subset
 drift detection, `wait` and metadata attributes, `attr.Value` ↔ Go for
-dynamic specs), `internal/provider/connection.go` (the provider block's
+dynamic specs), `capi/connection.go` (the provider block's
 `kubeconfig` content or `kubernetes` block, materialised lazily as a file).
 
 ---
@@ -118,7 +118,8 @@ resource "capi_cluster" "prod" {
   }
   manifests = { management = [local.cilium_proxy, local.tinkerbell_proxy] }   # HelmChartProxy/CRS YAML for the workload's addons
   inventory = { machine = [{ hostname = "nuc", network = {...}, bmc = {...}, labels = { type = "worker" } }, ...] }
-  wait      = { conditions = ["Available"], timeout = "90m" }
+  wait      = { conditions = ["Available"] }
+  timeouts  = { create = "3h", delete = "2h" }
 }
 
 # Node groups, addons and machines are their own resources, applied against
@@ -138,7 +139,8 @@ resource "capi_cluster" "prod" {
 | `management` | `{ self_managed (RequiresReplace), providers { core, infrastructure, bootstrap, control_plane, ipam, addon }, bootstrap { type, machine, on_failure, boot, kairos, addons } }` | `providers` and `bootstrap` only with `self_managed` (ValidateConfig) |
 | `manifests.management` | List(String), re-applied | applied before the cluster objects and again after a move |
 | `inventory` | `{ manage, source, machine[] }` | seed inventory of a self-managed Tinkerbell cluster; later machines are `capi_hardware` |
-| `wait` | `{ conditions (default ["Available"]), timeout (default 60m) }` | `Available` is `Ready` on the legacy contract; empty list waits for nothing |
+| `wait` | `{ conditions (default ["Available"]) }` | `Available` is `Ready` on the legacy contract; empty list waits for nothing |
+| `timeouts` | `{ create (2h), update (60m), delete (2h) }` | operation budgets; the waits get what is left (`remaining(ctx, …)`) |
 | `status` | Computed | `phase`, `error`, `endpoint`, `ca_certificate`, `description`, `bootstrap_cluster`, `conditions[]` |
 | `provider_secrets` | Computed, sensitive, `UseNonNullStateForUnknown` | root credential captured after the pivot (`<name>-talos` bundle or `<name>-ca`) |
 
@@ -243,7 +245,9 @@ namespace to the top level, provider maps under `management.providers`,
 (the generated control-plane template becomes `machine_spec` as a typed
 dynamic value, `dynamicJSON`, so the hash and the template name are unchanged
 and nothing rolls), `output`/`status.kubeconfig` dropped, `wait.enabled` →
-`wait.conditions`, `status.phase = ready`, `bootstrap.on_failure = resume`.
+`wait.conditions` (`wait.timeout` dropped, `timeouts` null: a configured
+duration moves to the configuration's `timeouts`), `status.phase = ready`,
+`bootstrap.on_failure = resume`.
 
 | Version | Change |
 | --- | --- |
@@ -292,7 +296,7 @@ and nothing rolls), `output`/`status.kubeconfig` dropped, `wait.enabled` →
 - **Ephemeral `capi_kubeconfig`**: no `RenewAt` (the resource has no Renew,
   and a renewed certificate cannot reach configured provider blocks); a
   derived certificate defaults to 8h. `capi_cluster`'s own derived
-  kubeconfig lives for `wait.timeout` + 1h.
+  kubeconfig lives for what is left of the operation's timeout + 1h.
 - **Cluster class**: v1beta2 `templateRef` vs legacy `ref`; `variables` and
   `patches` are dynamic lists passed through.
 
@@ -300,16 +304,54 @@ and nothing rolls), `output`/`status.kubeconfig` dropped, `wait.enabled` →
 
 ## 5. Conventions and tooling
 
-- Tests: `go test ./internal/...`; render/readback tests next to each
-  resource; fake dynamic client with an SSA reactor in
-  `internal/capi/objects_test.go` (`newFakeObjectClient`, register kinds in
-  `testKinds`).
-- Lint: `if ! rtk proxy golangci-lint run ./... ; then` (RTK masks exit codes);
-  three pre-existing findings are ignored (`customize_test.go` forcetypeassert,
-  `customize.go:125` nilerr, `bootstrap.go:155` unparam).
-- Docs: `go generate ./...` then `git checkout docs/guides`; examples under
-  `examples/{resources,data-sources,ephemeral-resources}/<type>/`.
+Structure and style follow terraform-provider-unifi.
+
+- **Layout**: the provider package is `capi/` (package `capi`, which imports
+  the engine `internal/capi` under the same name, as unifi imports go-unifi):
+  one resource per `<thing>_resource.go`, data sources `*_data_source.go`,
+  actions `*_action.go` (shared bits in `action_helpers.go`), the ephemeral
+  resource `kubeconfig_ephemeral.go`, tests named after the file they test.
+  Implementation and model types are unexported (`clusterResource`,
+  `clusterResourceModel`); constructors `New*` are exported. Interface
+  assertions sit in one `var ( ... )` block per type under "Ensure provider
+  defined types fully satisfy framework interfaces.".
+- **Timeouts**: every resource has `timeouts` (create, update, delete) from
+  terraform-plugin-framework-timeouts; each operation reads
+  `data.Timeouts.<Op>(ctx, default)` and wraps ctx in `context.WithTimeout`
+  (defaults in `timeouts_helper.go`). `wait` blocks only name conditions;
+  the wait budget is `remaining(ctx, fallback)`. Models built outside
+  configuration (import) set `Timeouts: timeoutsNullValue()`.
+- **Identity**: every resource implements `ResourceWithIdentity`
+  (`identity.go`: namespaced, node group, provider, object). Identity is set
+  next to every `resp.State.Set` and at the top of every Read (the framework
+  rejects a Read, even a removal, without one). `ImportState` starts with
+  `importID(ctx, req, <format>)`, so an import by identity runs the ID path;
+  templates resolve a logical name to the newest revision. Examples:
+  `examples/resources/<type>/import-by-identity.tf`.
+- **Validators**: `capi/validators` (CIDR, IP, MAC, Go duration) and
+  terraform-plugin-framework-validators (`stringvalidator.OneOf`,
+  `listvalidator.ValueStringsAre`) on the attribute, not in ValidateConfig,
+  when a value is checkable on its own.
+- **Formatting**: `make fmt` (`golangci-lint fmt`: gci, gofmt with the
+  `interface{}`→`any` rewrite, gofumpt, goimports, golines at 100 columns).
+  Signatures wrap one parameter per line.
+- **Tests**: `make test` (gotestsum, `junit.xml`, `coverage.txt`) or `go test
+  ./...`; render/readback tests next to each resource; fake dynamic client
+  with an SSA reactor in `internal/capi/objects_test.go` (`newFakeObjectClient`,
+  register kinds in `testKinds`); framework-level tests through
+  `providerserver.NewProtocol6WithError(New("test")())` (identity, private
+  state); `fakePrivate` stands in for the framework's private state.
+- **Lint**: `if ! rtk proxy golangci-lint run ./... ; then` (RTK masks exit
+  codes); three pre-existing findings are ignored (`customize_test.go`
+  forcetypeassert, `customize.go` nilerr, `bootstrap.go` unparam). CI gates on
+  new issues only.
+- **Docs**: `make generate` (tfplugindocs) renders `templates/` (index,
+  resources, data sources, `guides/`) with `examples/`; nothing in `docs/`
+  is edited by hand except `docs/superpowers`.
+- **CI**: `.github/workflows/ci.yaml` (lint, build, generate diff, unit
+  tests), `acctest.yaml` (Terraform version matrix), `release.yaml`
+  (goreleaser); `CHANGELOG.md` keeps an `[Unreleased]` section with
+  ✨ Features, ⚠️ Breaking Changes and 🐛 Bug Fixes.
 - `.test/`: gitignored harness on the Kairos pivot topology; `go install ./...
   && terraform validate` there is the only place schema-construction errors
   surface.
-- Commit one step at a time with build, tests, lint and docs green.

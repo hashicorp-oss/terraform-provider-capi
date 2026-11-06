@@ -40,7 +40,11 @@ func NewClusterctlInstaller(configPath string) *ClusterctlInstaller {
 // installedProviders reads a cluster's clusterctl provider inventory. The
 // inventory CRD is installed first, as clusterctl init does, so a fresh
 // cluster reads as empty instead of failing.
-func installedProviders(ctx context.Context, configClient config.Client, kubeconfigPath string) (*clusterctlv1.ProviderList, error) {
+func installedProviders(
+	ctx context.Context,
+	configClient config.Client,
+	kubeconfigPath string,
+) (*clusterctlv1.ProviderList, error) {
 	c := cluster.New(cluster.Kubeconfig{Path: kubeconfigPath}, configClient)
 	if err := c.ProviderInventory().EnsureCustomResourceDefinitions(ctx); err != nil {
 		return nil, fmt.Errorf("ensuring the clusterctl inventory CRD: %w", err)
@@ -56,9 +60,18 @@ func installedProviders(ctx context.Context, configClient config.Client, kubecon
 // installCAPIComponentsTask.
 func (i *ClusterctlInstaller) Init(ctx context.Context, cluster *Cluster, opts InitOptions) error {
 	fail := func(err error) error {
-		return &CAPIError{Operation: "init", Cluster: cluster.Name, Err: fmt.Errorf("%w: %v", ErrCAPIInit, err)}
+		return &CAPIError{
+			Operation: "init",
+			Cluster:   cluster.Name,
+			Err:       fmt.Errorf("%w: %v", ErrCAPIInit, err),
+		}
 	}
-	client, configClient, err := newClusterctlClient(ctx, i.configPath, opts.Providers, opts.Variables)
+	client, configClient, err := newClusterctlClient(
+		ctx,
+		i.configPath,
+		opts.Providers,
+		opts.Variables,
+	)
 	if err != nil {
 		return fail(err)
 	}
@@ -107,7 +120,10 @@ type InstalledProvider struct {
 }
 
 // Installed reads a cluster's clusterctl provider inventory.
-func (i *ClusterctlInstaller) Installed(ctx context.Context, cluster *Cluster) ([]InstalledProvider, error) {
+func (i *ClusterctlInstaller) Installed(
+	ctx context.Context,
+	cluster *Cluster,
+) ([]InstalledProvider, error) {
 	_, configClient, err := newClusterctlClient(ctx, i.configPath, ProviderSet{}, nil)
 	if err != nil {
 		return nil, err
@@ -118,7 +134,15 @@ func (i *ClusterctlInstaller) Installed(ctx context.Context, cluster *Cluster) (
 	}
 	out := make([]InstalledProvider, 0, len(list.Items))
 	for _, p := range list.Items {
-		out = append(out, InstalledProvider{Name: p.ProviderName, Type: providerTypeFromClusterctl(p.GetProviderType()), Version: p.Version, Namespace: p.Namespace})
+		out = append(
+			out,
+			InstalledProvider{
+				Name:      p.ProviderName,
+				Type:      providerTypeFromClusterctl(p.GetProviderType()),
+				Version:   p.Version,
+				Namespace: p.Namespace,
+			},
+		)
 	}
 	return out, nil
 }
@@ -144,14 +168,27 @@ func providerTypeFromClusterctl(t clusterctlv1.ProviderType) ProviderType {
 
 // Upgrade upgrades or re-renders opts.Targets in place (clusterctl upgrade
 // apply). A target that is not installed is installed instead.
-func (i *ClusterctlInstaller) Upgrade(ctx context.Context, cluster *Cluster, opts UpgradeOptions) error {
+func (i *ClusterctlInstaller) Upgrade(
+	ctx context.Context,
+	cluster *Cluster,
+	opts UpgradeOptions,
+) error {
 	fail := func(err error) error {
-		return &CAPIError{Operation: "upgrade", Cluster: cluster.Name, Err: fmt.Errorf("%w: %v", ErrCAPIUpgrade, err)}
+		return &CAPIError{
+			Operation: "upgrade",
+			Cluster:   cluster.Name,
+			Err:       fmt.Errorf("%w: %v", ErrCAPIUpgrade, err),
+		}
 	}
 	if len(opts.Targets) == 0 {
 		return nil
 	}
-	client, configClient, err := newClusterctlClient(ctx, i.configPath, opts.Providers, opts.Variables)
+	client, configClient, err := newClusterctlClient(
+		ctx,
+		i.configPath,
+		opts.Providers,
+		opts.Variables,
+	)
 	if err != nil {
 		return fail(err)
 	}
@@ -178,9 +215,17 @@ func (i *ClusterctlInstaller) Upgrade(ctx context.Context, cluster *Cluster, opt
 
 // Uninstall deletes providers from the cluster (clusterctl delete). CRDs and
 // namespaces are kept, so the objects of other clusters survive.
-func (i *ClusterctlInstaller) Uninstall(ctx context.Context, cluster *Cluster, opts UninstallOptions) error {
+func (i *ClusterctlInstaller) Uninstall(
+	ctx context.Context,
+	cluster *Cluster,
+	opts UninstallOptions,
+) error {
 	fail := func(err error) error {
-		return &CAPIError{Operation: "delete-providers", Cluster: cluster.Name, Err: fmt.Errorf("%w: %v", ErrCAPIUninstall, err)}
+		return &CAPIError{
+			Operation: "delete-providers",
+			Cluster:   cluster.Name,
+			Err:       fmt.Errorf("%w: %v", ErrCAPIUninstall, err),
+		}
 	}
 	if !opts.All && opts.Providers.Empty() {
 		return nil
@@ -237,7 +282,12 @@ func buildInitOptions(providers ProviderSet) clusterctlclient.InitOptions {
 
 // applyUpgrade runs clusterctl upgrade apply for the given upgrade items,
 // grouped by type, waiting for each upgraded provider to come back.
-func applyUpgrade(ctx context.Context, client clusterctlclient.Client, cluster *Cluster, refs map[ProviderType][]string) error {
+func applyUpgrade(
+	ctx context.Context,
+	client clusterctlclient.Client,
+	cluster *Cluster,
+	refs map[ProviderType][]string,
+) error {
 	up := clusterctlclient.ApplyUpgradeOptions{
 		Kubeconfig:              clusterctlclient.Kubeconfig{Path: cluster.KubeconfigPath},
 		BootstrapProviders:      refs[ProviderTypeBootstrap],
@@ -255,7 +305,10 @@ func applyUpgrade(ctx context.Context, client clusterctlclient.Client, cluster *
 }
 
 // installedProvider finds the inventory entry for a configured provider.
-func installedProvider(p ProviderConfig, installed *clusterctlv1.ProviderList) (clusterctlv1.Provider, bool) {
+func installedProvider(
+	p ProviderConfig,
+	installed *clusterctlv1.ProviderList,
+) (clusterctlv1.Provider, bool) {
 	if installed == nil {
 		return clusterctlv1.Provider{}, false
 	}
@@ -284,7 +337,13 @@ func versionMismatches(providers ProviderSet, installed *clusterctlv1.ProviderLi
 
 // sameVersion compares release tags, tolerating a missing "v" prefix.
 func sameVersion(a, b string) bool {
-	return strings.TrimPrefix(strings.TrimSpace(a), "v") == strings.TrimPrefix(strings.TrimSpace(b), "v")
+	return strings.TrimPrefix(
+		strings.TrimSpace(a),
+		"v",
+	) == strings.TrimPrefix(
+		strings.TrimSpace(b),
+		"v",
+	)
 }
 
 // upgradeRefs renders the clusterctl upgrade items ("namespace/name:version")
@@ -292,7 +351,11 @@ func sameVersion(a, b string) bool {
 // upgrades to it; an unpinned target is reinstalled at its installed version,
 // which re-renders its components with the current customizations. Targets
 // that are not installed are returned separately.
-func upgradeRefs(providers ProviderSet, targets []ProviderKey, installed *clusterctlv1.ProviderList) (map[ProviderType][]string, []ProviderKey) {
+func upgradeRefs(
+	providers ProviderSet,
+	targets []ProviderKey,
+	installed *clusterctlv1.ProviderList,
+) (map[ProviderType][]string, []ProviderKey) {
 	refs := map[ProviderType][]string{}
 	var missing []ProviderKey
 	for _, key := range targets {
@@ -309,7 +372,10 @@ func upgradeRefs(providers ProviderSet, targets []ProviderKey, installed *cluste
 		if version == "" {
 			version = inst.Version
 		}
-		refs[p.Type] = append(refs[p.Type], fmt.Sprintf("%s/%s:%s", inst.Namespace, p.Name, version))
+		refs[p.Type] = append(
+			refs[p.Type],
+			fmt.Sprintf("%s/%s:%s", inst.Namespace, p.Name, version),
+		)
 	}
 	return refs, missing
 }

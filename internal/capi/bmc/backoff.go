@@ -13,7 +13,12 @@ import (
 // Retry calls fn up to attempts times with jittered exponential backoff
 // between calls. It stops early on context cancellation and on
 // ErrUnsupported, which no retry can fix.
-func Retry(ctx context.Context, attempts int, base, maxDelay time.Duration, fn func(context.Context) error) error {
+func Retry(
+	ctx context.Context,
+	attempts int,
+	base, maxDelay time.Duration,
+	fn func(context.Context) error,
+) error {
 	var err error
 	delay := base
 	for i := 0; i < attempts; i++ {
@@ -46,7 +51,11 @@ func Retry(ctx context.Context, attempts int, base, maxDelay time.Duration, fn f
 
 // WaitFor polls cond every interval until it returns true, returns an error,
 // or timeout elapses. A timeout surfaces as context.DeadlineExceeded.
-func WaitFor(ctx context.Context, timeout, interval time.Duration, cond func(context.Context) (bool, error)) error {
+func WaitFor(
+	ctx context.Context,
+	timeout, interval time.Duration,
+	cond func(context.Context) (bool, error),
+) error {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 

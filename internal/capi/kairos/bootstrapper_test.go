@@ -19,11 +19,10 @@ import (
 	"testing"
 	"time"
 
-	"golang.org/x/crypto/ssh"
-	"k8s.io/client-go/tools/clientcmd"
-
 	"github.com/tinkerbell-community/terraform-provider-capi/internal/capi"
 	"github.com/tinkerbell-community/terraform-provider-capi/internal/capi/bmc"
+	"golang.org/x/crypto/ssh"
+	"k8s.io/client-go/tools/clientcmd"
 )
 
 const k3sKubeconfig = `apiVersion: v1
@@ -233,14 +232,24 @@ type fakeInstaller struct {
 	calls      int
 }
 
-func (i *fakeInstaller) Install(_ context.Context, cluster *capi.Cluster, addons capi.AddonSet) error {
+func (i *fakeInstaller) Install(
+	_ context.Context,
+	cluster *capi.Cluster,
+	addons capi.AddonSet,
+) error {
 	i.calls++
 	i.kubeconfig = cluster.KubeconfigPath
 	i.addons = addons
 	return nil
 }
 
-func (i *fakeInstaller) Uninstall(context.Context, *capi.Cluster, capi.AddonSet) error { return nil }
+func (i *fakeInstaller) Uninstall(
+	context.Context,
+	*capi.Cluster,
+	capi.AddonSet,
+) error {
+	return nil
+}
 
 func testKey(t *testing.T) string {
 	t.Helper()
@@ -258,11 +267,24 @@ func testKey(t *testing.T) string {
 func testConfig(t *testing.T) Config {
 	t.Helper()
 	return Config{
-		Machine: Machine{Hostname: "nuc", Address: "10.0.0.50", BMC: bmc.Credentials{Address: "10.0.1.50", Username: "admin", Password: "x"}},
-		Boot:    bmc.BootConfig{Method: bmc.BootMethodVirtualMedia, Timeout: 300 * time.Millisecond, Attempts: 2, Device: bmc.BootDeviceUSB},
-		ISO:     "http://files.example/kairos.iso.custom.iso",
-		SSH:     SSHConfig{PrivateKey: testKey(t)},
-		Addons:  capi.AddonSet{Helm: []capi.HelmRelease{{Name: "tinkerbell", Namespace: "tink", Chart: "oci://x/tinkerbell"}}},
+		Machine: Machine{
+			Hostname: "nuc",
+			Address:  "10.0.0.50",
+			BMC:      bmc.Credentials{Address: "10.0.1.50", Username: "admin", Password: "x"},
+		},
+		Boot: bmc.BootConfig{
+			Method:   bmc.BootMethodVirtualMedia,
+			Timeout:  300 * time.Millisecond,
+			Attempts: 2,
+			Device:   bmc.BootDeviceUSB,
+		},
+		ISO: "http://files.example/kairos.iso.custom.iso",
+		SSH: SSHConfig{PrivateKey: testKey(t)},
+		Addons: capi.AddonSet{
+			Helm: []capi.HelmRelease{
+				{Name: "tinkerbell", Namespace: "tink", Chart: "oci://x/tinkerbell"},
+			},
+		},
 	}
 }
 
@@ -294,7 +316,13 @@ func newHarness(t *testing.T, cfg Config, client bmc.Client, node *fakeNode) *ha
 	if base.power == "" {
 		base.power = bmc.PowerOff
 	}
-	h := &harness{node: node, bmc: base, kube: &fakeKube{}, installer: &fakeInstaller{}, dir: t.TempDir()}
+	h := &harness{
+		node:      node,
+		bmc:       base,
+		kube:      &fakeKube{},
+		installer: &fakeInstaller{},
+		dir:       t.TempDir(),
+	}
 	h.b = New(cfg,
 		WithBMC(client),
 		WithSSHFactory(func(SSHConfig, string) SSH { return node }),
@@ -303,8 +331,15 @@ func newHarness(t *testing.T, cfg Config, client bmc.Client, node *fakeNode) *ha
 		WithLogger(log.New(io.Discard, "", 0)),
 		WithTempDir(h.dir),
 		WithTimeouts(Timeouts{
-			Kubeconfig: time.Second, Kubernetes: time.Second, Addons: time.Second, PowerDown: 50 * time.Millisecond,
-			Poll: 5 * time.Millisecond, Probe: 100 * time.Millisecond, BMCRetries: 1, RetryBase: time.Millisecond, RetryMax: time.Millisecond,
+			Kubeconfig: time.Second,
+			Kubernetes: time.Second,
+			Addons:     time.Second,
+			PowerDown:  50 * time.Millisecond,
+			Poll:       5 * time.Millisecond,
+			Probe:      100 * time.Millisecond,
+			BMCRetries: 1,
+			RetryBase:  time.Millisecond,
+			RetryMax:   time.Millisecond,
 		}),
 	)
 	return h
@@ -318,7 +353,8 @@ func TestCreate_BootsReadsKubeconfigAndInstallsAddons(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cluster.Name != "bm-bootstrap" || cluster.KubeconfigPath != filepath.Join(h.dir, "bm-bootstrap-kubeconfig") {
+	if cluster.Name != "bm-bootstrap" ||
+		cluster.KubeconfigPath != filepath.Join(h.dir, "bm-bootstrap-kubeconfig") {
 		t.Errorf("cluster = %+v", cluster)
 	}
 	want := []string{"eject", "insert", "boot-device:usb", "power-on"}
@@ -336,8 +372,14 @@ func TestCreate_BootsReadsKubeconfigAndInstallsAddons(t *testing.T) {
 	if kc.Clusters["default"].Server != "https://10.0.0.50:6443" {
 		t.Errorf("server = %q, want the node address", kc.Clusters["default"].Server)
 	}
-	if h.installer.calls != 1 || h.installer.kubeconfig != cluster.KubeconfigPath || len(h.installer.addons.Helm) != 1 {
-		t.Errorf("addons installed = %d on %q (%+v)", h.installer.calls, h.installer.kubeconfig, h.installer.addons)
+	if h.installer.calls != 1 || h.installer.kubeconfig != cluster.KubeconfigPath ||
+		len(h.installer.addons.Helm) != 1 {
+		t.Errorf(
+			"addons installed = %d on %q (%+v)",
+			h.installer.calls,
+			h.installer.kubeconfig,
+			h.installer.addons,
+		)
 	}
 	if cluster.ProviderSecrets != nil {
 		t.Error("a disposable node keeps no provider secrets")
@@ -371,7 +413,8 @@ func TestCreate_GivesUpAfterTheAttempts(t *testing.T) {
 	h := newHarness(t, testConfig(t), &fakeBMC{bootsAfter: 5}, nil)
 	_, err := h.b.Create(context.Background(), capi.BootstrapOptions{Name: "x"})
 	var be *capi.BootstrapError
-	if !errors.As(err, &be) || be.Operation != "boot" || !errors.Is(err, ErrAttemptsExhausted) || !errors.Is(err, ErrBootTimeout) {
+	if !errors.As(err, &be) || be.Operation != "boot" || !errors.Is(err, ErrAttemptsExhausted) ||
+		!errors.Is(err, ErrBootTimeout) {
 		t.Fatalf("err = %v", err)
 	}
 	if n := strings.Count(strings.Join(h.bmc.sequence(), ","), "insert"); n != 2 {
@@ -409,10 +452,16 @@ func TestCreate_KeepsStorageRedirectionUntilDelete(t *testing.T) {
 	}
 	want := []string{"eject", "redirect:http://files.example/kairos.iso.custom.iso", "power-on"}
 	if got := h.bmc.sequence(); strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Errorf("bmc calls = %v, want %v (no insert, no boot override: AMT arms the boot)", got, want)
+		t.Errorf(
+			"bmc calls = %v, want %v (no insert, no boot override: AMT arms the boot)",
+			got,
+			want,
+		)
 	}
 	if amt.handle == nil || amt.handle.closed {
-		t.Fatal("the live system reads its cloud-config (and without kairos.ram its root filesystem) from the ISO: the session must stay open")
+		t.Fatal(
+			"the live system reads its cloud-config (and without kairos.ram its root filesystem) from the ISO: the session must stay open",
+		)
 	}
 	if err := h.b.Delete(context.Background(), cluster); err != nil {
 		t.Fatal(err)
@@ -427,7 +476,9 @@ func TestCreate_KubeconfigTimeout(t *testing.T) {
 	h.b.timeouts.Kubeconfig = 50 * time.Millisecond
 	_, err := h.b.Create(context.Background(), capi.BootstrapOptions{Name: "x"})
 	var be *capi.BootstrapError
-	if !errors.As(err, &be) || be.Operation != "kubeconfig" || !errors.Is(err, ErrKubeconfigTimeout) || !strings.Contains(err.Error(), "No such file") {
+	if !errors.As(err, &be) || be.Operation != "kubeconfig" ||
+		!errors.Is(err, ErrKubeconfigTimeout) ||
+		!strings.Contains(err.Error(), "No such file") {
 		t.Fatalf("err = %v", err)
 	}
 }
@@ -454,8 +505,12 @@ func TestCreate_ValidatesFirst(t *testing.T) {
 }
 
 func TestConfig_DefaultsAndValidation(t *testing.T) {
-	cfg := Config{SSH: SSHConfig{PrivateKey: testKey(t), HostKey: "ssh-ed25519 AAAA"}}.withDefaults()
-	if cfg.SSH.User != "kairos" || cfg.SSH.Port != 22 || cfg.Boot.Method != bmc.BootMethodAuto || cfg.Boot.Attempts != 3 || cfg.Boot.Timeout != bmc.DefaultBootTimeout {
+	cfg := Config{
+		SSH: SSHConfig{PrivateKey: testKey(t), HostKey: "ssh-ed25519 AAAA"},
+	}.withDefaults()
+	if cfg.SSH.User != "kairos" || cfg.SSH.Port != 22 || cfg.Boot.Method != bmc.BootMethodAuto ||
+		cfg.Boot.Attempts != 3 ||
+		cfg.Boot.Timeout != bmc.DefaultBootTimeout {
 		t.Errorf("defaults = %+v", cfg)
 	}
 	err := cfg.Validate()
@@ -513,7 +568,8 @@ func TestRewriteServer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(out), "server: https://10.0.0.50:6443") || strings.Contains(string(out), "127.0.0.1") {
+	if !strings.Contains(string(out), "server: https://10.0.0.50:6443") ||
+		strings.Contains(string(out), "127.0.0.1") {
 		t.Errorf("rewritten kubeconfig:\n%s", out)
 	}
 	if _, err := rewriteServer([]byte("apiVersion: v1\nkind: Config\n"), "https://x"); err == nil {
@@ -542,7 +598,11 @@ func TestCreate_ManualBootDrivesNoBMC(t *testing.T) {
 		t.Errorf("manual boot must not touch the BMC, calls = %v", h.bmc.calls)
 	}
 	if cluster.KubeconfigPath == "" || h.installer.calls != 1 {
-		t.Errorf("the rest of the create runs as usual: %+v installs=%d", cluster, h.installer.calls)
+		t.Errorf(
+			"the rest of the create runs as usual: %+v installs=%d",
+			cluster,
+			h.installer.calls,
+		)
 	}
 	if err := h.b.Delete(context.Background(), cluster); err != nil {
 		t.Fatal(err)

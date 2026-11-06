@@ -72,7 +72,11 @@ func (m *MockInstaller) Upgrade(ctx context.Context, cluster *Cluster, opts Upgr
 	return nil
 }
 
-func (m *MockInstaller) Uninstall(ctx context.Context, cluster *Cluster, opts UninstallOptions) error {
+func (m *MockInstaller) Uninstall(
+	ctx context.Context,
+	cluster *Cluster,
+	opts UninstallOptions,
+) error {
 	m.UninstallCalls = append(m.UninstallCalls, struct {
 		Cluster *Cluster
 		Opts    UninstallOptions
@@ -103,7 +107,11 @@ type MockManifestGenerator struct {
 	}
 }
 
-func (m *MockManifestGenerator) Generate(ctx context.Context, cluster *Cluster, opts GenerateOptions) ([]byte, error) {
+func (m *MockManifestGenerator) Generate(
+	ctx context.Context,
+	cluster *Cluster,
+	opts GenerateOptions,
+) ([]byte, error) {
 	m.GenerateCalls = append(m.GenerateCalls, struct {
 		Cluster *Cluster
 		Opts    GenerateOptions
@@ -111,7 +119,9 @@ func (m *MockManifestGenerator) Generate(ctx context.Context, cluster *Cluster, 
 	if m.GenerateFunc != nil {
 		return m.GenerateFunc(ctx, cluster, opts)
 	}
-	return []byte("apiVersion: cluster.x-k8s.io/v1beta1\nkind: Cluster\nmetadata:\n  name: test\n"), nil
+	return []byte(
+		"apiVersion: cluster.x-k8s.io/v1beta1\nkind: Cluster\nmetadata:\n  name: test\n",
+	), nil
 }
 
 // MockApplier is a test double for the Applier interface.
@@ -140,7 +150,11 @@ type MockApplier struct {
 	}
 }
 
-func (m *MockApplier) Pause(ctx context.Context, cluster *Cluster, clusterName, namespace string) error {
+func (m *MockApplier) Pause(
+	ctx context.Context,
+	cluster *Cluster,
+	clusterName, namespace string,
+) error {
 	m.PauseCalls = append(m.PauseCalls, struct {
 		Cluster     *Cluster
 		ClusterName string
@@ -152,7 +166,11 @@ func (m *MockApplier) Pause(ctx context.Context, cluster *Cluster, clusterName, 
 }
 
 // Get returns a minimal Cluster object unless GetFunc is set.
-func (m *MockApplier) Get(ctx context.Context, cluster *Cluster, clusterName, namespace string) (*unstructured.Unstructured, error) {
+func (m *MockApplier) Get(
+	ctx context.Context,
+	cluster *Cluster,
+	clusterName, namespace string,
+) (*unstructured.Unstructured, error) {
 	m.GetCalls = append(m.GetCalls, struct {
 		Cluster     *Cluster
 		ClusterName string
@@ -180,7 +198,11 @@ func (m *MockApplier) Apply(ctx context.Context, cluster *Cluster, manifest []by
 	return nil
 }
 
-func (m *MockApplier) Delete(ctx context.Context, cluster *Cluster, clusterName, namespace string) error {
+func (m *MockApplier) Delete(
+	ctx context.Context,
+	cluster *Cluster,
+	clusterName, namespace string,
+) error {
 	m.DeleteCalls = append(m.DeleteCalls, struct {
 		Cluster     *Cluster
 		ClusterName string
@@ -228,7 +250,12 @@ type MockWaiter struct {
 	AddonsCalls       []*Cluster
 }
 
-func (m *MockWaiter) WaitForAddons(ctx context.Context, mgmtCluster *Cluster, clusterName, namespace string, opts WaitOptions) error {
+func (m *MockWaiter) WaitForAddons(
+	ctx context.Context,
+	mgmtCluster *Cluster,
+	clusterName, namespace string,
+	opts WaitOptions,
+) error {
 	m.AddonsCalls = append(m.AddonsCalls, mgmtCluster)
 	if m.WaitForAddonsFunc != nil {
 		return m.WaitForAddonsFunc(ctx, mgmtCluster, clusterName, namespace, opts)
@@ -236,7 +263,12 @@ func (m *MockWaiter) WaitForAddons(ctx context.Context, mgmtCluster *Cluster, cl
 	return nil
 }
 
-func (m *MockWaiter) WaitForClusterDeleted(ctx context.Context, mgmtCluster *Cluster, clusterName, namespace string, opts WaitOptions) error {
+func (m *MockWaiter) WaitForClusterDeleted(
+	ctx context.Context,
+	mgmtCluster *Cluster,
+	clusterName, namespace string,
+	opts WaitOptions,
+) error {
 	m.DeletedCalls = append(m.DeletedCalls, mgmtCluster)
 	if m.WaitForClusterDeletedFunc != nil {
 		return m.WaitForClusterDeletedFunc(ctx, mgmtCluster, clusterName, namespace, opts)
@@ -244,7 +276,12 @@ func (m *MockWaiter) WaitForClusterDeleted(ctx context.Context, mgmtCluster *Clu
 	return nil
 }
 
-func (m *MockWaiter) WaitForControlPlane(ctx context.Context, mgmtCluster *Cluster, clusterName, namespace string, opts WaitOptions) error {
+func (m *MockWaiter) WaitForControlPlane(
+	ctx context.Context,
+	mgmtCluster *Cluster,
+	clusterName, namespace string,
+	opts WaitOptions,
+) error {
 	m.ControlPlaneCalls = append(m.ControlPlaneCalls, mgmtCluster)
 	if m.WaitForControlPlaneFunc != nil {
 		return m.WaitForControlPlaneFunc(ctx, mgmtCluster, clusterName, namespace, opts)
@@ -252,14 +289,24 @@ func (m *MockWaiter) WaitForControlPlane(ctx context.Context, mgmtCluster *Clust
 	return nil
 }
 
-func (m *MockWaiter) WaitForWorkers(ctx context.Context, mgmtCluster *Cluster, clusterName, namespace string, opts WaitOptions) error {
+func (m *MockWaiter) WaitForWorkers(
+	ctx context.Context,
+	mgmtCluster *Cluster,
+	clusterName, namespace string,
+	opts WaitOptions,
+) error {
 	if m.WaitForWorkersFunc != nil {
 		return m.WaitForWorkersFunc(ctx, mgmtCluster, clusterName, namespace, opts)
 	}
 	return nil
 }
 
-func (m *MockWaiter) WaitForClusterReady(ctx context.Context, mgmtCluster *Cluster, clusterName, namespace string, opts WaitOptions) error {
+func (m *MockWaiter) WaitForClusterReady(
+	ctx context.Context,
+	mgmtCluster *Cluster,
+	clusterName, namespace string,
+	opts WaitOptions,
+) error {
 	m.ReadyCalls = append(m.ReadyCalls, mgmtCluster)
 	if m.WaitForClusterReadyFunc != nil {
 		return m.WaitForClusterReadyFunc(ctx, mgmtCluster, clusterName, namespace, opts)
@@ -272,7 +319,11 @@ type MockKubeconfigRetriever struct {
 	GetKubeconfigFunc func(ctx context.Context, mgmtCluster *Cluster, clusterName, namespace string) (string, error)
 }
 
-func (m *MockKubeconfigRetriever) GetKubeconfig(ctx context.Context, mgmtCluster *Cluster, clusterName, namespace string) (string, error) {
+func (m *MockKubeconfigRetriever) GetKubeconfig(
+	ctx context.Context,
+	mgmtCluster *Cluster,
+	clusterName, namespace string,
+) (string, error) {
 	if m.GetKubeconfigFunc != nil {
 		return m.GetKubeconfigFunc(ctx, mgmtCluster, clusterName, namespace)
 	}
@@ -284,7 +335,11 @@ type MockClusterDescriber struct {
 	DescribeFunc func(ctx context.Context, mgmtCluster *Cluster, clusterName, namespace string) (string, error)
 }
 
-func (m *MockClusterDescriber) Describe(ctx context.Context, mgmtCluster *Cluster, clusterName, namespace string) (string, error) {
+func (m *MockClusterDescriber) Describe(
+	ctx context.Context,
+	mgmtCluster *Cluster,
+	clusterName, namespace string,
+) (string, error) {
 	if m.DescribeFunc != nil {
 		return m.DescribeFunc(ctx, mgmtCluster, clusterName, namespace)
 	}
@@ -305,7 +360,11 @@ type MockAddonInstaller struct {
 	}
 }
 
-func (m *MockAddonInstaller) Uninstall(ctx context.Context, cluster *Cluster, addons AddonSet) error {
+func (m *MockAddonInstaller) Uninstall(
+	ctx context.Context,
+	cluster *Cluster,
+	addons AddonSet,
+) error {
 	m.UninstallCalls = append(m.UninstallCalls, struct {
 		Cluster *Cluster
 		Addons  AddonSet
@@ -323,12 +382,20 @@ type MockSecretReader struct {
 	Calls   []string
 }
 
-func (m *MockSecretReader) ReadSecret(_ context.Context, cluster *Cluster, namespace, name string) (map[string]string, error) {
+func (m *MockSecretReader) ReadSecret(
+	_ context.Context,
+	cluster *Cluster,
+	namespace, name string,
+) (map[string]string, error) {
 	m.Calls = append(m.Calls, cluster.Name+":"+namespace+"/"+name)
 	if data, ok := m.Secrets[namespace+"/"+name]; ok {
 		return data, nil
 	}
-	return nil, &CAPIError{Operation: "read-secret", Cluster: cluster.Name, Err: fmt.Errorf("%w: secret %s/%s", ErrClusterNotFound, namespace, name)}
+	return nil, &CAPIError{
+		Operation: "read-secret",
+		Cluster:   cluster.Name,
+		Err:       fmt.Errorf("%w: secret %s/%s", ErrClusterNotFound, namespace, name),
+	}
 }
 
 func (m *MockAddonInstaller) Install(ctx context.Context, cluster *Cluster, addons AddonSet) error {
@@ -348,7 +415,12 @@ type MockQuiescer struct {
 	Calls    []*Cluster
 }
 
-func (m *MockQuiescer) WaitForQuiescence(ctx context.Context, mgmtCluster *Cluster, namespace string, opts WaitOptions) error {
+func (m *MockQuiescer) WaitForQuiescence(
+	ctx context.Context,
+	mgmtCluster *Cluster,
+	namespace string,
+	opts WaitOptions,
+) error {
 	m.Calls = append(m.Calls, mgmtCluster)
 	if m.WaitFunc != nil {
 		return m.WaitFunc(ctx, mgmtCluster, namespace, opts)

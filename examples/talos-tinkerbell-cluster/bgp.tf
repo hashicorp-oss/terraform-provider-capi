@@ -228,5 +228,5 @@ resource "capi_cluster_resource_set" "cilium_bgp" {
   strategy  = "Reconcile"
   manifests = [join("---\n", [for object in local.cilium_bgp_objects : yamlencode(object)])]
   prune     = true
-  wait      = { timeout = "30m" }
+  timeouts  = { create = "30m", update = "30m" }
 }

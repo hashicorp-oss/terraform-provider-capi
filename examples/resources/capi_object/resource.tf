@@ -10,7 +10,8 @@ resource "capi_object" "pool" {
     network = "10.0.80.0/24"
     ranges  = [{ start = "10.0.80.100", end = "10.0.80.200" }]
   }
-  wait = { conditions = ["Ready"], timeout = "5m" }
+  wait     = { conditions = ["Ready"] }
+  timeouts = { create = "5m", update = "5m" }
 }
 
 # With an explicit API version.

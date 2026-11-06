@@ -39,7 +39,12 @@ type ProviderComponents struct {
 // init, and reads the CRDs out of them. coreContract is the core API version
 // (v1beta2, say) the provider's kinds are resolved against; empty means the
 // contract the release declares.
-func FetchProviderComponents(ctx context.Context, configPath string, p ProviderConfig, coreContract string) (*ProviderComponents, error) {
+func FetchProviderComponents(
+	ctx context.Context,
+	configPath string,
+	p ProviderConfig,
+	coreContract string,
+) (*ProviderComponents, error) {
 	configClient, _, err := newProviderConfigClient(ctx, configPath, ProviderSet{p.Type: {p}})
 	if err != nil {
 		return nil, err
@@ -56,9 +61,16 @@ func FetchProviderComponents(ctx context.Context, configPath string, p ProviderC
 	if ver == "" {
 		ver = repo.DefaultVersion()
 	}
-	comps, err := repo.Components().Get(ctx, repository.ComponentsOptions{Version: ver, SkipTemplateProcess: true})
+	comps, err := repo.Components().
+		Get(ctx, repository.ComponentsOptions{Version: ver, SkipTemplateProcess: true})
 	if err != nil {
-		return nil, fmt.Errorf("fetching components of provider %s/%s %s: %w", p.Type, p.Name, ver, err)
+		return nil, fmt.Errorf(
+			"fetching components of provider %s/%s %s: %w",
+			p.Type,
+			p.Name,
+			ver,
+			err,
+		)
 	}
 	out := &ProviderComponents{Name: p.Name, Type: p.Type, Version: comps.Version(), URL: def.URL()}
 
@@ -74,7 +86,13 @@ func FetchProviderComponents(ctx context.Context, configPath string, p ProviderC
 	}
 	catalog, err := catalogFromObjects(comps.Objs(), coreContract)
 	if err != nil {
-		return nil, fmt.Errorf("reading the CRDs of provider %s/%s %s: %w", p.Type, p.Name, ver, err)
+		return nil, fmt.Errorf(
+			"reading the CRDs of provider %s/%s %s: %w",
+			p.Type,
+			p.Name,
+			ver,
+			err,
+		)
 	}
 	out.Catalog = catalog
 	out.Kinds, err = catalog.KindsOf(ProviderKey{Type: p.Type, Name: p.Name})
@@ -87,14 +105,20 @@ func FetchProviderComponents(ctx context.Context, configPath string, p ProviderC
 // catalogFromObjects builds a catalog from the CRDs among rendered component
 // objects. coreVersion stands in for the core Cluster CRD, which a non-core
 // release does not ship.
-func catalogFromObjects(objs []unstructured.Unstructured, coreVersion string) (*KindCatalog, error) {
+func catalogFromObjects(
+	objs []unstructured.Unstructured,
+	coreVersion string,
+) (*KindCatalog, error) {
 	var crds []apiextv1.CustomResourceDefinition
 	for i := range objs {
 		if objs[i].GetKind() != "CustomResourceDefinition" {
 			continue
 		}
 		var crd apiextv1.CustomResourceDefinition
-		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(objs[i].Object, &crd); err != nil {
+		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(
+			objs[i].Object,
+			&crd,
+		); err != nil {
 			return nil, fmt.Errorf("decoding CRD %s: %w", objs[i].GetName(), err)
 		}
 		crds = append(crds, crd)
@@ -117,7 +141,11 @@ func (c *KindCatalog) KindsOf(p ProviderKey) (map[string]schema.GroupVersionKind
 		if err != nil {
 			return nil, err
 		}
-		out[crd.Spec.Names.Kind] = schema.GroupVersionKind{Group: crd.Spec.Group, Version: ver, Kind: crd.Spec.Names.Kind}
+		out[crd.Spec.Names.Kind] = schema.GroupVersionKind{
+			Group:   crd.Spec.Group,
+			Version: ver,
+			Kind:    crd.Spec.Names.Kind,
+		}
 	}
 	if len(out) == 0 {
 		return nil, fmt.Errorf("%w: no CRDs labelled %s=%s", ErrKindNotFound, providerLabel, label)

@@ -43,11 +43,17 @@ func TestCreateClusterOptions_Fields(t *testing.T) {
 		Namespace: "prod-ns",
 		Providers: ProviderSet{
 			ProviderTypeInfrastructure: {{Type: ProviderTypeInfrastructure, Name: "docker"}},
-			ProviderTypeCore:           {{Type: ProviderTypeCore, Name: "cluster-api", Version: "v1.7.0"}},
+			ProviderTypeCore: {
+				{Type: ProviderTypeCore, Name: "cluster-api", Version: "v1.7.0"},
+			},
 		},
-		KubernetesVersion:    "v1.31.0",
-		Infrastructure:       InfrastructureSpec{Provider: "docker"},
-		ControlPlane:         ControlPlaneSpec{Provider: "kubeadm", Replicas: &cpCount, Template: &TemplateRef{Kind: "DockerMachineTemplate", Name: "cp"}},
+		KubernetesVersion: "v1.31.0",
+		Infrastructure:    InfrastructureSpec{Provider: "docker"},
+		ControlPlane: ControlPlaneSpec{
+			Provider: "kubeadm",
+			Replicas: &cpCount,
+			Template: &TemplateRef{Kind: "DockerMachineTemplate", Name: "cp"},
+		},
 		ManagementKubeconfig: "/tmp/kubeconfig",
 		SkipInit:             false,
 		WaitForReady:         true,
@@ -120,15 +126,30 @@ func TestProviderConfig_HasCustomizations_IgnoresFetchAndVersion(t *testing.T) {
 func TestProviderSet(t *testing.T) {
 	s := ProviderSet{}
 	s.Add(ProviderConfig{Type: ProviderTypeInfrastructure, Name: "tinkerbell", Version: "v0.7.9"})
-	s.Add(ProviderConfig{Type: ProviderTypeBootstrap, Name: "talos", Manager: &ManagerConfig{Verbosity: ptrInt64(2)}})
-	s.Add(ProviderConfig{Type: ProviderTypeControlPlane, Name: "talos", Manager: &ManagerConfig{Verbosity: ptrInt64(5)}})
+	s.Add(
+		ProviderConfig{
+			Type:    ProviderTypeBootstrap,
+			Name:    "talos",
+			Manager: &ManagerConfig{Verbosity: ptrInt64(2)},
+		},
+	)
+	s.Add(
+		ProviderConfig{
+			Type:    ProviderTypeControlPlane,
+			Name:    "talos",
+			Manager: &ManagerConfig{Verbosity: ptrInt64(5)},
+		},
+	)
 	s.Add(ProviderConfig{Type: ProviderTypeAddon, Name: "helm"})
 
 	infra, ok := s.Infrastructure()
 	if !ok || infra.Name != "tinkerbell" {
 		t.Fatalf("Infrastructure() = %+v, %v", infra, ok)
 	}
-	if got := s.InitStrings(ProviderTypeInfrastructure); len(got) != 1 || got[0] != "tinkerbell:v0.7.9" {
+	if got := s.InitStrings(
+		ProviderTypeInfrastructure,
+	); len(got) != 1 ||
+		got[0] != "tinkerbell:v0.7.9" {
 		t.Errorf("InitStrings(infra) = %v", got)
 	}
 	if got := s.InitStrings(ProviderTypeIPAM); len(got) != 0 {
@@ -142,7 +163,8 @@ func TestProviderSet(t *testing.T) {
 		*c[ProviderKey{ProviderTypeControlPlane, "talos"}].Manager.Verbosity != 5 {
 		t.Error("bootstrap and control-plane talos must be keyed independently")
 	}
-	if got := s.All(); len(got) != 4 || got[0].Name != "talos" || got[2].Name != "tinkerbell" || got[3].Name != "helm" {
+	if got := s.All(); len(got) != 4 || got[0].Name != "talos" || got[2].Name != "tinkerbell" ||
+		got[3].Name != "helm" {
 		t.Errorf("All() order = %v", got)
 	}
 }

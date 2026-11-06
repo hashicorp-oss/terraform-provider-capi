@@ -34,14 +34,22 @@ var testKinds = map[schema.GroupVersionKind]string{
 // newFakeObjectClient builds an ObjectClient on client-go's fake dynamic
 // client, with server-side apply emulated by a reactor: create when absent,
 // else replace spec and merge metadata.
-func newFakeObjectClient(t *testing.T, objs ...runtime.Object) (*ObjectClient, *dynamicfake.FakeDynamicClient) {
+func newFakeObjectClient(
+	t *testing.T,
+	objs ...runtime.Object,
+) (*ObjectClient, *dynamicfake.FakeDynamicClient) {
 	t.Helper()
 	scheme := runtime.NewScheme()
 	mapper := meta.NewDefaultRESTMapper(nil)
 	listKinds := map[schema.GroupVersionResource]string{}
 	for gvk, resource := range testKinds {
 		gvr := gvk.GroupVersion().WithResource(resource)
-		mapper.AddSpecific(gvk, gvr, gvk.GroupVersion().WithResource(strings.TrimSuffix(resource, "s")), meta.RESTScopeNamespace)
+		mapper.AddSpecific(
+			gvk,
+			gvr,
+			gvk.GroupVersion().WithResource(strings.TrimSuffix(resource, "s")),
+			meta.RESTScopeNamespace,
+		)
 		listKinds[gvr] = gvk.Kind + "List"
 	}
 	fake := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme, listKinds, objs...)
@@ -57,7 +65,8 @@ func newFakeObjectClient(t *testing.T, objs ...runtime.Object) (*ObjectClient, *
 		existing, err := fake.Tracker().Get(pa.GetResource(), pa.GetNamespace(), pa.GetName())
 		if apierrors.IsNotFound(err) {
 			applied.SetUID(k8stypes.UID("uid-" + applied.GetName()))
-			return true, &applied, fake.Tracker().Create(pa.GetResource(), &applied, pa.GetNamespace())
+			return true, &applied, fake.Tracker().
+				Create(pa.GetResource(), &applied, pa.GetNamespace())
 		}
 		if err != nil {
 			return true, nil, err
@@ -82,7 +91,11 @@ func newFakeObjectClient(t *testing.T, objs ...runtime.Object) (*ObjectClient, *
 	return NewObjectClientFor(cluster, fake, mapper, nil, "test-manager"), fake
 }
 
-func testObject(gvk schema.GroupVersionKind, name string, spec map[string]any) *unstructured.Unstructured {
+func testObject(
+	gvk schema.GroupVersionKind,
+	name string,
+	spec map[string]any,
+) *unstructured.Unstructured {
 	obj := &unstructured.Unstructured{Object: map[string]any{}}
 	obj.SetAPIVersion(gvk.GroupVersion().String())
 	obj.SetKind(gvk.Kind)
@@ -95,15 +108,31 @@ func testObject(gvk schema.GroupVersionKind, name string, spec map[string]any) *
 }
 
 var (
-	gvkMachineTemplate = schema.GroupVersionKind{Group: "infrastructure.cluster.x-k8s.io", Version: "v1beta1", Kind: "TinkerbellMachineTemplate"}
-	gvkMD              = schema.GroupVersionKind{Group: "cluster.x-k8s.io", Version: "v1beta2", Kind: "MachineDeployment"}
-	gvkTCP             = schema.GroupVersionKind{Group: "controlplane.cluster.x-k8s.io", Version: "v1beta1", Kind: "TalosControlPlane"}
+	gvkMachineTemplate = schema.GroupVersionKind{
+		Group:   "infrastructure.cluster.x-k8s.io",
+		Version: "v1beta1",
+		Kind:    "TinkerbellMachineTemplate",
+	}
+	gvkMD = schema.GroupVersionKind{
+		Group:   "cluster.x-k8s.io",
+		Version: "v1beta2",
+		Kind:    "MachineDeployment",
+	}
+	gvkTCP = schema.GroupVersionKind{
+		Group:   "controlplane.cluster.x-k8s.io",
+		Version: "v1beta1",
+		Kind:    "TalosControlPlane",
+	}
 )
 
 func TestObjectClient_ApplyGetListDelete(t *testing.T) {
 	ctx := context.Background()
 	client, _ := newFakeObjectClient(t)
-	obj := testObject(gvkMachineTemplate, "worker-abc", map[string]any{"template": map[string]any{"spec": map[string]any{"a": int64(1)}}})
+	obj := testObject(
+		gvkMachineTemplate,
+		"worker-abc",
+		map[string]any{"template": map[string]any{"spec": map[string]any{"a": int64(1)}}},
+	)
 	obj.SetLabels(map[string]string{"capi.terraform.io/template": "worker"})
 	obj.Object["status"] = map[string]any{"ignored": true}
 
@@ -122,7 +151,15 @@ func TestObjectClient_ApplyGetListDelete(t *testing.T) {
 	if err != nil || len(list) != 1 {
 		t.Fatalf("list: %v %v", list, err)
 	}
-	if _, err := client.Get(ctx, gvkMachineTemplate, "capi", "nope"); !errors.Is(err, ErrObjectNotFound) {
+	if _, err := client.Get(
+		ctx,
+		gvkMachineTemplate,
+		"capi",
+		"nope",
+	); !errors.Is(
+		err,
+		ErrObjectNotFound,
+	) {
 		t.Errorf("missing object: %v", err)
 	}
 	unknown := schema.GroupVersionKind{Group: "x.io", Version: "v1", Kind: "Nope"}
@@ -138,7 +175,13 @@ func TestObjectClient_ApplyGetListDelete(t *testing.T) {
 	if err := client.Delete(ctx, gvkMachineTemplate, "capi", "worker-abc"); err != nil {
 		t.Errorf("deleting twice is fine: %v", err)
 	}
-	if err := client.WaitForDeletion(ctx, gvkMachineTemplate, "capi", "worker-abc", WaitOptions{Timeout: time.Second, PollInterval: time.Millisecond}); err != nil {
+	if err := client.WaitForDeletion(
+		ctx,
+		gvkMachineTemplate,
+		"capi",
+		"worker-abc",
+		WaitOptions{Timeout: time.Second, PollInterval: time.Millisecond},
+	); err != nil {
 		t.Errorf("gone: %v", err)
 	}
 }
@@ -146,19 +189,39 @@ func TestObjectClient_ApplyGetListDelete(t *testing.T) {
 func TestObjectClient_WaitForConditions(t *testing.T) {
 	ctx := context.Background()
 	md := testObject(gvkMD, "md-0", map[string]any{"replicas": int64(1)})
-	md.Object["status"] = map[string]any{"conditions": []any{map[string]any{"type": "Available", "status": "False", "reason": "ScalingUp", "message": "0 of 1 replicas"}}}
+	md.Object["status"] = map[string]any{
+		"conditions": []any{
+			map[string]any{
+				"type":    "Available",
+				"status":  "False",
+				"reason":  "ScalingUp",
+				"message": "0 of 1 replicas",
+			},
+		},
+	}
 	client, fake := newFakeObjectClient(t, md)
 	opts := WaitOptions{Timeout: 50 * time.Millisecond, PollInterval: 5 * time.Millisecond}
 	err := client.WaitForConditions(ctx, gvkMD, "capi", "md-0", []string{"Available"}, opts)
-	if err == nil || !strings.Contains(err.Error(), "ScalingUp") || !strings.Contains(err.Error(), "0 of 1 replicas") {
+	if err == nil || !strings.Contains(err.Error(), "ScalingUp") ||
+		!strings.Contains(err.Error(), "0 of 1 replicas") {
 		t.Fatalf("timeout must carry the condition's reason and message: %v", err)
 	}
 	ready := md.DeepCopy()
-	ready.Object["status"] = map[string]any{"conditions": []any{map[string]any{"type": "Available", "status": "True"}}}
-	if err := fake.Tracker().Update(gvkMD.GroupVersion().WithResource("machinedeployments"), ready, "capi"); err != nil {
+	ready.Object["status"] = map[string]any{
+		"conditions": []any{map[string]any{"type": "Available", "status": "True"}},
+	}
+	if err := fake.Tracker().
+		Update(gvkMD.GroupVersion().WithResource("machinedeployments"), ready, "capi"); err != nil {
 		t.Fatal(err)
 	}
-	if err := client.WaitForConditions(ctx, gvkMD, "capi", "md-0", []string{"Available"}, opts); err != nil {
+	if err := client.WaitForConditions(
+		ctx,
+		gvkMD,
+		"capi",
+		"md-0",
+		[]string{"Available"},
+		opts,
+	); err != nil {
 		t.Errorf("ready: %v", err)
 	}
 	if err := client.WaitForConditions(ctx, gvkMD, "capi", "md-0", nil, opts); err != nil {
@@ -168,25 +231,56 @@ func TestObjectClient_WaitForConditions(t *testing.T) {
 
 func TestTemplateReferences(t *testing.T) {
 	ctx := context.Background()
-	md := testObject(gvkMD, "md-0", map[string]any{"template": map[string]any{"spec": map[string]any{
-		"infrastructureRef": map[string]any{"apiGroup": "infrastructure.cluster.x-k8s.io", "kind": "TinkerbellMachineTemplate", "name": "worker-old"},
-		"bootstrap":         map[string]any{"configRef": map[string]any{"kind": "TalosConfigTemplate", "name": "worker-cfg"}},
-	}}})
-	tcp := testObject(gvkTCP, "cp", map[string]any{"machineTemplate": map[string]any{"infrastructureRef": map[string]any{"kind": "TinkerbellMachineTemplate", "name": "cp-abc"}}})
+	md := testObject(
+		gvkMD,
+		"md-0",
+		map[string]any{"template": map[string]any{"spec": map[string]any{
+			"infrastructureRef": map[string]any{
+				"apiGroup": "infrastructure.cluster.x-k8s.io",
+				"kind":     "TinkerbellMachineTemplate",
+				"name":     "worker-old",
+			},
+			"bootstrap": map[string]any{
+				"configRef": map[string]any{"kind": "TalosConfigTemplate", "name": "worker-cfg"},
+			},
+		}}},
+	)
+	tcp := testObject(
+		gvkTCP,
+		"cp",
+		map[string]any{
+			"machineTemplate": map[string]any{
+				"infrastructureRef": map[string]any{
+					"kind": "TinkerbellMachineTemplate",
+					"name": "cp-abc",
+				},
+			},
+		},
+	)
 	client, _ := newFakeObjectClient(t, md, tcp)
-	catalog := NewKindCatalog(loadTestCRDs(t, "core.yaml", "capt.yaml", "cacppt.yaml", "cabpt.yaml"))
+	catalog := NewKindCatalog(
+		loadTestCRDs(t, "core.yaml", "capt.yaml", "cacppt.yaml", "cabpt.yaml"),
+	)
 
 	idx, err := TemplateReferences(ctx, client, catalog, "capi")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := idx.Referrers("TinkerbellMachineTemplate", "worker-old"); len(got) != 1 || got[0] != "MachineDeployment/md-0" {
+	if got := idx.Referrers(
+		"TinkerbellMachineTemplate",
+		"worker-old",
+	); len(got) != 1 ||
+		got[0] != "MachineDeployment/md-0" {
 		t.Errorf("worker-old referrers = %v", got)
 	}
 	if got := idx.Referrers("TalosConfigTemplate", "worker-cfg"); len(got) != 1 {
 		t.Errorf("bootstrap config ref = %v", got)
 	}
-	if got := idx.Referrers("TinkerbellMachineTemplate", "cp-abc"); len(got) != 1 || got[0] != "TalosControlPlane/cp" {
+	if got := idx.Referrers(
+		"TinkerbellMachineTemplate",
+		"cp-abc",
+	); len(got) != 1 ||
+		got[0] != "TalosControlPlane/cp" {
 		t.Errorf("control plane referrers = %v (control-plane kinds come from the catalog)", got)
 	}
 	if got := idx.Referrers("TinkerbellMachineTemplate", "worker-new"); len(got) != 0 {
@@ -195,7 +289,9 @@ func TestTemplateReferences(t *testing.T) {
 }
 
 func TestKindCatalog_ProvidersAndByKind(t *testing.T) {
-	catalog := NewKindCatalog(loadTestCRDs(t, "core.yaml", "capt.yaml", "cacppt.yaml", "cabpt.yaml"))
+	catalog := NewKindCatalog(
+		loadTestCRDs(t, "core.yaml", "capt.yaml", "cacppt.yaml", "cabpt.yaml"),
+	)
 	cps := catalog.Providers(ProviderTypeControlPlane)
 	if len(cps) != 1 || cps[0].Name != "talos" {
 		t.Errorf("control-plane providers = %v", cps)

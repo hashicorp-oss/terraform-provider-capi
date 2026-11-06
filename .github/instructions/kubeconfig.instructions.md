@@ -1,1 +1,1 @@
-.claude/KUBECONFIG.md
+../../.claude/KUBECONFIG.md

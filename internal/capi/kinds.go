@@ -73,7 +73,9 @@ func (r *CRDKindResolver) Kinds(ctx context.Context, mgmt *Cluster) (*KindCatalo
 	if err != nil {
 		return nil, fmt.Errorf("creating apiextensions client: %w", err)
 	}
-	list, err := cs.ApiextensionsV1().CustomResourceDefinitions().List(ctx, metav1.ListOptions{LabelSelector: providerLabel})
+	list, err := cs.ApiextensionsV1().
+		CustomResourceDefinitions().
+		List(ctx, metav1.ListOptions{LabelSelector: providerLabel})
 	if err != nil {
 		return nil, fmt.Errorf("listing CRDs: %w", err)
 	}
@@ -110,7 +112,11 @@ func (c *KindCatalog) CoreVersion() (string, error) {
 			return v, nil
 		}
 	}
-	return "", fmt.Errorf("%w: %s (is the core provider installed?)", ErrKindNotFound, coreClustersCRD)
+	return "", fmt.Errorf(
+		"%w: %s (is the core provider installed?)",
+		ErrKindNotFound,
+		coreClustersCRD,
+	)
 }
 
 // Resolve returns the GVK of the provider's CRD whose kind ends in suffix
@@ -132,8 +138,15 @@ func (c *KindCatalog) Resolve(p ProviderKey, suffix string) (schema.GroupVersion
 	}
 	if len(matches) == 0 {
 		sort.Strings(seen)
-		return schema.GroupVersionKind{}, fmt.Errorf("%w: kind *%s for provider %s (CRDs labelled %s=%s: %v)",
-			ErrKindNotFound, suffix, label, providerLabel, label, seen)
+		return schema.GroupVersionKind{}, fmt.Errorf(
+			"%w: kind *%s for provider %s (CRDs labelled %s=%s: %v)",
+			ErrKindNotFound,
+			suffix,
+			label,
+			providerLabel,
+			label,
+			seen,
+		)
 	}
 	sort.Slice(matches, func(i, j int) bool {
 		ki, kj := matches[i].Spec.Names.Kind, matches[j].Spec.Names.Kind
@@ -147,14 +160,23 @@ func (c *KindCatalog) Resolve(p ProviderKey, suffix string) (schema.GroupVersion
 		for _, m := range matches {
 			kinds = append(kinds, m.Spec.Names.Kind)
 		}
-		return schema.GroupVersionKind{}, fmt.Errorf("kind *%s for provider %s is ambiguous: %v", suffix, label, kinds)
+		return schema.GroupVersionKind{}, fmt.Errorf(
+			"kind *%s for provider %s is ambiguous: %v",
+			suffix,
+			label,
+			kinds,
+		)
 	}
 	crd := matches[0]
 	ver, err := c.versionFor(crd)
 	if err != nil {
 		return schema.GroupVersionKind{}, err
 	}
-	return schema.GroupVersionKind{Group: crd.Spec.Group, Version: ver, Kind: crd.Spec.Names.Kind}, nil
+	return schema.GroupVersionKind{
+		Group:   crd.Spec.Group,
+		Version: ver,
+		Kind:    crd.Spec.Names.Kind,
+	}, nil
 }
 
 // versionFor picks the API version to emit for a CRD: the served version the
@@ -166,7 +188,10 @@ func (c *KindCatalog) versionFor(crd apiextv1.CustomResourceDefinition) (string,
 	if err != nil {
 		return "", err
 	}
-	if crd.Labels[providerLabel] == clusterctlv1.ManifestLabel("cluster-api", clusterctlv1.CoreProviderType) {
+	if crd.Labels[providerLabel] == clusterctlv1.ManifestLabel(
+		"cluster-api",
+		clusterctlv1.CoreProviderType,
+	) {
 		return storageVersion(crd), nil
 	}
 	served := map[string]bool{}
@@ -203,7 +228,11 @@ func (c *KindCatalog) ControlPlaneRefShape(gvk schema.GroupVersionKind) (RefShap
 				continue
 			}
 			if v.Schema == nil || v.Schema.OpenAPIV3Schema == nil {
-				return "", fmt.Errorf("CRD %s version %s has no schema to inspect", crd.Name, v.Name)
+				return "", fmt.Errorf(
+					"CRD %s version %s has no schema to inspect",
+					crd.Name,
+					v.Name,
+				)
 			}
 			mt := v.Schema.OpenAPIV3Schema.Properties["spec"].Properties["machineTemplate"]
 			if _, ok := mt.Properties["spec"].Properties["infrastructureRef"]; ok {
@@ -212,7 +241,11 @@ func (c *KindCatalog) ControlPlaneRefShape(gvk schema.GroupVersionKind) (RefShap
 			if _, ok := mt.Properties["infrastructureRef"]; ok {
 				return RefShapeLegacy, nil
 			}
-			return "", fmt.Errorf("CRD %s version %s: no machineTemplate infrastructureRef in schema", crd.Name, v.Name)
+			return "", fmt.Errorf(
+				"CRD %s version %s: no machineTemplate infrastructureRef in schema",
+				crd.Name,
+				v.Name,
+			)
 		}
 		return "", fmt.Errorf("CRD %s does not serve version %s", crd.Name, gvk.Version)
 	}

@@ -22,7 +22,7 @@ import (
 type providerOverride struct {
 	Name string                    `json:"name" mapstructure:"name"`
 	Type clusterctlv1.ProviderType `json:"type" mapstructure:"type"`
-	URL  string                    `json:"url" mapstructure:"url"`
+	URL  string                    `json:"url"  mapstructure:"url"`
 }
 
 // overlayReader is a clusterctl config.Reader backed by its own viper
@@ -48,7 +48,10 @@ func newOverlayReader() *overlayReader {
 // clusterctl's default locations when empty) and wraps it in a clusterctl
 // config client. config.New does not Init injected readers, so this helper
 // does it explicitly.
-func newOverlayConfigClient(ctx context.Context, configPath string) (config.Client, *overlayReader, error) {
+func newOverlayConfigClient(
+	ctx context.Context,
+	configPath string,
+) (config.Client, *overlayReader, error) {
 	reader := newOverlayReader()
 	if err := reader.Init(ctx, configPath); err != nil {
 		return nil, nil, err
@@ -64,7 +67,10 @@ func newOverlayConfigClient(ctx context.Context, configPath string) (config.Clie
 // clusterctl prefixes some names with their organization ("tinkerbell-tinkerbell",
 // "harvester-harvester"); a plain name is also matched against that
 // "<name>-<name>" form. exact reports whether p.Name itself is known.
-func lookupDefaultProvider(client config.Client, p ProviderConfig) (def config.Provider, exact bool) {
+func lookupDefaultProvider(
+	client config.Client,
+	p ProviderConfig,
+) (def config.Provider, exact bool) {
 	typ := p.Type.Clusterctl()
 	if d, err := client.Providers().Get(p.Name, typ); err == nil {
 		return d, true
@@ -119,7 +125,10 @@ func (r *overlayReader) Init(_ context.Context, path string) error {
 
 func (r *overlayReader) Get(key string) (string, error) {
 	if r.v.Get(key) == nil {
-		return "", fmt.Errorf("failed to get value for variable %q. Please set the variable value using os env variables or using the .clusterctl config file", key)
+		return "", fmt.Errorf(
+			"failed to get value for variable %q. Please set the variable value using os env variables or using the .clusterctl config file",
+			key,
+		)
 	}
 	return r.v.GetString(key), nil
 }
@@ -130,7 +139,7 @@ func (r *overlayReader) Set(key, value string) {
 
 // UnmarshalKey delegates to viper except for the providers list, where the
 // overrides are merged over the file entries (same name+type wins).
-func (r *overlayReader) UnmarshalKey(key string, rawval interface{}) error {
+func (r *overlayReader) UnmarshalKey(key string, rawval any) error {
 	if key != config.ProvidersConfigKey {
 		return r.v.UnmarshalKey(key, rawval)
 	}
@@ -164,10 +173,10 @@ func (r *overlayReader) UnmarshalKey(key string, rawval interface{}) error {
 	return tmp.UnmarshalKey(key, rawval)
 }
 
-func toMaps(in []providerOverride) []map[string]interface{} {
-	out := make([]map[string]interface{}, 0, len(in))
+func toMaps(in []providerOverride) []map[string]any {
+	out := make([]map[string]any, 0, len(in))
 	for _, p := range in {
-		out = append(out, map[string]interface{}{"name": p.Name, "type": string(p.Type), "url": p.URL})
+		out = append(out, map[string]any{"name": p.Name, "type": string(p.Type), "url": p.URL})
 	}
 	return out
 }

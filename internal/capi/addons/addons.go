@@ -18,6 +18,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/tinkerbell-community/terraform-provider-capi/internal/capi"
 	"helm.sh/helm/v3/pkg/action"
 	"helm.sh/helm/v3/pkg/chart"
 	"helm.sh/helm/v3/pkg/chart/loader"
@@ -26,8 +27,6 @@ import (
 	"helm.sh/helm/v3/pkg/kube"
 	"helm.sh/helm/v3/pkg/registry"
 	"helm.sh/helm/v3/pkg/storage/driver"
-
-	"github.com/tinkerbell-community/terraform-provider-capi/internal/capi"
 )
 
 // Sentinel errors.
@@ -103,18 +102,34 @@ func (d *Installer) Uninstall(ctx context.Context, cluster *capi.Cluster, set ca
 	for _, rel := range slices.Backward(set.Helm) {
 		d.logger.Printf("uninstalling helm release %s/%s", rel.Namespace, rel.Name)
 		if err := d.helm.Uninstall(ctx, cluster.KubeconfigPath, rel); err != nil {
-			return fmt.Errorf("%w: helm release %s/%s: %v", ErrUninstall, rel.Namespace, rel.Name, err)
+			return fmt.Errorf(
+				"%w: helm release %s/%s: %v",
+				ErrUninstall,
+				rel.Namespace,
+				rel.Name,
+				err,
+			)
 		}
 	}
 	return nil
 }
 
 // installReleases installs or upgrades each release in order.
-func (d *Installer) installReleases(ctx context.Context, kubeconfigPath string, rels []capi.HelmRelease) error {
+func (d *Installer) installReleases(
+	ctx context.Context,
+	kubeconfigPath string,
+	rels []capi.HelmRelease,
+) error {
 	for _, rel := range rels {
 		exists, err := d.helm.Exists(ctx, kubeconfigPath, rel)
 		if err != nil {
-			return fmt.Errorf("%w: checking release %s/%s: %v", ErrInstall, rel.Namespace, rel.Name, err)
+			return fmt.Errorf(
+				"%w: checking release %s/%s: %v",
+				ErrInstall,
+				rel.Namespace,
+				rel.Name,
+				err,
+			)
 		}
 		if exists {
 			d.logger.Printf("upgrading helm release %s/%s", rel.Namespace, rel.Name)
@@ -124,14 +139,25 @@ func (d *Installer) installReleases(ctx context.Context, kubeconfigPath string, 
 			err = d.helm.Install(ctx, kubeconfigPath, rel)
 		}
 		if err != nil {
-			return fmt.Errorf("%w: helm release %s/%s: %v", ErrInstall, rel.Namespace, rel.Name, err)
+			return fmt.Errorf(
+				"%w: helm release %s/%s: %v",
+				ErrInstall,
+				rel.Namespace,
+				rel.Name,
+				err,
+			)
 		}
 	}
 	return nil
 }
 
 // applyManifests server-side-applies each raw manifest in order.
-func (d *Installer) applyManifests(ctx context.Context, cluster *capi.Cluster, what string, manifests []string) error {
+func (d *Installer) applyManifests(
+	ctx context.Context,
+	cluster *capi.Cluster,
+	what string,
+	manifests []string,
+) error {
 	for i, m := range manifests {
 		d.logger.Printf("applying %s %d/%d", what, i+1, len(manifests))
 		if err := d.applier.Apply(ctx, cluster, []byte(m)); err != nil {
@@ -154,7 +180,9 @@ func NewSDKHelmClient(logger *log.Logger) *SDKHelmClient {
 	return &SDKHelmClient{logger: logger}
 }
 
-func (h *SDKHelmClient) configuration(kubeconfigPath, namespace string) (*action.Configuration, error) {
+func (h *SDKHelmClient) configuration(
+	kubeconfigPath, namespace string,
+) (*action.Configuration, error) {
 	cfg := new(action.Configuration)
 	getter := kube.GetConfig(kubeconfigPath, "", namespace)
 	if err := cfg.Init(getter, namespace, "secret", h.logger.Printf); err != nil {
@@ -168,7 +196,10 @@ func (h *SDKHelmClient) configuration(kubeconfigPath, namespace string) (*action
 	return cfg, nil
 }
 
-func (h *SDKHelmClient) loadChart(cpo *action.ChartPathOptions, rel capi.HelmRelease) (*chart.Chart, map[string]any, error) {
+func (h *SDKHelmClient) loadChart(
+	cpo *action.ChartPathOptions,
+	rel capi.HelmRelease,
+) (*chart.Chart, map[string]any, error) {
 	cpo.Version = rel.Version
 	if !registry.IsOCI(rel.Chart) {
 		cpo.RepoURL = rel.Repository
@@ -189,7 +220,11 @@ func (h *SDKHelmClient) loadChart(cpo *action.ChartPathOptions, rel capi.HelmRel
 }
 
 // Exists implements HelmClient.
-func (h *SDKHelmClient) Exists(_ context.Context, kubeconfigPath string, rel capi.HelmRelease) (bool, error) {
+func (h *SDKHelmClient) Exists(
+	_ context.Context,
+	kubeconfigPath string,
+	rel capi.HelmRelease,
+) (bool, error) {
 	cfg, err := h.configuration(kubeconfigPath, rel.Namespace)
 	if err != nil {
 		return false, err
@@ -202,7 +237,11 @@ func (h *SDKHelmClient) Exists(_ context.Context, kubeconfigPath string, rel cap
 }
 
 // Install implements HelmClient.
-func (h *SDKHelmClient) Install(ctx context.Context, kubeconfigPath string, rel capi.HelmRelease) error {
+func (h *SDKHelmClient) Install(
+	ctx context.Context,
+	kubeconfigPath string,
+	rel capi.HelmRelease,
+) error {
 	cfg, err := h.configuration(kubeconfigPath, rel.Namespace)
 	if err != nil {
 		return err
@@ -224,7 +263,11 @@ func (h *SDKHelmClient) Install(ctx context.Context, kubeconfigPath string, rel 
 }
 
 // Upgrade implements HelmClient.
-func (h *SDKHelmClient) Upgrade(ctx context.Context, kubeconfigPath string, rel capi.HelmRelease) error {
+func (h *SDKHelmClient) Upgrade(
+	ctx context.Context,
+	kubeconfigPath string,
+	rel capi.HelmRelease,
+) error {
 	cfg, err := h.configuration(kubeconfigPath, rel.Namespace)
 	if err != nil {
 		return err
@@ -246,7 +289,11 @@ func (h *SDKHelmClient) Upgrade(ctx context.Context, kubeconfigPath string, rel 
 // Uninstall implements HelmClient. It waits for the release's resources to
 // be deleted, so a stack that must be gone (a DHCP responder) is gone when
 // it returns.
-func (h *SDKHelmClient) Uninstall(_ context.Context, kubeconfigPath string, rel capi.HelmRelease) error {
+func (h *SDKHelmClient) Uninstall(
+	_ context.Context,
+	kubeconfigPath string,
+	rel capi.HelmRelease,
+) error {
 	cfg, err := h.configuration(kubeconfigPath, rel.Namespace)
 	if err != nil {
 		return err

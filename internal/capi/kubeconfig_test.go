@@ -39,24 +39,44 @@ func testCA(t *testing.T) (certPEM, keyPEM []byte) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+	return pem.EncodeToMemory(
+			&pem.Block{Type: "CERTIFICATE", Bytes: der},
+		), pem.EncodeToMemory(
+			&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER},
+		)
 }
 
 func TestParseRootSecrets(t *testing.T) {
 	crt, key := testCA(t)
-	bundle := "cluster:\n  id: x\ncerts:\n  k8s:\n    crt: " + base64.StdEncoding.EncodeToString(crt) + "\n    key: " + base64.StdEncoding.EncodeToString(key) + "\n"
+	bundle := "cluster:\n  id: x\ncerts:\n  k8s:\n    crt: " + base64.StdEncoding.EncodeToString(
+		crt,
+	) + "\n    key: " + base64.StdEncoding.EncodeToString(
+		key,
+	) + "\n"
 	root, err := ParseRootSecrets("prod", map[string]string{"prod-talos/bundle": bundle})
 	if err != nil || string(root.CertPEM) != string(crt) || string(root.KeyPEM) != string(key) {
 		t.Fatalf("talos bundle: %v %v", root, err)
 	}
-	root, err = ParseRootSecrets("prod", map[string]string{"prod-ca/tls.crt": string(crt), "prod-ca/tls.key": string(key)})
+	root, err = ParseRootSecrets(
+		"prod",
+		map[string]string{"prod-ca/tls.crt": string(crt), "prod-ca/tls.key": string(key)},
+	)
 	if err != nil || string(root.CertPEM) != string(crt) {
 		t.Fatalf("kubeadm ca: %v %v", root, err)
 	}
-	if _, err := ParseRootSecrets("prod", map[string]string{"other/x": "y"}); !errors.Is(err, ErrNoRootCredential) {
+	if _, err := ParseRootSecrets(
+		"prod",
+		map[string]string{"other/x": "y"},
+	); !errors.Is(
+		err,
+		ErrNoRootCredential,
+	) {
 		t.Fatalf("err = %v, want ErrNoRootCredential", err)
 	}
-	if _, err := ParseRootSecrets("prod", map[string]string{"prod-talos/bundle": "certs: {k8s: {crt: '!!', key: '!!'}}"}); err == nil {
+	if _, err := ParseRootSecrets(
+		"prod",
+		map[string]string{"prod-talos/bundle": "certs: {k8s: {crt: '!!', key: '!!'}}"},
+	); err == nil {
 		t.Fatal("a bundle that is not base64 must fail")
 	}
 }
@@ -64,7 +84,13 @@ func TestParseRootSecrets(t *testing.T) {
 func TestDeriveKubeconfig(t *testing.T) {
 	crt, key := testCA(t)
 	now := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
-	raw, err := DeriveKubeconfig(&RootCredential{CertPEM: crt, KeyPEM: key}, "https://10.0.0.160:6443", "prod", 2*time.Hour, now)
+	raw, err := DeriveKubeconfig(
+		&RootCredential{CertPEM: crt, KeyPEM: key},
+		"https://10.0.0.160:6443",
+		"prod",
+		2*time.Hour,
+		now,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,7 +98,8 @@ func TestDeriveKubeconfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.CurrentContext != "prod" || cfg.Clusters["prod"].Server != "https://10.0.0.160:6443" || string(cfg.Clusters["prod"].CertificateAuthorityData) != string(crt) {
+	if cfg.CurrentContext != "prod" || cfg.Clusters["prod"].Server != "https://10.0.0.160:6443" ||
+		string(cfg.Clusters["prod"].CertificateAuthorityData) != string(crt) {
 		t.Errorf("kubeconfig = %+v", cfg)
 	}
 	user := cfg.AuthInfos["terraform-provider-capi"]
@@ -86,7 +113,8 @@ func TestDeriveKubeconfig(t *testing.T) {
 	if err := cert.CheckSignatureFrom(ca); err != nil {
 		t.Errorf("the client certificate must be signed by the cluster CA: %v", err)
 	}
-	if cert.Subject.Organization[0] != "system:masters" || !cert.NotAfter.Equal(now.Add(2*time.Hour)) {
+	if cert.Subject.Organization[0] != "system:masters" ||
+		!cert.NotAfter.Equal(now.Add(2*time.Hour)) {
 		t.Errorf("subject %v, notAfter %v", cert.Subject, cert.NotAfter)
 	}
 	if _, err := x509.ParseECPrivateKey(mustDecodePEM(t, user.ClientKeyData)); err != nil {
@@ -94,14 +122,32 @@ func TestDeriveKubeconfig(t *testing.T) {
 	}
 
 	info, err := ParseKubeconfig(raw)
-	if err != nil || info.Server != "https://10.0.0.160:6443" || len(info.ClientCertificateData) == 0 || len(info.ClientKeyData) == 0 || info.Token != "" {
+	if err != nil || info.Server != "https://10.0.0.160:6443" ||
+		len(info.ClientCertificateData) == 0 ||
+		len(info.ClientKeyData) == 0 ||
+		info.Token != "" {
 		t.Errorf("ParseKubeconfig = %+v, %v", info, err)
 	}
 
-	if _, err := DeriveKubeconfig(&RootCredential{CertPEM: crt, KeyPEM: key}, "", "prod", time.Hour, now); err == nil {
+	if _, err := DeriveKubeconfig(
+		&RootCredential{CertPEM: crt, KeyPEM: key},
+		"",
+		"prod",
+		time.Hour,
+		now,
+	); err == nil {
 		t.Error("an endpoint is required")
 	}
-	if _, err := DeriveKubeconfig(nil, "https://x", "prod", time.Hour, now); !errors.Is(err, ErrNoRootCredential) {
+	if _, err := DeriveKubeconfig(
+		nil,
+		"https://x",
+		"prod",
+		time.Hour,
+		now,
+	); !errors.Is(
+		err,
+		ErrNoRootCredential,
+	) {
 		t.Errorf("err = %v", err)
 	}
 	if _, err := ParseKubeconfig([]byte("not: [yaml")); err == nil {

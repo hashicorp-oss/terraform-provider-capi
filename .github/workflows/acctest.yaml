@@ -1,0 +1,39 @@
+# Acceptance tests: the provider against a real management cluster, in a
+# matrix of Terraform CLI versions.
+name: Acceptance Tests
+
+on:
+  pull_request:
+    paths:
+    - "**.go"
+    - "go.mod"
+    - "go.sum"
+    - ".github/workflows/acctest.yaml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  acceptance:
+    name: "Terraform ${{ matrix.terraform }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        terraform:
+          - "1.13.*"
+          - "1.14.*"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: "go.mod"
+          cache: true
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+        with:
+          terraform_version: ${{ matrix.terraform }}
+          terraform_wrapper: false
+      - run: go mod download
+      - run: make testacc TEST=./capi/ TEST_TIMEOUT=50m

@@ -25,7 +25,11 @@ func NewClusterctlInfoRetriever(configPath string) *ClusterctlInfoRetriever {
 }
 
 // GetKubeconfig retrieves the kubeconfig for a workload cluster.
-func (r *ClusterctlInfoRetriever) GetKubeconfig(ctx context.Context, mgmtCluster *Cluster, clusterName, namespace string) (string, error) {
+func (r *ClusterctlInfoRetriever) GetKubeconfig(
+	ctx context.Context,
+	mgmtCluster *Cluster,
+	clusterName, namespace string,
+) (string, error) {
 	client, err := clusterctlclient.New(ctx, r.configPath)
 	if err != nil {
 		return "", &CAPIError{
@@ -56,7 +60,11 @@ func (r *ClusterctlInfoRetriever) GetKubeconfig(ctx context.Context, mgmtCluster
 }
 
 // Describe returns a human-readable description of the cluster's status.
-func (r *ClusterctlInfoRetriever) Describe(ctx context.Context, mgmtCluster *Cluster, clusterName, namespace string) (string, error) {
+func (r *ClusterctlInfoRetriever) Describe(
+	ctx context.Context,
+	mgmtCluster *Cluster,
+	clusterName, namespace string,
+) (string, error) {
 	client, err := clusterctlclient.New(ctx, r.configPath)
 	if err != nil {
 		return "", &CAPIError{
@@ -99,7 +107,11 @@ func (r *ClusterctlInfoRetriever) Describe(ctx context.Context, mgmtCluster *Clu
 }
 
 // WriteKubeconfig retrieves the workload cluster kubeconfig and writes it to disk.
-func (r *ClusterctlInfoRetriever) WriteKubeconfig(ctx context.Context, mgmtCluster *Cluster, clusterName, namespace, outputPath string) error {
+func (r *ClusterctlInfoRetriever) WriteKubeconfig(
+	ctx context.Context,
+	mgmtCluster *Cluster,
+	clusterName, namespace, outputPath string,
+) error {
 	kubeconfig, err := r.GetKubeconfig(ctx, mgmtCluster, clusterName, namespace)
 	if err != nil {
 		return err
@@ -107,11 +119,11 @@ func (r *ClusterctlInfoRetriever) WriteKubeconfig(ctx context.Context, mgmtClust
 
 	// Ensure the directory exists
 	dir := filepath.Dir(outputPath)
-	if err := os.MkdirAll(dir, 0700); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("creating kubeconfig directory: %w", err)
 	}
 
-	if err := os.WriteFile(outputPath, []byte(kubeconfig), 0600); err != nil {
+	if err := os.WriteFile(outputPath, []byte(kubeconfig), 0o600); err != nil {
 		return fmt.Errorf("writing kubeconfig to %s: %w", outputPath, err)
 	}
 

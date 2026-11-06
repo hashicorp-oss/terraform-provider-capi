@@ -19,7 +19,13 @@ import (
 // armed the boot on insert, a one-shot EFI boot override selects device
 // (CD-ROM when empty). do wraps every BMC call so the caller's retry policy
 // applies. A BMC that supports neither path reports ErrUnsupported.
-func attachISO(ctx context.Context, b Client, isoRef string, device BootDevice, do func(context.Context, func(context.Context) error) error) (RedirectHandle, error) {
+func attachISO(
+	ctx context.Context,
+	b Client,
+	isoRef string,
+	device BootDevice,
+	do func(context.Context, func(context.Context) error) error,
+) (RedirectHandle, error) {
 	if isoRef == "" {
 		return nil, fmt.Errorf("virtual media: no ISO URL: %w", ErrUnsupported)
 	}
@@ -46,7 +52,10 @@ func attachISO(ctx context.Context, b Client, isoRef string, device BootDevice, 
 	if device == "" {
 		device = BootDeviceCDROM
 	}
-	return nil, do(ctx, func(ctx context.Context) error { return b.SetBootDevice(ctx, device, false, true) })
+	return nil, do(
+		ctx,
+		func(ctx context.Context) error { return b.SetBootDevice(ctx, device, false, true) },
+	)
 }
 
 // MediaBoot boots a machine from an ISO through its BMC. Boot powers a running

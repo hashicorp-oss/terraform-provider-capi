@@ -39,31 +39,66 @@ const controlPlaneInitializedCondition = "ControlPlaneInitialized"
 var clusterReadyConditions = []string{"Available", "Ready"}
 
 // WaitForControlPlane waits for the cluster's control plane to be initialized.
-func (w *DynamicWaiter) WaitForControlPlane(ctx context.Context, mgmtCluster *Cluster, clusterName, namespace string, opts WaitOptions) error {
+func (w *DynamicWaiter) WaitForControlPlane(
+	ctx context.Context,
+	mgmtCluster *Cluster,
+	clusterName, namespace string,
+	opts WaitOptions,
+) error {
 	const op = "wait-control-plane"
 	namespace, timeout, pollInterval := waitDefaults(namespace, opts)
 
 	dynClient, coreVersion, err := w.connect(ctx, mgmtCluster)
 	if err != nil {
-		return &CAPIError{Operation: op, Cluster: clusterName, Err: fmt.Errorf("%w: %v", ErrClusterNotReady, err)}
+		return &CAPIError{
+			Operation: op,
+			Cluster:   clusterName,
+			Err:       fmt.Errorf("%w: %v", ErrClusterNotReady, err),
+		}
 	}
-	err = w.waitForAnyCondition(ctx, dynClient, clustersGVR(coreVersion), clusterName, namespace, []string{controlPlaneInitializedCondition}, timeout, pollInterval)
+	err = w.waitForAnyCondition(
+		ctx,
+		dynClient,
+		clustersGVR(coreVersion),
+		clusterName,
+		namespace,
+		[]string{controlPlaneInitializedCondition},
+		timeout,
+		pollInterval,
+	)
 	if err != nil {
-		return &CAPIError{Operation: op, Cluster: clusterName, Err: fmt.Errorf("%w: waiting for control plane: %v", ErrClusterNotReady, err)}
+		return &CAPIError{
+			Operation: op,
+			Cluster:   clusterName,
+			Err:       fmt.Errorf("%w: waiting for control plane: %v", ErrClusterNotReady, err),
+		}
 	}
 	return nil
 }
 
 // WaitForWorkers waits for worker machine deployments to be ready.
-func (w *DynamicWaiter) WaitForWorkers(ctx context.Context, mgmtCluster *Cluster, clusterName, namespace string, opts WaitOptions) error {
+func (w *DynamicWaiter) WaitForWorkers(
+	ctx context.Context,
+	mgmtCluster *Cluster,
+	clusterName, namespace string,
+	opts WaitOptions,
+) error {
 	const op = "wait-workers"
 	namespace, timeout, pollInterval := waitDefaults(namespace, opts)
 
 	dynClient, coreVersion, err := w.connect(ctx, mgmtCluster)
 	if err != nil {
-		return &CAPIError{Operation: op, Cluster: clusterName, Err: fmt.Errorf("%w: %v", ErrClusterNotReady, err)}
+		return &CAPIError{
+			Operation: op,
+			Cluster:   clusterName,
+			Err:       fmt.Errorf("%w: %v", ErrClusterNotReady, err),
+		}
 	}
-	gvr := schema.GroupVersionResource{Group: "cluster.x-k8s.io", Version: coreVersion, Resource: "machinedeployments"}
+	gvr := schema.GroupVersionResource{
+		Group:    "cluster.x-k8s.io",
+		Version:  coreVersion,
+		Resource: "machinedeployments",
+	}
 
 	// Poll for machine deployments to have the correct number of ready replicas
 	deadline := time.Now().Add(timeout)
@@ -80,26 +115,65 @@ func (w *DynamicWaiter) WaitForWorkers(ctx context.Context, mgmtCluster *Cluster
 		}
 	}
 
-	return &CAPIError{Operation: op, Cluster: clusterName, Err: fmt.Errorf("%w: worker nodes did not become ready within %v", ErrClusterNotReady, timeout)}
+	return &CAPIError{
+		Operation: op,
+		Cluster:   clusterName,
+		Err: fmt.Errorf(
+			"%w: worker nodes did not become ready within %v",
+			ErrClusterNotReady,
+			timeout,
+		),
+	}
 }
 
 // WaitForClusterReady waits for the Cluster to report Available (v1beta2) or
 // Ready (v1beta1), which covers the control plane and the workers.
-func (w *DynamicWaiter) WaitForClusterReady(ctx context.Context, mgmtCluster *Cluster, clusterName, namespace string, opts WaitOptions) error {
+func (w *DynamicWaiter) WaitForClusterReady(
+	ctx context.Context,
+	mgmtCluster *Cluster,
+	clusterName, namespace string,
+	opts WaitOptions,
+) error {
 	const op = "wait-cluster-ready"
 	namespace, timeout, pollInterval := waitDefaults(namespace, opts)
 
 	dynClient, coreVersion, err := w.connect(ctx, mgmtCluster)
 	if err != nil {
-		return &CAPIError{Operation: op, Cluster: clusterName, Err: fmt.Errorf("%w: %v", ErrClusterNotReady, err)}
+		return &CAPIError{
+			Operation: op,
+			Cluster:   clusterName,
+			Err:       fmt.Errorf("%w: %v", ErrClusterNotReady, err),
+		}
 	}
 	if len(opts.Conditions) > 0 {
-		err = w.waitForAllConditions(ctx, dynClient, clustersGVR(coreVersion), clusterName, namespace, readinessConditions(opts.Conditions, coreVersion), timeout, pollInterval)
+		err = w.waitForAllConditions(
+			ctx,
+			dynClient,
+			clustersGVR(coreVersion),
+			clusterName,
+			namespace,
+			readinessConditions(opts.Conditions, coreVersion),
+			timeout,
+			pollInterval,
+		)
 	} else {
-		err = w.waitForAnyCondition(ctx, dynClient, clustersGVR(coreVersion), clusterName, namespace, clusterReadyConditions, timeout, pollInterval)
+		err = w.waitForAnyCondition(
+			ctx,
+			dynClient,
+			clustersGVR(coreVersion),
+			clusterName,
+			namespace,
+			clusterReadyConditions,
+			timeout,
+			pollInterval,
+		)
 	}
 	if err != nil {
-		return &CAPIError{Operation: op, Cluster: clusterName, Err: fmt.Errorf("%w: waiting for cluster readiness: %v", ErrClusterNotReady, err)}
+		return &CAPIError{
+			Operation: op,
+			Cluster:   clusterName,
+			Err:       fmt.Errorf("%w: waiting for cluster readiness: %v", ErrClusterNotReady, err),
+		}
 	}
 	return nil
 }
@@ -124,13 +198,22 @@ func readinessConditions(conditions []string, coreVersion string) []string {
 // WaitForClusterDeleted waits for a deleted Cluster object to disappear. CAPI
 // removes it only once every owned object is gone, so this is when the
 // machines and their infrastructure have been released.
-func (w *DynamicWaiter) WaitForClusterDeleted(ctx context.Context, mgmtCluster *Cluster, clusterName, namespace string, opts WaitOptions) error {
+func (w *DynamicWaiter) WaitForClusterDeleted(
+	ctx context.Context,
+	mgmtCluster *Cluster,
+	clusterName, namespace string,
+	opts WaitOptions,
+) error {
 	const op = "wait-cluster-deleted"
 	namespace, timeout, pollInterval := waitDefaults(namespace, opts)
 
 	dynClient, coreVersion, err := w.connect(ctx, mgmtCluster)
 	if err != nil {
-		return &CAPIError{Operation: op, Cluster: clusterName, Err: fmt.Errorf("%w: %v", ErrClusterNotDeleted, err)}
+		return &CAPIError{
+			Operation: op,
+			Cluster:   clusterName,
+			Err:       fmt.Errorf("%w: %v", ErrClusterNotDeleted, err),
+		}
 	}
 	clusters := dynClient.Resource(clustersGVR(coreVersion)).Namespace(namespace)
 	deadline := time.Now().Add(timeout)
@@ -145,7 +228,17 @@ func (w *DynamicWaiter) WaitForClusterDeleted(ctx context.Context, mgmtCluster *
 		case <-time.After(pollInterval):
 		}
 	}
-	return &CAPIError{Operation: op, Cluster: clusterName, Err: fmt.Errorf("%w: %s/%s still exists after %v", ErrClusterNotDeleted, namespace, clusterName, timeout)}
+	return &CAPIError{
+		Operation: op,
+		Cluster:   clusterName,
+		Err: fmt.Errorf(
+			"%w: %s/%s still exists after %v",
+			ErrClusterNotDeleted,
+			namespace,
+			clusterName,
+			timeout,
+		),
+	}
 }
 
 // CAAPH resources. HelmChartProxy.status.matchingClusters names the clusters
@@ -153,19 +246,36 @@ func (w *DynamicWaiter) WaitForClusterDeleted(ctx context.Context, mgmtCluster *
 // spec.clusterRef names the cluster and whose Ready condition reports the
 // Helm release.
 var (
-	helmChartProxiesGVR   = schema.GroupVersionResource{Group: "addons.cluster.x-k8s.io", Version: "v1alpha1", Resource: "helmchartproxies"}
-	helmReleaseProxiesGVR = schema.GroupVersionResource{Group: "addons.cluster.x-k8s.io", Version: "v1alpha1", Resource: "helmreleaseproxies"}
+	helmChartProxiesGVR = schema.GroupVersionResource{
+		Group:    "addons.cluster.x-k8s.io",
+		Version:  "v1alpha1",
+		Resource: "helmchartproxies",
+	}
+	helmReleaseProxiesGVR = schema.GroupVersionResource{
+		Group:    "addons.cluster.x-k8s.io",
+		Version:  "v1alpha1",
+		Resource: "helmreleaseproxies",
+	}
 )
 
 // WaitForAddons waits until every HelmChartProxy that matches the cluster
 // has a Ready HelmReleaseProxy for it. Without the CAAPH CRDs there is
 // nothing to wait for.
-func (w *DynamicWaiter) WaitForAddons(ctx context.Context, mgmtCluster *Cluster, clusterName, namespace string, opts WaitOptions) error {
+func (w *DynamicWaiter) WaitForAddons(
+	ctx context.Context,
+	mgmtCluster *Cluster,
+	clusterName, namespace string,
+	opts WaitOptions,
+) error {
 	const op = "wait-addons"
 	namespace, timeout, pollInterval := waitDefaults(namespace, opts)
 	dynClient, err := w.clientFor(mgmtCluster.KubeconfigPath)
 	if err != nil {
-		return &CAPIError{Operation: op, Cluster: clusterName, Err: fmt.Errorf("%w: %v", ErrClusterNotReady, err)}
+		return &CAPIError{
+			Operation: op,
+			Cluster:   clusterName,
+			Err:       fmt.Errorf("%w: %v", ErrClusterNotReady, err),
+		}
 	}
 	deadline := time.Now().Add(timeout)
 	for {
@@ -177,7 +287,16 @@ func (w *DynamicWaiter) WaitForAddons(ctx context.Context, mgmtCluster *Cluster,
 			return nil
 		}
 		if time.Now().After(deadline) {
-			return &CAPIError{Operation: op, Cluster: clusterName, Err: fmt.Errorf("%w: addons not ready after %v: %s", ErrClusterNotReady, timeout, strings.Join(pending, "; "))}
+			return &CAPIError{
+				Operation: op,
+				Cluster:   clusterName,
+				Err: fmt.Errorf(
+					"%w: addons not ready after %v: %s",
+					ErrClusterNotReady,
+					timeout,
+					strings.Join(pending, "; "),
+				),
+			}
 		}
 		select {
 		case <-ctx.Done():
@@ -189,15 +308,23 @@ func (w *DynamicWaiter) WaitForAddons(ctx context.Context, mgmtCluster *Cluster,
 
 // pendingAddons lists the matching HelmChartProxies without a Ready release
 // for the cluster, each with the reason it is pending.
-func pendingAddons(ctx context.Context, dynClient dynamic.Interface, clusterName, namespace string) ([]string, error) {
-	proxies, err := dynClient.Resource(helmChartProxiesGVR).Namespace(namespace).List(ctx, meta_v1.ListOptions{})
+func pendingAddons(
+	ctx context.Context,
+	dynClient dynamic.Interface,
+	clusterName, namespace string,
+) ([]string, error) {
+	proxies, err := dynClient.Resource(helmChartProxiesGVR).
+		Namespace(namespace).
+		List(ctx, meta_v1.ListOptions{})
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("listing HelmChartProxies in %s: %w", namespace, err)
 	}
-	releases, err := dynClient.Resource(helmReleaseProxiesGVR).Namespace(namespace).List(ctx, meta_v1.ListOptions{})
+	releases, err := dynClient.Resource(helmReleaseProxiesGVR).
+		Namespace(namespace).
+		List(ctx, meta_v1.ListOptions{})
 	if err != nil && !apierrors.IsNotFound(err) {
 		return nil, fmt.Errorf("listing HelmReleaseProxies in %s: %w", namespace, err)
 	}
@@ -241,7 +368,10 @@ func proxyMatchesCluster(proxy *unstructured.Unstructured, clusterName, namespac
 	return false
 }
 
-func releaseBelongsTo(rel *unstructured.Unstructured, proxyName, clusterName, namespace string) bool {
+func releaseBelongsTo(
+	rel *unstructured.Unstructured,
+	proxyName, clusterName, namespace string,
+) bool {
 	name, _, _ := unstructured.NestedString(rel.Object, "spec", "clusterRef", "name")
 	ns, _, _ := unstructured.NestedString(rel.Object, "spec", "clusterRef", "namespace")
 	if name != clusterName || (ns != "" && ns != namespace) {
@@ -279,7 +409,10 @@ func releaseState(rel *unstructured.Unstructured) string {
 }
 
 // connect builds the dynamic client and discovers the core API version.
-func (w *DynamicWaiter) connect(ctx context.Context, mgmtCluster *Cluster) (dynamic.Interface, string, error) {
+func (w *DynamicWaiter) connect(
+	ctx context.Context,
+	mgmtCluster *Cluster,
+) (dynamic.Interface, string, error) {
 	dynClient, err := w.clientFor(mgmtCluster.KubeconfigPath)
 	if err != nil {
 		return nil, "", err
@@ -294,7 +427,11 @@ func (w *DynamicWaiter) connect(ctx context.Context, mgmtCluster *Cluster) (dyna
 // coreClusterVersion reads the storage version of the core Cluster CRD, the
 // version every core object is read at.
 func coreClusterVersion(ctx context.Context, dynClient dynamic.Interface) (string, error) {
-	crdGVR := schema.GroupVersionResource{Group: "apiextensions.k8s.io", Version: "v1", Resource: "customresourcedefinitions"}
+	crdGVR := schema.GroupVersionResource{
+		Group:    "apiextensions.k8s.io",
+		Version:  "v1",
+		Resource: "customresourcedefinitions",
+	}
 	crd, err := dynClient.Resource(crdGVR).Get(ctx, coreClustersCRD, meta_v1.GetOptions{})
 	if err != nil {
 		return "", fmt.Errorf("reading %s: %w", coreClustersCRD, err)
@@ -314,7 +451,11 @@ func coreClusterVersion(ctx context.Context, dynClient dynamic.Interface) (strin
 }
 
 func clustersGVR(version string) schema.GroupVersionResource {
-	return schema.GroupVersionResource{Group: "cluster.x-k8s.io", Version: version, Resource: "clusters"}
+	return schema.GroupVersionResource{
+		Group:    "cluster.x-k8s.io",
+		Version:  version,
+		Resource: "clusters",
+	}
 }
 
 // waitDefaults fills the namespace, timeout and poll interval defaults.
@@ -334,10 +475,19 @@ func waitDefaults(namespace string, opts WaitOptions) (string, time.Duration, ti
 }
 
 // waitForAnyCondition polls a resource until one of the condition types is True.
-func (w *DynamicWaiter) waitForAnyCondition(ctx context.Context, dynClient dynamic.Interface, gvr schema.GroupVersionResource, resourceName, namespace string, conditionTypes []string, timeout, pollInterval time.Duration) error {
+func (w *DynamicWaiter) waitForAnyCondition(
+	ctx context.Context,
+	dynClient dynamic.Interface,
+	gvr schema.GroupVersionResource,
+	resourceName, namespace string,
+	conditionTypes []string,
+	timeout, pollInterval time.Duration,
+) error {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		obj, getErr := dynClient.Resource(gvr).Namespace(namespace).Get(ctx, resourceName, meta_v1.GetOptions{})
+		obj, getErr := dynClient.Resource(gvr).
+			Namespace(namespace).
+			Get(ctx, resourceName, meta_v1.GetOptions{})
 		if getErr == nil {
 			for _, conditionType := range conditionTypes {
 				if hasCondition(obj, conditionType, "True") {
@@ -353,17 +503,31 @@ func (w *DynamicWaiter) waitForAnyCondition(ctx context.Context, dynClient dynam
 		}
 	}
 
-	return fmt.Errorf("timed out waiting for %s/%s condition %v", gvr.Resource, resourceName, conditionTypes)
+	return fmt.Errorf(
+		"timed out waiting for %s/%s condition %v",
+		gvr.Resource,
+		resourceName,
+		conditionTypes,
+	)
 }
 
 // waitForAllConditions polls until every named condition is True on the
 // resource; a timeout names the ones still missing.
-func (w *DynamicWaiter) waitForAllConditions(ctx context.Context, dynClient dynamic.Interface, gvr schema.GroupVersionResource, resourceName, namespace string, conditionTypes []string, timeout, pollInterval time.Duration) error {
+func (w *DynamicWaiter) waitForAllConditions(
+	ctx context.Context,
+	dynClient dynamic.Interface,
+	gvr schema.GroupVersionResource,
+	resourceName, namespace string,
+	conditionTypes []string,
+	timeout, pollInterval time.Duration,
+) error {
 	deadline := time.Now().Add(timeout)
 	var missing []string
 	for time.Now().Before(deadline) {
 		missing = missing[:0]
-		obj, getErr := dynClient.Resource(gvr).Namespace(namespace).Get(ctx, resourceName, meta_v1.GetOptions{})
+		obj, getErr := dynClient.Resource(gvr).
+			Namespace(namespace).
+			Get(ctx, resourceName, meta_v1.GetOptions{})
 		if getErr == nil {
 			for _, conditionType := range conditionTypes {
 				if !hasCondition(obj, conditionType, "True") {
@@ -382,11 +546,22 @@ func (w *DynamicWaiter) waitForAllConditions(ctx context.Context, dynClient dyna
 		}
 	}
 
-	return fmt.Errorf("timed out waiting for %s/%s conditions %v (not True: %v)", gvr.Resource, resourceName, conditionTypes, missing)
+	return fmt.Errorf(
+		"timed out waiting for %s/%s conditions %v (not True: %v)",
+		gvr.Resource,
+		resourceName,
+		conditionTypes,
+		missing,
+	)
 }
 
 // areMachineDeploymentsReady checks if all machine deployments for the cluster have desired replicas ready.
-func (w *DynamicWaiter) areMachineDeploymentsReady(ctx context.Context, dynClient dynamic.Interface, gvr schema.GroupVersionResource, clusterName, namespace string) (bool, error) {
+func (w *DynamicWaiter) areMachineDeploymentsReady(
+	ctx context.Context,
+	dynClient dynamic.Interface,
+	gvr schema.GroupVersionResource,
+	clusterName, namespace string,
+) (bool, error) {
 	list, err := dynClient.Resource(gvr).Namespace(namespace).List(ctx, meta_v1.ListOptions{
 		LabelSelector: fmt.Sprintf("cluster.x-k8s.io/cluster-name=%s", clusterName),
 	})
@@ -418,7 +593,7 @@ func hasCondition(obj *unstructured.Unstructured, conditionType, status string) 
 	}
 
 	for _, c := range conditions {
-		condition, ok := c.(map[string]interface{})
+		condition, ok := c.(map[string]any)
 		if !ok {
 			continue
 		}

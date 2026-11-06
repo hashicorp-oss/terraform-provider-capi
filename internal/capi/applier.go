@@ -101,7 +101,12 @@ func (a *DynamicApplier) Apply(ctx context.Context, cluster *Cluster, manifest [
 			return &CAPIError{
 				Operation: "apply-manifest",
 				Cluster:   cluster.Name,
-				Err:       fmt.Errorf("%w: resolving resource type for %s: %v", ErrManifestApply, gvk, err),
+				Err: fmt.Errorf(
+					"%w: resolving resource type for %s: %v",
+					ErrManifestApply,
+					gvk,
+					err,
+				),
 			}
 		}
 
@@ -123,20 +128,38 @@ func (a *DynamicApplier) Apply(ctx context.Context, cluster *Cluster, manifest [
 			return &CAPIError{
 				Operation: "apply-manifest",
 				Cluster:   cluster.Name,
-				Err:       fmt.Errorf("%w: marshaling %s/%s: %v", ErrManifestApply, gvk.Kind, obj.GetName(), err),
+				Err: fmt.Errorf(
+					"%w: marshaling %s/%s: %v",
+					ErrManifestApply,
+					gvk.Kind,
+					obj.GetName(),
+					err,
+				),
 			}
 		}
 
 		force := true
-		_, err = resourceClient.Patch(ctx, obj.GetName(), k8stypes.ApplyPatchType, data, meta_v1.PatchOptions{
-			FieldManager: a.fieldManager,
-			Force:        &force,
-		})
+		_, err = resourceClient.Patch(
+			ctx,
+			obj.GetName(),
+			k8stypes.ApplyPatchType,
+			data,
+			meta_v1.PatchOptions{
+				FieldManager: a.fieldManager,
+				Force:        &force,
+			},
+		)
 		if err != nil {
 			return &CAPIError{
 				Operation: "apply-manifest",
 				Cluster:   cluster.Name,
-				Err:       fmt.Errorf("%w: applying %s/%s: %v", ErrManifestApply, gvk.Kind, obj.GetName(), err),
+				Err: fmt.Errorf(
+					"%w: applying %s/%s: %v",
+					ErrManifestApply,
+					gvk.Kind,
+					obj.GetName(),
+					err,
+				),
 			}
 		}
 	}
@@ -149,21 +172,41 @@ func (a *DynamicApplier) Apply(ctx context.Context, cluster *Cluster, manifest [
 // cascading delete to ensure all owned resources are cleaned up. A cluster
 // that does not exist returns ErrClusterNotFound; callers wait for the
 // object to disappear with Waiter.WaitForClusterDeleted.
-func (a *DynamicApplier) Delete(ctx context.Context, cluster *Cluster, clusterName, namespace string) error {
+func (a *DynamicApplier) Delete(
+	ctx context.Context,
+	cluster *Cluster,
+	clusterName, namespace string,
+) error {
 	const op = "delete-cluster"
 	clusters, err := a.clusters(ctx, cluster, namespace)
 	if err != nil {
-		return &CAPIError{Operation: op, Cluster: cluster.Name, Err: fmt.Errorf("%w: %v", ErrManifestDelete, err)}
+		return &CAPIError{
+			Operation: op,
+			Cluster:   cluster.Name,
+			Err:       fmt.Errorf("%w: %v", ErrManifestDelete, err),
+		}
 	}
 
 	// Delete the CAPI Cluster resource - CAPI controllers will cascade delete all owned resources.
 	propagationPolicy := meta_v1.DeletePropagationForeground
-	err = clusters.Delete(ctx, clusterName, meta_v1.DeleteOptions{PropagationPolicy: &propagationPolicy})
+	err = clusters.Delete(
+		ctx,
+		clusterName,
+		meta_v1.DeleteOptions{PropagationPolicy: &propagationPolicy},
+	)
 	if apierrors.IsNotFound(err) {
-		return &CAPIError{Operation: op, Cluster: cluster.Name, Err: fmt.Errorf("%w: %s/%s", ErrClusterNotFound, namespace, clusterName)}
+		return &CAPIError{
+			Operation: op,
+			Cluster:   cluster.Name,
+			Err:       fmt.Errorf("%w: %s/%s", ErrClusterNotFound, namespace, clusterName),
+		}
 	}
 	if err != nil {
-		return &CAPIError{Operation: op, Cluster: cluster.Name, Err: fmt.Errorf("%w: %v", ErrManifestDelete, err)}
+		return &CAPIError{
+			Operation: op,
+			Cluster:   cluster.Name,
+			Err:       fmt.Errorf("%w: %v", ErrManifestDelete, err),
+		}
 	}
 	return nil
 }
@@ -172,7 +215,11 @@ func (a *DynamicApplier) Delete(ctx context.Context, cluster *Cluster, clusterNa
 // ErrClusterNotFound; any other failure (unreachable management cluster,
 // CAPI not installed) is reported as is, so a caller never mistakes an
 // outage for a deleted cluster.
-func (a *DynamicApplier) Get(ctx context.Context, cluster *Cluster, clusterName, namespace string) (*unstructured.Unstructured, error) {
+func (a *DynamicApplier) Get(
+	ctx context.Context,
+	cluster *Cluster,
+	clusterName, namespace string,
+) (*unstructured.Unstructured, error) {
 	const op = "get-cluster"
 	clusters, err := a.clusters(ctx, cluster, namespace)
 	if err != nil {
@@ -180,7 +227,11 @@ func (a *DynamicApplier) Get(ctx context.Context, cluster *Cluster, clusterName,
 	}
 	obj, err := clusters.Get(ctx, clusterName, meta_v1.GetOptions{})
 	if apierrors.IsNotFound(err) {
-		return nil, &CAPIError{Operation: op, Cluster: cluster.Name, Err: fmt.Errorf("%w: %s/%s", ErrClusterNotFound, namespace, clusterName)}
+		return nil, &CAPIError{
+			Operation: op,
+			Cluster:   cluster.Name,
+			Err:       fmt.Errorf("%w: %s/%s", ErrClusterNotFound, namespace, clusterName),
+		}
 	}
 	if err != nil {
 		return nil, &CAPIError{Operation: op, Cluster: cluster.Name, Err: err}
@@ -191,16 +242,30 @@ func (a *DynamicApplier) Get(ctx context.Context, cluster *Cluster, clusterName,
 // Pause sets spec.paused on the Cluster, so CAPI creates no further Machines
 // or Workflows while management is handed over. A cluster that does not
 // exist returns ErrClusterNotFound.
-func (a *DynamicApplier) Pause(ctx context.Context, cluster *Cluster, clusterName, namespace string) error {
+func (a *DynamicApplier) Pause(
+	ctx context.Context,
+	cluster *Cluster,
+	clusterName, namespace string,
+) error {
 	const op = "pause-cluster"
 	clusters, err := a.clusters(ctx, cluster, namespace)
 	if err != nil {
 		return &CAPIError{Operation: op, Cluster: cluster.Name, Err: err}
 	}
 	patch := []byte(`{"spec":{"paused":true}}`)
-	_, err = clusters.Patch(ctx, clusterName, k8stypes.MergePatchType, patch, meta_v1.PatchOptions{})
+	_, err = clusters.Patch(
+		ctx,
+		clusterName,
+		k8stypes.MergePatchType,
+		patch,
+		meta_v1.PatchOptions{},
+	)
 	if apierrors.IsNotFound(err) {
-		return &CAPIError{Operation: op, Cluster: cluster.Name, Err: fmt.Errorf("%w: %s/%s", ErrClusterNotFound, namespace, clusterName)}
+		return &CAPIError{
+			Operation: op,
+			Cluster:   cluster.Name,
+			Err:       fmt.Errorf("%w: %s/%s", ErrClusterNotFound, namespace, clusterName),
+		}
 	}
 	if err != nil {
 		return &CAPIError{Operation: op, Cluster: cluster.Name, Err: err}
@@ -211,7 +276,11 @@ func (a *DynamicApplier) Pause(ctx context.Context, cluster *Cluster, clusterNam
 // ReadSecret implements SecretReader: the Secret's data, base64-decoded. A
 // Secret that does not exist returns ErrClusterNotFound, so a caller can try
 // the next candidate name.
-func (a *DynamicApplier) ReadSecret(ctx context.Context, cluster *Cluster, namespace, name string) (map[string]string, error) {
+func (a *DynamicApplier) ReadSecret(
+	ctx context.Context,
+	cluster *Cluster,
+	namespace, name string,
+) (map[string]string, error) {
 	const op = "read-secret"
 	dynClient, err := buildDynamicClient(cluster.KubeconfigPath)
 	if err != nil {
@@ -223,7 +292,11 @@ func (a *DynamicApplier) ReadSecret(ctx context.Context, cluster *Cluster, names
 	gvr := schema.GroupVersionResource{Version: "v1", Resource: "secrets"}
 	obj, err := dynClient.Resource(gvr).Namespace(namespace).Get(ctx, name, meta_v1.GetOptions{})
 	if apierrors.IsNotFound(err) {
-		return nil, &CAPIError{Operation: op, Cluster: cluster.Name, Err: fmt.Errorf("%w: secret %s/%s", ErrClusterNotFound, namespace, name)}
+		return nil, &CAPIError{
+			Operation: op,
+			Cluster:   cluster.Name,
+			Err:       fmt.Errorf("%w: secret %s/%s", ErrClusterNotFound, namespace, name),
+		}
 	}
 	if err != nil {
 		return nil, &CAPIError{Operation: op, Cluster: cluster.Name, Err: err}
@@ -233,7 +306,11 @@ func (a *DynamicApplier) ReadSecret(ctx context.Context, cluster *Cluster, names
 	for k, v := range data {
 		decoded, err := base64.StdEncoding.DecodeString(v)
 		if err != nil {
-			return nil, &CAPIError{Operation: op, Cluster: cluster.Name, Err: fmt.Errorf("decoding %s/%s key %s: %w", namespace, name, k, err)}
+			return nil, &CAPIError{
+				Operation: op,
+				Cluster:   cluster.Name,
+				Err:       fmt.Errorf("decoding %s/%s key %s: %w", namespace, name, k, err),
+			}
 		}
 		out[k] = string(decoded)
 	}
@@ -242,7 +319,11 @@ func (a *DynamicApplier) ReadSecret(ctx context.Context, cluster *Cluster, names
 
 // clusters returns the namespaced client for core Cluster objects at the
 // version the management cluster stores.
-func (a *DynamicApplier) clusters(ctx context.Context, cluster *Cluster, namespace string) (dynamic.ResourceInterface, error) {
+func (a *DynamicApplier) clusters(
+	ctx context.Context,
+	cluster *Cluster,
+	namespace string,
+) (dynamic.ResourceInterface, error) {
 	dynClient, err := buildDynamicClient(cluster.KubeconfigPath)
 	if err != nil {
 		return nil, err

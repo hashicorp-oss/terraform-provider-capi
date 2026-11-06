@@ -34,7 +34,11 @@ func NewManifestGenerator(resolver KindResolver) *CatalogManifestGenerator {
 }
 
 // Generate implements ManifestGenerator.
-func (g *CatalogManifestGenerator) Generate(ctx context.Context, mgmt *Cluster, opts GenerateOptions) ([]byte, error) {
+func (g *CatalogManifestGenerator) Generate(
+	ctx context.Context,
+	mgmt *Cluster,
+	opts GenerateOptions,
+) ([]byte, error) {
 	catalog, err := g.resolver.Kinds(ctx, mgmt)
 	if err != nil {
 		return nil, fmt.Errorf("discovering provider kinds: %w", err)
@@ -77,9 +81,16 @@ func newManifestBuilder(catalog *KindCatalog, opts GenerateOptions) (*manifestBu
 	if opts.Class != nil {
 		return b, nil
 	}
-	b.infra = providerNamed(opts.Providers, ProviderTypeInfrastructure, opts.Infrastructure.Provider)
+	b.infra = providerNamed(
+		opts.Providers,
+		ProviderTypeInfrastructure,
+		opts.Infrastructure.Provider,
+	)
 	if b.infra.Name == "" {
-		return nil, fmt.Errorf("generating cluster %s: no infrastructure provider: set infrastructure.provider, or a class", opts.ClusterName)
+		return nil, fmt.Errorf(
+			"generating cluster %s: no infrastructure provider: set infrastructure.provider, or a class",
+			opts.ClusterName,
+		)
 	}
 	b.cp = providerNamed(opts.Providers, ProviderTypeControlPlane, opts.ControlPlane.Provider)
 	if b.cp.Name == "" {
@@ -109,7 +120,10 @@ func (b *manifestBuilder) direct() ([]unstructured.Unstructured, error) {
 	name := b.opts.ClusterName
 	hasRef := b.opts.ControlPlane.Template != nil && b.opts.ControlPlane.Template.Name != ""
 	if !hasRef && b.opts.ControlPlane.TemplateSpec == nil {
-		return nil, fmt.Errorf("generating cluster %s: control_plane.infrastructure (a capi_machine_template ref) or control_plane.machine_spec is required without a class", name)
+		return nil, fmt.Errorf(
+			"generating cluster %s: control_plane.infrastructure (a capi_machine_template ref) or control_plane.machine_spec is required without a class",
+			name,
+		)
 	}
 	clusterGVK, err := b.catalog.Resolve(ProviderKey{ProviderTypeCore, "cluster-api"}, "Cluster")
 	if err != nil {
@@ -140,11 +154,17 @@ func (b *manifestBuilder) direct() ([]unstructured.Unstructured, error) {
 	// <Infra>Cluster: provider defaults, the provider entry's settings, then
 	// the cluster's own infrastructure spec.
 	infraCluster := b.newObject(infraClusterGVK, name)
-	infraCluster.Object["spec"] = buildSpec(buildSpec(providerDefaults(b.infra.key()), b.infra.ResourceConfig), b.opts.Infrastructure.Spec)
+	infraCluster.Object["spec"] = buildSpec(
+		buildSpec(providerDefaults(b.infra.key()), b.infra.ResourceConfig),
+		b.opts.Infrastructure.Spec,
+	)
 
 	// <CP>ControlPlane, on the referenced machine template.
 	controlPlane := b.newObject(cpGVK, cpName)
-	cpSpec := buildSpec(buildSpec(providerDefaults(b.cp.key()), b.cp.ResourceConfig), b.opts.ControlPlane.Spec)
+	cpSpec := buildSpec(
+		buildSpec(providerDefaults(b.cp.key()), b.cp.ResourceConfig),
+		b.opts.ControlPlane.Spec,
+	)
 	if b.opts.KubernetesVersion != "" {
 		cpSpec["version"] = b.opts.KubernetesVersion
 	}
@@ -184,14 +204,23 @@ func (b *manifestBuilder) direct() ([]unstructured.Unstructured, error) {
 }
 
 // templateObject renders an immutable template named <base>-<hash of spec>.
-func (b *manifestBuilder) templateObject(gvk schema.GroupVersionKind, base string, spec map[string]any) (unstructured.Unstructured, error) {
+func (b *manifestBuilder) templateObject(
+	gvk schema.GroupVersionKind,
+	base string,
+	spec map[string]any,
+) (unstructured.Unstructured, error) {
 	if spec == nil {
 		spec = map[string]any{}
 	}
 	full := map[string]any{"template": map[string]any{"spec": spec}}
 	h, err := specHash(full)
 	if err != nil {
-		return unstructured.Unstructured{}, fmt.Errorf("hashing %s %s spec: %w", gvk.Kind, base, err)
+		return unstructured.Unstructured{}, fmt.Errorf(
+			"hashing %s %s spec: %w",
+			gvk.Kind,
+			base,
+			err,
+		)
 	}
 	obj := b.newObject(gvk, base+"-"+h)
 	obj.Object["spec"] = full
@@ -203,7 +232,10 @@ func (b *manifestBuilder) templateObject(gvk schema.GroupVersionKind, base strin
 func (b *manifestBuilder) topology() ([]unstructured.Unstructured, error) {
 	name := b.opts.ClusterName
 	if b.opts.KubernetesVersion == "" {
-		return nil, fmt.Errorf("generating cluster %s: kubernetes_version is required with a class (Cluster.spec.topology.version)", name)
+		return nil, fmt.Errorf(
+			"generating cluster %s: kubernetes_version is required with a class (Cluster.spec.topology.version)",
+			name,
+		)
 	}
 	clusterGVK, err := b.catalog.Resolve(ProviderKey{ProviderTypeCore, "cluster-api"}, "Cluster")
 	if err != nil {
@@ -271,7 +303,11 @@ func (b *manifestBuilder) coreRefShape() RefShape {
 }
 
 // ref renders an object reference in the requested shape.
-func (b *manifestBuilder) ref(shape RefShape, gvk schema.GroupVersionKind, name string) map[string]any {
+func (b *manifestBuilder) ref(
+	shape RefShape,
+	gvk schema.GroupVersionKind,
+	name string,
+) map[string]any {
 	if shape == RefShapeLegacy {
 		return map[string]any{
 			"apiVersion": gvk.GroupVersion().String(),
@@ -284,7 +320,10 @@ func (b *manifestBuilder) ref(shape RefShape, gvk schema.GroupVersionKind, name 
 }
 
 // newObject returns an object of the given kind with the cluster-name label.
-func (b *manifestBuilder) newObject(gvk schema.GroupVersionKind, name string) unstructured.Unstructured {
+func (b *manifestBuilder) newObject(
+	gvk schema.GroupVersionKind,
+	name string,
+) unstructured.Unstructured {
 	obj := unstructured.Unstructured{Object: map[string]any{}}
 	obj.SetAPIVersion(gvk.GroupVersion().String())
 	obj.SetKind(gvk.Kind)

@@ -18,7 +18,7 @@ resource "capi_cluster_resource_set" "lb_pool" {
   ]
 
   prune = true
-  wait  = { ready = true, timeout = "10m" }
+  wait  = { ready = true }
 
   depends_on = [capi_helm_chart_proxy.cilium]
 }

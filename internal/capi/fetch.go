@@ -47,15 +47,25 @@ func ResolveFetchURL(p ProviderConfig, defaultURL string) (string, error) {
 		}
 	}
 	if owner == "" || repo == "" {
-		return "", fmt.Errorf("%w: %s provider %q is not built into clusterctl; set fetch_config.owner and fetch_config.repository, or fetch_config.url",
-			ErrUnknownProviderRepository, p.Type, p.Name)
+		return "", fmt.Errorf(
+			"%w: %s provider %q is not built into clusterctl; set fetch_config.owner and fetch_config.repository, or fetch_config.url",
+			ErrUnknownProviderRepository,
+			p.Type,
+			p.Name,
+		)
 	}
 
 	version := p.Version
 	if version == "" {
 		version = githubLatest
 	}
-	return fmt.Sprintf("https://github.com/%s/%s/releases/%s/%s", owner, repo, version, p.Type.ComponentsFile()), nil
+	return fmt.Sprintf(
+		"https://github.com/%s/%s/releases/%s/%s",
+		owner,
+		repo,
+		version,
+		p.Type.ComponentsFile(),
+	), nil
 }
 
 // githubOwnerRepo extracts owner and repository from a GitHub releases URL.

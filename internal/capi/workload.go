@@ -30,10 +30,19 @@ var ErrNoKubeconfig = errors.New("no kubeconfig for cluster")
 // ClusterKubeconfig reads a workload cluster's kubeconfig from the
 // `<cluster>-kubeconfig` Secret CAPI writes on the management cluster, the
 // way `clusterctl get kubeconfig` does.
-func (c *ObjectClient) ClusterKubeconfig(ctx context.Context, namespace, cluster string) ([]byte, error) {
+func (c *ObjectClient) ClusterKubeconfig(
+	ctx context.Context,
+	namespace, cluster string,
+) ([]byte, error) {
 	secret, err := c.Get(ctx, SecretGVK, namespace, cluster+"-kubeconfig")
 	if errors.Is(err, ErrObjectNotFound) {
-		return nil, fmt.Errorf("%w: Secret %s/%s-kubeconfig is not on %s", ErrNoKubeconfig, namespace, cluster, c.cluster.Name)
+		return nil, fmt.Errorf(
+			"%w: Secret %s/%s-kubeconfig is not on %s",
+			ErrNoKubeconfig,
+			namespace,
+			cluster,
+			c.cluster.Name,
+		)
 	}
 	if err != nil {
 		return nil, err
@@ -41,7 +50,12 @@ func (c *ObjectClient) ClusterKubeconfig(ctx context.Context, namespace, cluster
 	data, _, _ := unstructured.NestedStringMap(secret.Object, "data")
 	encoded, ok := data["value"]
 	if !ok || encoded == "" {
-		return nil, fmt.Errorf("%w: Secret %s/%s-kubeconfig has no value key", ErrNoKubeconfig, namespace, cluster)
+		return nil, fmt.Errorf(
+			"%w: Secret %s/%s-kubeconfig has no value key",
+			ErrNoKubeconfig,
+			namespace,
+			cluster,
+		)
 	}
 	raw, err := base64.StdEncoding.DecodeString(encoded)
 	if err != nil {
@@ -52,7 +66,10 @@ func (c *ObjectClient) ClusterKubeconfig(ctx context.Context, namespace, cluster
 
 // WorkloadClient connects to a workload cluster through its kubeconfig
 // Secret. The cleanup removes the kubeconfig file the connection needs.
-func (c *ObjectClient) WorkloadClient(ctx context.Context, namespace, cluster, fieldManager string) (*ObjectClient, func(), error) {
+func (c *ObjectClient) WorkloadClient(
+	ctx context.Context,
+	namespace, cluster, fieldManager string,
+) (*ObjectClient, func(), error) {
 	raw, err := c.ClusterKubeconfig(ctx, namespace, cluster)
 	if err != nil {
 		return nil, nil, err
@@ -67,7 +84,10 @@ func (c *ObjectClient) WorkloadClient(ctx context.Context, namespace, cluster, f
 		cleanup()
 		return nil, nil, fmt.Errorf("writing the kubeconfig of %s: %w", cluster, err)
 	}
-	client, err := NewObjectClient(&Cluster{Name: cluster, KubeconfigPath: path, Namespace: namespace}, fieldManager)
+	client, err := NewObjectClient(
+		&Cluster{Name: cluster, KubeconfigPath: path, Namespace: namespace},
+		fieldManager,
+	)
 	if err != nil {
 		cleanup()
 		return nil, nil, fmt.Errorf("connecting to %s: %w", cluster, err)

@@ -34,10 +34,16 @@ providers:
 FOO: bar
 `)
 	r := newOverlayReader()
-	r.AddOverride("tinkerbell", clusterctlv1.InfrastructureProviderType,
-		"https://github.com/overlay/cluster-api-provider-tinkerbell/releases/v1/infrastructure-components.yaml")
-	r.AddOverride("unifi", clusterctlv1.IPAMProviderType,
-		"https://github.com/ubiquiti-community/cluster-api-ipam-provider-unifi/releases/v0.4.1/ipam-components.yaml")
+	r.AddOverride(
+		"tinkerbell",
+		clusterctlv1.InfrastructureProviderType,
+		"https://github.com/overlay/cluster-api-provider-tinkerbell/releases/v1/infrastructure-components.yaml",
+	)
+	r.AddOverride(
+		"unifi",
+		clusterctlv1.IPAMProviderType,
+		"https://github.com/ubiquiti-community/cluster-api-ipam-provider-unifi/releases/v0.4.1/ipam-components.yaml",
+	)
 
 	if err := r.Init(context.Background(), path); err != nil {
 		t.Fatal(err)
@@ -55,7 +61,8 @@ FOO: bar
 		t.Errorf("overlay should win over file: %s", got.URL())
 	}
 	got, err = client.Providers().Get("custom", clusterctlv1.AddonProviderType)
-	if err != nil || got.URL() != "https://github.com/file-owner/custom/releases/latest/addon-components.yaml" {
+	if err != nil ||
+		got.URL() != "https://github.com/file-owner/custom/releases/latest/addon-components.yaml" {
 		t.Errorf("file-only provider must survive: %v %v", got, err)
 	}
 	if _, err := client.Providers().Get("unifi", clusterctlv1.IPAMProviderType); err != nil {
@@ -78,9 +85,14 @@ func TestOverlayReader_OverridesAddedAfterInitAreVisible(t *testing.T) {
 	if def.URL() == "" {
 		t.Fatal("expected clusterctl default URL")
 	}
-	r.AddOverride("docker", clusterctlv1.InfrastructureProviderType, "https://github.com/x/y/releases/v2/infrastructure-components.yaml")
+	r.AddOverride(
+		"docker",
+		clusterctlv1.InfrastructureProviderType,
+		"https://github.com/x/y/releases/v2/infrastructure-components.yaml",
+	)
 	after, err := client.Providers().Get("docker", clusterctlv1.InfrastructureProviderType)
-	if err != nil || after.URL() != "https://github.com/x/y/releases/v2/infrastructure-components.yaml" {
+	if err != nil ||
+		after.URL() != "https://github.com/x/y/releases/v2/infrastructure-components.yaml" {
 		t.Errorf("override added after Init must be visible: %v %v", after, err)
 	}
 }
@@ -110,14 +122,28 @@ func TestLookupDefaultProvider(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if def, exact := lookupDefaultProvider(client, ProviderConfig{Type: ProviderTypeInfrastructure, Name: "docker"}); def == nil || !exact {
+	if def, exact := lookupDefaultProvider(
+		client,
+		ProviderConfig{Type: ProviderTypeInfrastructure, Name: "docker"},
+	); def == nil ||
+		!exact {
 		t.Errorf("docker must be an exact default: %v %v", def, exact)
 	}
-	def, exact := lookupDefaultProvider(client, ProviderConfig{Type: ProviderTypeInfrastructure, Name: "tinkerbell"})
+	def, exact := lookupDefaultProvider(
+		client,
+		ProviderConfig{Type: ProviderTypeInfrastructure, Name: "tinkerbell"},
+	)
 	if def == nil || exact || def.Name() != "tinkerbell-tinkerbell" {
-		t.Errorf("tinkerbell must resolve through the tinkerbell-tinkerbell alias: %v %v", def, exact)
+		t.Errorf(
+			"tinkerbell must resolve through the tinkerbell-tinkerbell alias: %v %v",
+			def,
+			exact,
+		)
 	}
-	if def, _ := lookupDefaultProvider(client, ProviderConfig{Type: ProviderTypeIPAM, Name: "unifi"}); def != nil {
+	if def, _ := lookupDefaultProvider(
+		client,
+		ProviderConfig{Type: ProviderTypeIPAM, Name: "unifi"},
+	); def != nil {
 		t.Errorf("unifi must be unknown: %v", def)
 	}
 }

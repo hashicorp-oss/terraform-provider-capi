@@ -64,7 +64,8 @@ func TestManager_CreateCluster_Pivot_RecordsTheCheckpoint(t *testing.T) {
 			t.Errorf("step %s not recorded: %v", s, cp.Steps)
 		}
 	}
-	if cp.Bootstrap == nil || cp.Bootstrap.Name != "bm-bootstrap" || !strings.Contains(cp.WorkloadKubeconfig, "server:") {
+	if cp.Bootstrap == nil || cp.Bootstrap.Name != "bm-bootstrap" ||
+		!strings.Contains(cp.WorkloadKubeconfig, "server:") {
 		t.Errorf("checkpoint = %+v", cp)
 	}
 }
@@ -127,7 +128,9 @@ func TestManager_CreateCluster_ResumesAfterTheMove(t *testing.T) {
 	if len(pm.bootstrapper.CreateCalls) != 0 {
 		t.Error("the bootstrap cluster is not created or reused after the move")
 	}
-	if result.Endpoint != "https://10.1.40.100:6443" || result.ProviderSecrets["bm-talos/bundle"] != "secrets-yaml" || result.Phase != PhaseReady {
+	if result.Endpoint != "https://10.1.40.100:6443" ||
+		result.ProviderSecrets["bm-talos/bundle"] != "secrets-yaml" ||
+		result.Phase != PhaseReady {
 		t.Errorf("result = %+v", result)
 	}
 	if !cp.Done(StepBootstrapDeleted) {
@@ -140,7 +143,11 @@ func TestManager_CreateCluster_ResumesAfterTheMove(t *testing.T) {
 	// Once torn down, the bootstrap is never touched again: a Kairos node is
 	// a cluster member by then.
 	mgr, pm = newPivotMocks()
-	opts.Checkpoint = &Checkpoint{Steps: []Step{StepMoved, StepBootstrapDeleted}, Bootstrap: cp.Bootstrap, WorkloadKubeconfig: cp.WorkloadKubeconfig}
+	opts.Checkpoint = &Checkpoint{
+		Steps:              []Step{StepMoved, StepBootstrapDeleted},
+		Bootstrap:          cp.Bootstrap,
+		WorkloadKubeconfig: cp.WorkloadKubeconfig,
+	}
 	if _, err := mgr.CreateCluster(context.Background(), opts); err != nil {
 		t.Fatal(err)
 	}
@@ -155,7 +162,8 @@ func TestManager_CreateCluster_ResumeAfterTheMoveNeedsTheKubeconfig(t *testing.T
 	opts.Checkpoint = &Checkpoint{Steps: []Step{StepMoved}}
 	_, err := mgr.CreateCluster(context.Background(), opts)
 	var pe *PhaseError
-	if !errors.As(err, &pe) || pe.Phase != PhaseMoved || !strings.Contains(err.Error(), "no kubeconfig") {
+	if !errors.As(err, &pe) || pe.Phase != PhaseMoved ||
+		!strings.Contains(err.Error(), "no kubeconfig") {
 		t.Fatalf("err = %v", err)
 	}
 }
@@ -188,19 +196,32 @@ func TestManager_CreateCluster_ReadinessFailureAfterThePivotKeepsTheCredential(t
 	if !errors.As(err, &pe) || pe.Phase != PhasePivoted {
 		t.Fatalf("err = %v", err)
 	}
-	if pe.Result == nil || pe.Result.ProviderSecrets["bm-talos/bundle"] != "secrets-yaml" || pe.Bootstrap != nil {
-		t.Errorf("the credential travels with the error and the bootstrap is gone: %+v %+v", pe.Result, pe.Bootstrap)
+	if pe.Result == nil || pe.Result.ProviderSecrets["bm-talos/bundle"] != "secrets-yaml" ||
+		pe.Bootstrap != nil {
+		t.Errorf(
+			"the credential travels with the error and the bootstrap is gone: %+v %+v",
+			pe.Result,
+			pe.Bootstrap,
+		)
 	}
 }
 
 func TestManager_DeleteCluster_SelfManagedRecordsTheMove(t *testing.T) {
 	bootstrapper := &MockBootstrapper{}
-	waiter := &MockWaiter{WaitForClusterDeletedFunc: func(context.Context, *Cluster, string, string, WaitOptions) error {
-		return errors.New("machines still deleting")
-	}}
+	waiter := &MockWaiter{
+		WaitForClusterDeletedFunc: func(context.Context, *Cluster, string, string, WaitOptions) error {
+			return errors.New("machines still deleting")
+		},
+	}
 	mgr := NewManager(
-		WithBootstrapper(bootstrapper), WithInstaller(&MockInstaller{}), WithApplier(&MockApplier{}),
-		WithQuiescer(&MockQuiescer{}), WithMover(&MockMover{}), WithWaiter(waiter),
+		WithBootstrapper(
+			bootstrapper,
+		),
+		WithInstaller(&MockInstaller{}),
+		WithApplier(&MockApplier{}),
+		WithQuiescer(&MockQuiescer{}),
+		WithMover(&MockMover{}),
+		WithWaiter(waiter),
 	)
 	cp := &DeleteCheckpoint{}
 	err := mgr.DeleteCluster(context.Background(), DeleteClusterOptions{
@@ -219,14 +240,26 @@ func TestManager_DeleteCluster_SelfManagedRecordsTheMove(t *testing.T) {
 // the deletion fails instead of reporting a cluster that may still run as
 // deleted.
 func TestManager_DeleteCluster_SelfManagedLostBootstrapIsAnError(t *testing.T) {
-	bootstrapper := &MockBootstrapper{ExistsFunc: func(context.Context, string) (bool, error) { return false, nil }}
-	applier := &MockApplier{GetFunc: func(_ context.Context, _ *Cluster, name, _ string) (*unstructured.Unstructured, error) {
-		return nil, notFound(name)
-	}}
-	mgr := NewManager(WithBootstrapper(bootstrapper), WithApplier(applier), WithWaiter(&MockWaiter{}))
+	bootstrapper := &MockBootstrapper{
+		ExistsFunc: func(context.Context, string) (bool, error) { return false, nil },
+	}
+	applier := &MockApplier{
+		GetFunc: func(_ context.Context, _ *Cluster, name, _ string) (*unstructured.Unstructured, error) {
+			return nil, notFound(name)
+		},
+	}
+	mgr := NewManager(
+		WithBootstrapper(bootstrapper),
+		WithApplier(applier),
+		WithWaiter(&MockWaiter{}),
+	)
 	err := mgr.DeleteCluster(context.Background(), DeleteClusterOptions{
-		Name: "test", ManagementKubeconfig: "/tmp/workload", SelfManaged: true,
-		Checkpoint: &DeleteCheckpoint{MovedTo: &BootstrapRecord{Type: "kind", Name: "test-bootstrap", Host: "runner-a"}},
+		Name:                 "test",
+		ManagementKubeconfig: "/tmp/workload",
+		SelfManaged:          true,
+		Checkpoint: &DeleteCheckpoint{
+			MovedTo: &BootstrapRecord{Type: "kind", Name: "test-bootstrap", Host: "runner-a"},
+		},
 	})
 	if err == nil || !strings.Contains(err.Error(), "no longer exists") {
 		t.Fatalf("err = %v", err)

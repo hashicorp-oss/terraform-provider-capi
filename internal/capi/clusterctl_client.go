@@ -22,7 +22,12 @@ import (
 // resolves a provider by name (init, upgrade, delete) must go through this so
 // the same names work everywhere. The config client is returned for callers
 // that need to read the cluster's provider inventory.
-func newClusterctlClient(ctx context.Context, configPath string, providers ProviderSet, variables map[string]string) (clusterctlclient.Client, config.Client, error) {
+func newClusterctlClient(
+	ctx context.Context,
+	configPath string,
+	providers ProviderSet,
+	variables map[string]string,
+) (clusterctlclient.Client, config.Client, error) {
 	configClient, _, err := newProviderConfigClient(ctx, configPath, providers)
 	if err != nil {
 		return nil, nil, err
@@ -31,10 +36,14 @@ func newClusterctlClient(ctx context.Context, configPath string, providers Provi
 		configClient.Variables().Set(k, v)
 	}
 	repoFactory := NewCustomizingRepoFactory(configClient, providers.Customized())
-	c, err := clusterctlclient.New(ctx, configPath,
+	c, err := clusterctlclient.New(
+		ctx,
+		configPath,
 		clusterctlclient.InjectConfig(configClient),
 		clusterctlclient.InjectRepositoryFactory(repoFactory),
-		clusterctlclient.InjectClusterClientFactory(customizingClusterFactory(configClient, repoFactory)),
+		clusterctlclient.InjectClusterClientFactory(
+			customizingClusterFactory(configClient, repoFactory),
+		),
 	)
 	if err != nil {
 		return nil, nil, err
@@ -48,18 +57,23 @@ func newClusterctlClient(ctx context.Context, configPath string, providers Provi
 // factory to init; upgrade apply fetches components through the cluster
 // client, and without this an upgrade would drop every customization init
 // applied.
-func customizingClusterFactory(configClient config.Client, repoFactory clusterctlclient.RepositoryClientFactory) clusterctlclient.ClusterClientFactory {
+func customizingClusterFactory(
+	configClient config.Client,
+	repoFactory clusterctlclient.RepositoryClientFactory,
+) clusterctlclient.ClusterClientFactory {
 	return func(input clusterctlclient.ClusterClientFactoryInput) (cluster.Client, error) {
 		return cluster.New(
 			cluster.Kubeconfig(input.Kubeconfig),
 			configClient,
 			cluster.InjectYamlProcessor(input.Processor),
-			cluster.InjectRepositoryFactory(func(ctx context.Context, provider config.Provider, _ config.Client, _ ...repository.Option) (repository.Client, error) {
-				return repoFactory(ctx, clusterctlclient.RepositoryClientFactoryInput{
-					Provider:  clusterctlclient.Provider(provider),
-					Processor: input.Processor,
-				})
-			}),
+			cluster.InjectRepositoryFactory(
+				func(ctx context.Context, provider config.Provider, _ config.Client, _ ...repository.Option) (repository.Client, error) {
+					return repoFactory(ctx, clusterctlclient.RepositoryClientFactoryInput{
+						Provider:  clusterctlclient.Provider(provider),
+						Processor: input.Processor,
+					})
+				},
+			),
 		), nil
 	}
 }
@@ -67,7 +81,11 @@ func customizingClusterFactory(configClient config.Client, repoFactory clusterct
 // newProviderConfigClient creates the overlay-backed clusterctl config client
 // and registers a URL override for every provider that needs one. The reader
 // is returned for tests.
-func newProviderConfigClient(ctx context.Context, configPath string, providers ProviderSet) (config.Client, *overlayReader, error) {
+func newProviderConfigClient(
+	ctx context.Context,
+	configPath string,
+	providers ProviderSet,
+) (config.Client, *overlayReader, error) {
 	configClient, reader, err := newOverlayConfigClient(ctx, configPath)
 	if err != nil {
 		return nil, nil, fmt.Errorf("creating clusterctl config client: %w", err)
