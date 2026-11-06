@@ -1,0 +1,54 @@
+version: "0.1"
+name: talos-install-template
+global_timeout: 9800
+tasks:
+  - name: "install-talos"
+    worker: "{{.device_1}}"
+    volumes:
+      - /dev:/dev
+      - /dev/console:/dev/console
+      - /lib/firmware:/lib/firmware:ro
+    actions:
+      # One action in place of image2disk, taloscmdline and talosmeta.
+      #
+      # The three-step template builds the Factory URL from
+      # Metadata.Instance.OperatingSystem.Slug, which names a bare
+      # talos-<version>-<arch> image. That is fine for a machine whose
+      # schematic is the default one and wrong for anything carrying
+      # extensions: a node needing amd-ucode and the NVIDIA modules would be
+      # imaged without them and then fail to load a driver that was never
+      # installed.
+      #
+      # talos2disk instead reads machine.install.image -- the installer
+      # reference CABPT renders from spec.imageFactory, which carries the
+      # resolved schematic id -- so the image written to disk is the one the
+      # class actually asked for. It sets the kernel arguments in the UKI and
+      # writes the network configuration to META in the same pass, which is
+      # what the other two actions did separately.
+      - name: "Install Talos"
+        image: ghcr.io/sidero-community/actions/talos2disk:latest
+        timeout: 9600
+        environment:
+          HARDWARE: {{ dict "metadata" (pick .hardware.metadata "name" "namespace" "labels" "annotations") "spec" .hardware.spec "status" (dig "status" (dict) .hardware) | toJson | quote }}
+          KERNEL_ARGS: "console=tty0 net.ifnames=0 talos.config=${talos_config_url}"
+
+      # Unchanged from the staged template: waitdaemon reports success to tink
+      # immediately, then respawns to reboot after WAIT_SECONDS. "reboot -f" is
+      # required -- plain reboot only signals PID 1, which CaptainOS ignores.
+      - name: "reboot"
+        image: ghcr.io/jacobweinstock/waitdaemon:0.4.3
+        timeout: 90
+        pid: host
+        namespaces:
+          pid: host
+        environment:
+          IMAGE: alpine:3.22
+          WAIT_SECONDS: 10
+          CONTAINER_RUNTIME: nerdctl
+        volumes:
+          - /run/containerd/containerd.sock:/run/containerd/containerd.sock
+          - /var/lib/containerd:/var/lib/containerd
+          - /var/lib/nerdctl:/var/lib/nerdctl
+          - /opt/cni/bin:/opt/cni/bin
+          - /etc/cni/net.d:/etc/cni/net.d
+        command: ["reboot", "-f"]

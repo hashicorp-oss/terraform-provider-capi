@@ -1,0 +1,99 @@
+version: "0.1"
+name: talos-install-template
+global_timeout: 9800
+tasks:
+  - name: "install-talos"
+    worker: "{{.device_1}}"
+    volumes:
+      - /dev:/dev
+      - /dev/console:/dev/console
+      - /lib/firmware:/lib/firmware:ro
+    actions:
+      # Stream the Factory's raw metal image straight onto the install disk
+      # rather than running `installer install`. The image is
+      # environment-agnostic: the two actions after it stamp the machine and
+      # environment specific bits (talos.config, network) onto the disk.
+      #
+      # OsSlug is "talos-<version>-<arch>", so the last dash-separated field is
+      # the architecture the Factory names the image after.
+      - name: "Write Talos image"
+        image: quay.io/tinkerbell/actions/image2disk:latest
+        timeout: 9600
+        namespaces:
+          network: host
+        environment:
+          # Single-quoted: the workflow controller runs the Go template over the
+          # raw file text before any YAML parsing, so a YAML \" escape would reach
+          # the template parser as a stray backslash and fail to parse.
+          IMG_URL: 'https://factory.talos.dev/image/{{ .Hardware.Metadata.Instance.OperatingSystem.Slug }}/{{ .Hardware.Metadata.Instance.OperatingSystem.Version }}/metal-{{ .Hardware.Metadata.Instance.OperatingSystem.OsSlug | splitList "-" | last }}.raw.zst'
+          DEST_DISK: "{{ index .Hardware.Disks 0 }}"
+          COMPRESSED: "true"
+          # Factory pulls have been intermittent from this network; retry rather
+          # than failing the whole workflow on a single transport hiccup.
+          RETRY_ENABLED: "true"
+          RETRY_DURATION_MINUTES: "10"
+          TEXT_LOGGING: "true"
+
+      # Point the node at tootles for its machine configuration by setting
+      # talos.config in the kernel command line of the UKI the image ships
+      # (EFI/Linux/Talos-*.efi on the EFI partition; both the default boot and
+      # the reset profile are updated). The URL is deploy-level and rendered in
+      # by terraform (templatefile, modules/cluster/locals.tf) from the
+      # Tinkerbell IP, so the Factory schematic no longer has to bake it into
+      # the image. A key=value argument replaces any existing one with that
+      # key, so an image that still carries it is simply left as is.
+      # net.ifnames=0 keeps kernel interface names (eth0), matching what the
+      # schematic has always set and what the META action below assumes.
+      - name: "Set kernel arguments"
+        image: ${actions_repository}/taloscmdline:${actions_tag}
+        timeout: 300
+        environment:
+          DEST_DISK: "{{ index .Hardware.Disks 0 }}"
+          KERNEL_ARGS: "net.ifnames=0 talos.config={{ .metadata_url }}/2009-04-04/user-data"
+
+      # Give the node its addressing before it can fetch a config: the static
+      # address, gateway, DNS and NTP from Hardware.spec.interfaces[].dhcp
+      # become Talos platform network configuration in META key 0xa. The
+      # Hardware data is rendered straight from the Workflow template
+      # (.hardware is the Hardware object by JSON field names); dig tolerates
+      # absent fields and only interfaces plus metadata.instance are passed,
+      # so spec.userData never leaves the Hardware object.
+      - name: "Write network configuration to META"
+        image: ${actions_repository}/talosmeta:${actions_tag}
+        timeout: 120
+        environment:
+          DEST_DISK: "{{ index .Hardware.Disks 0 }}"
+          LINK_NAMING: kernel
+          HARDWARE_SPEC: {{ dict "interfaces" (dig "interfaces" (list) .hardware.spec) "metadata" (dict "instance" (dict "hostname" (dig "metadata" "instance" "hostname" "" .hardware.spec) "ips" (dig "metadata" "instance" "ips" (list) .hardware.spec))) | toJson | quote }}
+
+      # waitdaemon reports success to tink immediately, then respawns itself
+      # to wait WAIT_SECONDS and finally runs IMAGE with this action's own
+      # inherited config (privileged, pid: host, volumes). On CaptainOS the
+      # runtime is nerdctl (these containerd/nerdctl mounts are the
+      # documented CaptainOS volume set); CONTAINER_RUNTIME is pinned rather
+      # than auto-detected for determinism. The command MUST be
+      # "reboot -f": plain "reboot" only signals PID 1, which CaptainOS's
+      # init ignores — observed live as a silent no-op that left the machine
+      # parked in the OSIE after workflow success (waitdaemon by design
+      # cannot surface that failure). -f invokes the reboot(2) syscall
+      # directly, which the inherited privileges permit.
+      # Both pid fields are set deliberately: namespaces.pid is the current
+      # schema (and takes precedence where supported), while the top-level
+      # pid is the deprecated field older deployed agents honor.
+      - name: "reboot"
+        image: ghcr.io/jacobweinstock/waitdaemon:0.4.3
+        timeout: 90
+        pid: host
+        namespaces:
+          pid: host
+        environment:
+          IMAGE: alpine:3.22
+          WAIT_SECONDS: 10
+          CONTAINER_RUNTIME: nerdctl
+        volumes:
+          - /run/containerd/containerd.sock:/run/containerd/containerd.sock
+          - /var/lib/containerd:/var/lib/containerd
+          - /var/lib/nerdctl:/var/lib/nerdctl
+          - /opt/cni/bin:/opt/cni/bin
+          - /etc/cni/net.d:/etc/cni/net.d
+        command: ["reboot", "-f"]
