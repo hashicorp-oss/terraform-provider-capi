@@ -477,6 +477,8 @@ github.com/subosito/gotenv v1.6.0 h1:9NlTDc1FTs4qu0DDq7AEtTPNw6SVm7uBMsUCUjABIf8
 github.com/subosito/gotenv v1.6.0/go.mod h1:Dk4QP5c2W3ibzajGcXpNraDfq2IrhjMIvMSWPKKo0FU=
 github.com/tinkerbell-community/bmclib/v2 v2.0.0-20260910214435-7baaf88e8399 h1:G+vMXfx3yQWTUdA6dHvFGFHkXhkij1beOhP8QTmaTLI=
 github.com/tinkerbell-community/bmclib/v2 v2.0.0-20260910214435-7baaf88e8399/go.mod h1:73+Ob5JvhfuzUnQV1yo3RFUDudYIyafWlYo7hKWMhfg=
+github.com/tinkerbell-community/iamt v0.0.0-20260912234732-db318e32dd05 h1:HfgPM4tDkqOSV9XsaLkZKgmMnT51vSLi7CCeLzBJ2/Y=
+github.com/tinkerbell-community/iamt v0.0.0-20260912234732-db318e32dd05/go.mod h1:YIRnIMQDMSyh8LzMStYTGI0P1xETz8ry1Efb+Wmtkyg=
 github.com/vmihailenco/msgpack v3.3.3+incompatible/go.mod h1:fy3FlTQTDXWkZ7Bh6AcGMlsjHatGryHQYUTf1ShIgkk=
 github.com/vmihailenco/msgpack v4.0.4+incompatible h1:dSLoQfGFAo3F6OoNhwUmLwVgaUXK79GlxNBwueZn0xI=
 github.com/vmihailenco/msgpack v4.0.4+incompatible/go.mod h1:fy3FlTQTDXWkZ7Bh6AcGMlsjHatGryHQYUTf1ShIgkk=

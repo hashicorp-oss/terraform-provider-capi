@@ -231,4 +231,4 @@ tool (
 
 replace github.com/bmc-toolbox/bmclib/v2 => github.com/tinkerbell-community/bmclib/v2 v2.0.0-20260910214435-7baaf88e8399
 
-replace github.com/jacobweinstock/iamt => /home/appkins/src/tinkerbell-community/iamt
+replace github.com/jacobweinstock/iamt => github.com/tinkerbell-community/iamt v0.0.0-20260912234732-db318e32dd05
